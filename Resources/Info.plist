@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  BoxShot 的 Info.plist 模板。
+  版本号留 __BOXSHOT_VERSION__ / __BOXSHOT_BUILD__ 占位符，由 build-app.sh 注入。
+-->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>zh_CN</string>
+	<key>CFBundleDisplayName</key>
+	<string>BoxShot</string>
+	<key>CFBundleExecutable</key>
+	<string>BoxShot</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.pcxx.boxshot</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>BoxShot</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>__BOXSHOT_VERSION__</string>
+	<key>CFBundleVersion</key>
+	<string>__BOXSHOT_BUILD__</string>
+
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.graphics-design</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>BoxShot —— 轻量级截图与录屏工具 · ccvi1223</string>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+
+	<!--
+	  LSUIElement = true：菜单栏常驻工具，启动时不占 Dock。
+	  贴图窗口 / 编辑器窗口照常弹出，不受这个身份影响。
+	-->
+	<key>LSUIElement</key>
+	<true/>
+
+	<!--
+	  录屏要开麦克风（旁白）和摄像头（画中画），TCC 弹窗里的说明文案
+	  就来自这两个键。缺了它们系统会直接拒绝访问对应设备。
+	-->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>BoxShot 录制屏幕时可以同步收录麦克风声音（可在设置中关闭）。</string>
+	<key>NSCameraUsageDescription</key>
+	<string>BoxShot 录制屏幕时可以把摄像头画面以画中画形式合成进视频（可在设置中关闭）。</string>
+
+	<key>NSSupportsAutomaticTermination</key>
+	<false/>
+	<key>NSSupportsSuddenTermination</key>
+	<false/>
+</dict>
+</plist>

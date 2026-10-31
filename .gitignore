@@ -1,0 +1,20 @@
+# ---- BoxShot ----
+.DS_Store
+._*
+
+# 编译产物与中间物：体积大且可重建，不进版本库
+.build/
+.swiftpm/
+dist/
+*.app
+DerivedData/
+
+# 🔴 VERSION 与 VERSION.fingerprint **必须入库**。
+# 它们不进版本库的话，新克隆一份就会凭空多涨一个版本号。
+# 见 build-app.sh 里「关于版本号」一节。
+
+# 工具侧会话数据，不是项目产物
+.workbuddy/
+
+# 运行日志
+*.log
