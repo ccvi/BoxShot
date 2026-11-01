@@ -22,9 +22,10 @@ final class EditorDocument: ObservableObject {
     /// 拖动中的原始形状（endMove 时用它生成撤销点）
     private var moveOrigin: AnnotationShape?
 
-    init(image: CGImage) {
+    init(image: CGImage, shapes: [AnnotationShape] = []) {
         self.baseImage = image
         self.effects = EffectImages(base: image)
+        self.shapes = shapes
     }
 
     var imageSize: CGSize {
@@ -111,6 +112,27 @@ final class EditorDocument: ObservableObject {
         if let lineWidth { shapes[idx].lineWidth = lineWidth }
     }
 
+    // ── 裁剪 ────────────────────────────────────────────────
+
+    /// 裁剪结果：裁好的底图 + 平移到新原点的标注。
+    ///
+    /// 裁剪不做成"改文档状态"，而是产出一份新文档的原料 ——
+    /// 两个编辑器（浮层 / 独立窗口）都用"关掉自己、按新尺寸重开"来落地，
+    /// 这样窗口尺寸、手柄、坐标换算全都不用改，也不会有半个状态留在旧尺寸里。
+    func croppedResult(to rect: CGRect) -> (image: CGImage, shapes: [AnnotationShape])? {
+        let bounds = CGRect(origin: .zero, size: imageSize)
+        let target = rect.intersection(bounds).integral
+        guard target.width >= 8, target.height >= 8 else { return nil }
+        guard let cropped = baseImage.cropping(to: target) else { return nil }
+
+        // 只留还在画面里的标注（整条都被裁掉的没有意义）
+        let kept = shapes.filter { shape in
+            guard let box = shape.displayBounds else { return false }
+            return box.intersects(target)
+        }.map { $0.translated(dx: -target.minX, dy: -target.minY) }
+        return (cropped, kept)
+    }
+
     // ── 成品输出 ──
 
     func rendered() -> CGImage? {
@@ -145,6 +167,8 @@ struct EditorView: View {
     var onPin: () -> Void
     var onOCR: () -> Void
     var onClose: () -> Void
+    /// 裁剪完成：窗口控制器按新图重开一个编辑器
+    var onCrop: ((CGImage, [AnnotationShape]) -> Void)? = nil
 
     /// 显示缩放：视图点 → 图像像素
     @State private var fitScale: CGFloat = 1
@@ -154,6 +178,9 @@ struct EditorView: View {
     @State private var statusMessage: String = ""
     /// 选择工具拖动中的上一次像素坐标
     @State private var selectDragLast: CGPoint?
+    /// 裁剪：拖出的保留范围（图像像素坐标）
+    @State private var cropRect: CGRect?
+    @State private var cropAnchor: CGPoint?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -177,6 +204,36 @@ struct EditorView: View {
                 }
         }
         .onAppear { measureFit() }
+        .overlay(alignment: .bottom) {
+            if cropRect != nil { cropBar }
+        }
+    }
+
+    /// 裁剪确认条：⏎ 应用 / ⎋ 取消（键盘快捷键挂在按钮上，SwiftUI 会自动接管）
+    private var cropBar: some View {
+        HStack(spacing: 10) {
+            Text(cropRect.map { "裁剪为 \(Int($0.width)) × \(Int($0.height)) px" } ?? "")
+                .font(.callout)
+                .monospacedDigit()
+            Button("应用（⏎）") { applyCrop() }
+                .keyboardShortcut(.return, modifiers: [])
+                .buttonStyle(.borderedProminent)
+            Button("取消") { cropRect = nil; cropAnchor = nil }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .background(.thickMaterial, in: Capsule())
+        .padding(.bottom, 12)
+    }
+
+    private func applyCrop() {
+        guard let rect = cropRect, let result = doc.croppedResult(to: rect) else {
+            cropRect = nil
+            cropAnchor = nil
+            return
+        }
+        cropRect = nil
+        cropAnchor = nil
+        onCrop?(result.image, result.shapes)
     }
 
     private var displaySize: CGSize {
@@ -208,6 +265,16 @@ struct EditorView: View {
                                        with: .color(.accentColor),
                                        style: StrokeStyle(lineWidth: 1.5 / max(fitScale, 0.05),
                                                           dash: [dash, dash * 0.8]))
+                    }
+                    // 裁剪取景：范围外压暗（even-odd 填充做"挖洞"）
+                    if let crop = cropRect, crop.width > 1, crop.height > 1 {
+                        var mask = Path()
+                        mask.addRect(CGRect(origin: .zero, size: doc.imageSize))
+                        mask.addRect(crop)
+                        context.fill(mask, with: .color(.black.opacity(0.5)),
+                                     style: FillStyle(eoFill: true))
+                        context.stroke(Path(crop), with: .color(.white),
+                                       lineWidth: 1.5 / max(fitScale, 0.05))
                     }
                 }
                 .frame(width: displaySize.width, height: displaySize.height)
@@ -251,6 +318,12 @@ struct EditorView: View {
                 guard doc.imageSize.width > 0 else { return }
                 let p = clampToImage(CGPoint(x: value.location.x / fitScale,
                                              y: value.location.y / fitScale))
+                if doc.tool == .crop {
+                    let anchor = cropAnchor ?? p
+                    cropAnchor = anchor
+                    cropRect = CGRect(from: anchor, to: p)
+                    return
+                }
                 if doc.tool == .select {
                     // 拖动选中标注：按下起点命中并锁定，之后按位移平移
                     if selectDragLast == nil {
@@ -279,6 +352,12 @@ struct EditorView: View {
                 }
             }
             .onEnded { _ in
+                if doc.tool == .crop {
+                    cropAnchor = nil
+                    // 太小就是误触：直接清掉，别留一个 2×3 的裁剪框
+                    if let rect = cropRect, rect.width < 8 || rect.height < 8 { cropRect = nil }
+                    return
+                }
                 if doc.tool == .select {
                     if selectDragLast != nil { doc.endMoveSelected() }
                     selectDragLast = nil
@@ -359,7 +438,7 @@ struct EditorView: View {
         let width = max(1, shape.lineWidth)
 
         switch shape.tool {
-        case .select:
+        case .select, .crop:
             return
         case .pen, .marker:
             guard shape.points.count >= 2 else { return }

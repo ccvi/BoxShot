@@ -31,16 +31,57 @@ final class OverlayEditorController: NSObject {
     private var monitors: [Any] = []
     /// 本次截图是否已落盘（保存过 / 自动保存过就不再重复写）
     private var didPersist = false
+    /// 裁剪后要"重开"：这段不许触发自动保存，否则会把裁剪前的图落盘
+    private var suppressAutosave = false
 
     /// 关闭回调（AppModel 用来清引用）
     var onClose: (() -> Void)?
 
+    // ── 裁剪 ────────────────────────────────────────────────
+
+    /// 有待确认的裁剪就撤掉它并返回 true（Esc 用：先撤裁剪，再按一次才关浮层）
+    @discardableResult
+    func cancelCropIfPending() -> Bool {
+        guard contentView?.hasPendingCrop == true else { return false }
+        contentView?.cancelCrop()
+        return true
+    }
+
+    /// 应用裁剪：裁好图 + 平移到新原点的标注，原位置重开一个浮层。
+    ///
+    /// 不原地改 document（imageRect / 手柄 / 面板尺寸都是 init 时定死的），
+    /// 改成"关掉自己→按新尺寸重开"：坐标换算只有一套，不会留下半个旧状态。
+    @discardableResult
+    func applyCropIfPending() -> Bool {
+        guard let rect = contentView?.pendingCropRect else { return false }
+        guard let result = doc.croppedResult(to: rect) else {
+            contentView?.cancelCrop()
+            return true
+        }
+        let frame = croppedFrame(for: rect)
+        suppressAutosave = true
+        close()
+        model?.openOverlayEditor(image: result.image, frame: frame, shapes: result.shapes)
+        return true
+    }
+
+    /// 裁剪框（图像像素）→ 新浮层在屏幕上的位置（AppKit 全局坐标）。
+    /// 图像顶边贴着 selectionFrame.maxY，y 轴方向相反，别把两个轴搞混。
+    private func croppedFrame(for rect: CGRect) -> CGRect {
+        let unit = 1 / displayScale
+        return CGRect(x: selectionFrame.minX + rect.minX * unit,
+                      y: selectionFrame.maxY - rect.maxY * unit,
+                      width: rect.width * unit,
+                      height: rect.height * unit)
+    }
+
     /// 诊断专用：读浮层的文档（自检预置形状用）
     var docForDiagnostics: EditorDocument { doc }
 
-    init(model: AppModel, image: CGImage, selectionFrameAppKit frame: CGRect) {
+    init(model: AppModel, image: CGImage, selectionFrameAppKit frame: CGRect,
+         shapes: [AnnotationShape] = []) {
         self.model = model
-        self.doc = EditorDocument(image: image)
+        self.doc = EditorDocument(image: image, shapes: shapes)
         self.selectionFrame = frame
         self.displayScale = NSScreen.screens.first?.backingScaleFactor ?? 2
         super.init()
@@ -101,7 +142,7 @@ final class OverlayEditorController: NSObject {
     /// 开了"自动保存"后，关闭浮层即落盘（标注一起合成进去）；
     /// 已经保存过的（⌘S / 保存按钮）不重复写。
     private func autosaveIfNeeded() {
-        guard !didPersist, let model else { return }
+        guard !didPersist, !suppressAutosave, let model else { return }
         let prefs = model.prefs.value
         guard prefs.autoSave, let dirPath = prefs.saveDirectory, !dirPath.isEmpty else { return }
         guard let image = doc.rendered() else { return }
@@ -369,9 +410,13 @@ final class OverlayEditorController: NSObject {
             if self.contentView?.isEditingText == true { return event }
             let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             switch event.keyCode {
-            case 53: // Esc
+            case 53: // Esc：有待确认的裁剪就只撤裁剪，不关浮层
+                if self.cancelCropIfPending() { return nil }
                 self.close()
                 return nil
+            case 36, 76: // ⏎ / 小键盘 Enter：应用裁剪
+                if self.applyCropIfPending() { return nil }
+                return event
             case 6 where flags.contains(.command): // Z
                 if flags.contains(.shift) { self.doc.redo() } else { self.doc.undo() }
                 self.refresh()
@@ -442,6 +487,13 @@ final class OverlayEditorView: NSView {
     /// 选择工具：正在拖动选中标注
     private var draggingSelection = false
     private var dragLastPoint: CGPoint?
+    /// 裁剪：拖出的保留范围（图像像素坐标），⏎ 应用 / ⎋ 取消
+    private var pendingCrop: CGRect?
+    private var cropAnchor: CGPoint?
+
+    /// 控制器用：当前是否有待确认的裁剪
+    var hasPendingCrop: Bool { pendingCrop != nil }
+    var pendingCropRect: CGRect? { pendingCrop }
 
     var isEditingText: Bool { textField != nil }
 
@@ -509,6 +561,55 @@ final class OverlayEditorView: NSView {
         for point in Self.handlePoints(of: imageRect) {
             ctx.fillEllipse(in: CGRect(x: point.x - 4, y: point.y - 4, width: 8, height: 8))
         }
+
+        drawCropMask(ctx)
+    }
+
+    /// 裁剪取景：范围外压暗 + 白框 + 底部提示
+    private func drawCropMask(_ ctx: CGContext) {
+        guard let crop = pendingCrop, crop.width > 1, crop.height > 1 else { return }
+        // 像素 → 视图点
+        let scale = 1 / pixelScale
+        let rect = CGRect(x: imageRect.minX + crop.minX * scale,
+                          y: imageRect.minY + crop.minY * scale,
+                          width: crop.width * scale,
+                          height: crop.height * scale)
+
+        // 四条边围出来的"压暗区"（不用甚至奇偶填充，省得算 even-odd）
+        ctx.setFillColor(NSColor.black.withAlphaComponent(0.55).cgColor)
+        let full = imageRect
+        let bands = [
+            CGRect(x: full.minX, y: full.minY, width: full.width, height: rect.minY - full.minY),
+            CGRect(x: full.minX, y: rect.maxY, width: full.width, height: full.maxY - rect.maxY),
+            CGRect(x: full.minX, y: rect.minY, width: rect.minX - full.minX, height: rect.height),
+            CGRect(x: rect.maxX, y: rect.minY, width: full.maxX - rect.maxX, height: rect.height),
+        ]
+        for band in bands where band.width > 0 && band.height > 0 { ctx.fill(band) }
+
+        ctx.setStrokeColor(NSColor.white.cgColor)
+        ctx.setLineWidth(2)
+        ctx.stroke(rect)
+
+        // 尺寸 + 操作提示，画在裁剪框下方
+        let label = "\(Int(crop.width)) × \(Int(crop.height))   ⏎ 应用 · ⎋ 取消"
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold),
+            .foregroundColor: NSColor.white,
+        ]
+        let size = (label as NSString).size(withAttributes: attributes)
+        let barRect = CGRect(x: rect.minX, y: min(rect.maxY + 6, imageRect.maxY - 26),
+                             width: size.width + 16, height: 22)
+        ctx.setFillColor(NSColor.black.withAlphaComponent(0.8).cgColor)
+        ctx.addPath(CGPath(roundedRect: barRect, cornerWidth: 6, cornerHeight: 6, transform: nil))
+        ctx.fillPath()
+        (label as NSString).draw(at: CGPoint(x: barRect.minX + 8, y: barRect.minY + 4),
+                                 withAttributes: attributes)
+    }
+
+    func cancelCrop() {
+        pendingCrop = nil
+        cropAnchor = nil
+        needsDisplay = true
     }
 
     private func drawSizeBar(_ ctx: CGContext) {
@@ -566,6 +667,14 @@ final class OverlayEditorView: NSView {
         let p = clampToImage(pixelPoint(event))
         guard imageRect.contains(convert(event.locationInWindow, from: nil)) else { return }
 
+        if doc.tool == .crop {
+            // 裁剪：拖出保留范围（按下即清掉上一个草稿）
+            cropAnchor = p
+            pendingCrop = nil
+            needsDisplay = true
+            return
+        }
+
         if doc.tool == .select {
             // 点选：命中 → 选中并进入拖动；落空 → 取消选中
             if doc.select(at: p) != nil {
@@ -598,6 +707,13 @@ final class OverlayEditorView: NSView {
 
     override func mouseDragged(with event: NSEvent) {
         let p = clampToImage(pixelPoint(event))
+        if doc.tool == .crop {
+            let anchor = cropAnchor ?? p
+            pendingCrop = CGRect(x: min(anchor.x, p.x), y: min(anchor.y, p.y),
+                                 width: abs(p.x - anchor.x), height: abs(p.y - anchor.y))
+            needsDisplay = true
+            return
+        }
         if draggingSelection {
             if let last = dragLastPoint {
                 doc.moveSelected(by: CGPoint(x: p.x - last.x, y: p.y - last.y))
@@ -617,6 +733,13 @@ final class OverlayEditorView: NSView {
     }
 
     override func mouseUp(with event: NSEvent) {
+        if doc.tool == .crop {
+            cropAnchor = nil
+            // 太小就是误触：清掉，别留个几像素的框
+            if let crop = pendingCrop, crop.width < 8 || crop.height < 8 { pendingCrop = nil }
+            needsDisplay = true
+            return
+        }
         if draggingSelection {
             draggingSelection = false
             dragLastPoint = nil

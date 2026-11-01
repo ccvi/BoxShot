@@ -30,9 +30,9 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
 
     var isVisible: Bool { window?.isVisible ?? false }
 
-    func show(image: CGImage) {
+    func show(image: CGImage, shapes: [AnnotationShape] = []) {
         guard let window else { return }
-        let document = EditorDocument(image: image)
+        let document = EditorDocument(image: image, shapes: shapes)
         doc = document
 
         // 窗口尺寸：图像显示尺寸（适配屏幕可用区域）+ 工具条高度
@@ -53,7 +53,11 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
                               onSave: { [weak self] in self?.save() },
                               onPin: { [weak self] in self?.pinCurrent() },
                               onOCR: { [weak self] in self?.ocrCurrent() },
-                              onClose: { [weak self] in self?.window?.performClose(nil) })
+                              onClose: { [weak self] in self?.window?.performClose(nil) },
+                              // 裁剪后按新尺寸重开文档：坐标、手柄、窗口大小全按新图来
+                              onCrop: { [weak self] image, shapes in
+                                  self?.show(image: image, shapes: shapes)
+                              })
         window.contentView = NSHostingView(rootView: view)
 
         installEscMonitor()

@@ -21,6 +21,7 @@ final class AppModel: ObservableObject {
     private var recordToolbar: RecordToolbarController?
     let pinManager = PinManager()
     private var resultWindow: ResultWindowController?
+    private var historyWindow: HistoryWindowController?
 
     /// 录制中状态（状态栏菜单显示"停止录制"）
     @Published private(set) var isRecording = false
@@ -190,6 +191,8 @@ final class AppModel: ObservableObject {
     /// 截好的图按 pending 设定分流：直接复制 / OCR / QR / 原位浮层
     private func routeCapturedImage(_ image: CGImage, overlayFrame frame: CGRect? = nil) {
         if prefs.value.playSound { Support.playFeedbackSound() }
+        // 历史先记：不管后面是弹浮层还是直接复制，这张图都得留痕
+        ShotHistoryStore.shared.record(image, limit: prefs.value.maxShotHistory)
         switch pendingPipeline {
         case .editor:
             // "截图后弹出标注浮层"关掉时 = 直接复制到剪贴板，不弹任何界面
@@ -216,8 +219,11 @@ final class AppModel: ObservableObject {
     // ── 编辑器 ──────────────────────────────────────────────
 
     /// 原位钉住浮层（区域/全屏/窗口截图的默认标注界面）
-    func openOverlayEditor(image: CGImage, frame: CGRect) {
-        let controller = OverlayEditorController(model: self, image: image, selectionFrameAppKit: frame)
+    /// shapes 用于裁剪后重开：把已有标注带进新尺寸的文档里
+    func openOverlayEditor(image: CGImage, frame: CGRect, shapes: [AnnotationShape] = []) {
+        let controller = OverlayEditorController(model: self, image: image,
+                                                 selectionFrameAppKit: frame,
+                                                 shapes: shapes)
         overlayEditor = controller
         controller.onClose = { [weak self, weak controller] in
             if let controller, self?.overlayEditor === controller {
@@ -236,6 +242,14 @@ final class AppModel: ObservableObject {
 
     func editorDidClose(_ controller: EditorWindowController) {
         if editorController === controller { editorController = nil }
+    }
+
+    // ── 截图历史 ────────────────────────────────────────────
+
+    func showShotHistory() {
+        let controller = historyWindow ?? HistoryWindowController(model: self)
+        historyWindow = controller
+        controller.show()
     }
 
     // ── OCR / QR ────────────────────────────────────────────

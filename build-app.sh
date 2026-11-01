@@ -240,15 +240,58 @@ xattr -cr "$APP_DIR" 2>/dev/null || true
 # ------------------------------------------------------------
 # 5. 签名（ad-hoc；不附加任何受限授权，AMFI 会拒）
 # ------------------------------------------------------------
+# 🔴 铁律：优先用固定的本机自签名身份，找不到才退回 ad-hoc。
+#
+# 系统记住 TCC 授权（屏幕录制 / 辅助功能 / 输入监控）时，存的是代码的
+# **指定要求（designated requirement）**：
+#   · ad-hoc  → 只能钉 `cdhash H"…"`，重新编译哈希就变，授权立刻对不上；
+#   · 证书    → `identifier "…" and certificate root = H"…"`，跨版本稳定。
+# 所以「能签名就用证书」不是好看，而是决定用户要不要每次更新重授一次权。
+#
+# 身份由 Tools/setup-signing-identity.sh 建立（不需要 sudo / 开发者账号）。
+SIGNING_IDENTITY_NAME="FastFind Local Signing"
+
+detect_signing_identity() {
+    security find-identity -v -p codesigning 2>/dev/null \
+        | grep "$SIGNING_IDENTITY_NAME" | head -1 | awk '{print $2}'
+}
+
+SIGNING_IDENTITY=""
 if [[ "$DO_SIGN" == "1" ]]; then
-    echo "▶ 代码签名（ad-hoc）…"
-    codesign --force --sign - --timestamp=none "$APP_DIR" 2>&1 | sed 's/^/  /' || {
-        echo "  ⚠ 签名失败，应用仍可运行，但权限记忆可能不稳定" >&2
-    }
+    SIGNING_IDENTITY="$(detect_signing_identity || true)"
+fi
+
+if [[ "$DO_SIGN" == "1" ]]; then
+    if [[ -n "$SIGNING_IDENTITY" ]]; then
+        echo "▶ 代码签名（${SIGNING_IDENTITY_NAME}）…"
+        codesign --force --sign "$SIGNING_IDENTITY" --timestamp=none "$APP_DIR" 2>&1 | sed 's/^/  /' || {
+            echo "  ⚠ 签名失败，应用仍可运行，但权限记忆可能不稳定" >&2
+        }
+    else
+        echo "▶ 代码签名（ad-hoc）…"
+        echo "  ⚠ 没找到「${SIGNING_IDENTITY_NAME}」身份，本次退回临时签名。"
+        echo "    临时签名会让 TCC 授权在每次更新后失效；"
+        echo "    跑一次 Tools/setup-signing-identity.sh 即可建立固定身份（不需要 sudo）。"
+        codesign --force --sign - --timestamp=none "$APP_DIR" 2>&1 | sed 's/^/  /' || {
+            echo "  ⚠ 签名失败，应用仍可运行，但权限记忆可能不稳定" >&2
+        }
+    fi
     if codesign --verify --deep --strict "$APP_DIR" 2>/dev/null; then
         echo "  ✓ 签名校验通过"
     else
         echo "  ⚠ 签名校验未通过（改用 --no-sign 可跳过这一步）" >&2
+    fi
+
+    # 把指定要求打出来：它是「下次更新后授权还在不在」的唯一判据，
+    # 与其让用户猜，不如每次构建就摆在眼前。
+    DESIGNATED_REQUIREMENT="$(codesign -d -r- "$APP_DIR" 2>&1 | sed -n 's/^designated => //p')"
+    if [[ -n "$DESIGNATED_REQUIREMENT" ]]; then
+        echo "  · 指定要求：${DESIGNATED_REQUIREMENT}"
+        case "$DESIGNATED_REQUIREMENT" in
+            cdhash*)
+                echo "    ⚠ 这是临时签名的形态（钉死二进制哈希），更新一次就要重授一次。" >&2
+                ;;
+        esac
     fi
 else
     echo "▶ 已跳过签名（--no-sign）"
@@ -273,11 +316,31 @@ du -sh "$APP_DIR" | sed 's/^/  体积 /'
 if [[ "$DO_INSTALL" == "1" ]]; then
     echo ""
     echo "▶ 安装到 /Applications…"
-    rm -rf "/Applications/$APP_NAME.app"
-    cp -R "$APP_DIR" "/Applications/"
-    xattr -cr "/Applications/$APP_NAME.app" 2>/dev/null || true
-    codesign --force --sign - --timestamp=none "/Applications/$APP_NAME.app" > /dev/null 2>&1 || true
-    echo "  ✓ 已安装：/Applications/$APP_NAME.app"
+    INSTALLED_APP="/Applications/$APP_NAME.app"
+    DIST_CDHASH="$(codesign -dvvv "$APP_DIR" 2>&1 | awk -F= '/^CDHash=/ {print $2; exit}')"
+    rm -rf "$INSTALLED_APP"
+
+    # 🔴 用 ditto 复制，**复制后绝不重新签名**。
+    # 这里曾经是「cp -R + codesign --force --sign -」：那句话会把打包时签好的
+    # 证书覆盖成临时签名，cdhash 一变，用户此前授的权当场作废 ——
+    # 症状是「装完看着一切正常，功能一条都不触发」。
+    # ditto 能保留权限位与扩展属性；xattr 不在签名封存范围里，清隔离属性是安全的。
+    ditto "$APP_DIR" "$INSTALLED_APP"
+    xattr -cr "$INSTALLED_APP" 2>/dev/null || true
+
+    if ! codesign --verify --deep --strict "$INSTALLED_APP" 2>/dev/null; then
+        echo "  ✗ 安装副本签名校验失败：${INSTALLED_APP}" >&2
+        exit 1
+    fi
+
+    # 装完立刻比对 cdhash —— 这是「有没有被谁偷偷重签」的硬证据。
+    INSTALLED_CDHASH="$(codesign -dvvv "$INSTALLED_APP" 2>&1 | awk -F= '/^CDHash=/ {print $2; exit}')"
+    if [[ -z "$DIST_CDHASH" || "$DIST_CDHASH" != "$INSTALLED_CDHASH" ]]; then
+        echo "  ✗ cdhash 不一致：dist=${DIST_CDHASH:-?} / 安装=${INSTALLED_CDHASH:-?}" >&2
+        echo "    说明安装过程改动了签名封存，此前的授权会失效。" >&2
+        exit 1
+    fi
+    echo "  ✓ 已安装：${INSTALLED_APP}（cdhash ${INSTALLED_CDHASH}）"
 fi
 
 cat <<'TIPS'

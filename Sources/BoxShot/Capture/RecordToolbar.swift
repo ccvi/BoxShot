@@ -27,11 +27,17 @@ final class RecordToolbarController: NSObject {
     private var startDate: Date?
 
     private var recordButton: NSButton?
+    private var pauseButton: NSButton?
     private var timeLabel: NSTextField?
     private var micButton: NSButton?
     private var systemButton: NSButton?
     private var popover: NSPopover?
     private var escMonitor: Any?
+
+    // 暂停：计时要把暂停时长扣掉，否则成片 30 秒、显示 3 分钟
+    private var isPaused = false
+    private var pausedTotal: TimeInterval = 0
+    private var pauseStartedAt: Date?
 
     init(model: AppModel?) {
         self.model = model
@@ -104,6 +110,10 @@ final class RecordToolbarController: NSObject {
 
         let record = add("record.circle", "开始录制", tag: 4, tint: .systemRed)
         recordButton = record
+        // 暂停 / 恢复：录制中才启用
+        let pause = add("pause.circle", "暂停 / 继续", tag: 9)
+        pause.isEnabled = false
+        pauseButton = pause
         let time = NSTextField(labelWithString: "00:00")
         time.font = NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .semibold)
         time.textColor = .white
@@ -194,9 +204,36 @@ final class RecordToolbarController: NSObject {
             refreshAudioButtons()
         case 7: // 选项弹层
             toggleOptionsPopover(anchor: sender)
+        case 9: // 暂停 / 继续
+            togglePause()
         default:
             break
         }
+    }
+
+    private func togglePause() {
+        guard isRecording, let recorder else { return }
+        isPaused.toggle()
+        recorder.setPaused(isPaused)
+        if isPaused {
+            pauseStartedAt = Date()
+            pauseButton?.image = NSImage(systemSymbolName: "play.circle.fill",
+                                         accessibilityDescription: "继续录制")?
+                .withSymbolConfiguration(.init(pointSize: 16, weight: .medium))
+            pauseButton?.contentTintColor = .systemYellow
+            timeLabel?.textColor = .systemYellow
+        } else {
+            if let start = pauseStartedAt {
+                pausedTotal += Date().timeIntervalSince(start)
+            }
+            pauseStartedAt = nil
+            pauseButton?.image = NSImage(systemSymbolName: "pause.circle",
+                                         accessibilityDescription: "暂停录制")?
+                .withSymbolConfiguration(.init(pointSize: 16, weight: .medium))
+            pauseButton?.contentTintColor = nil
+            timeLabel?.textColor = .white
+        }
+        tick()
     }
 
     private func startRecording() {
@@ -210,22 +247,33 @@ final class RecordToolbarController: NSObject {
             self?.model?.presentError(message)
         }
         do {
+            let isGIF = prefs.recordFormat == .gif
             try controller.startRecording(displayID: displayID,
                                           region: region,
-                                          audio: prefs.recordAudio,
-                                          camera: prefs.recordCamera,
-                                          fps: prefs.recordFPS,
+                                          // GIF 没有音轨：这里明确传 none，别让引擎白开一路采集
+                                          audio: isGIF ? .none : prefs.recordAudio,
+                                          camera: isGIF ? false : prefs.recordCamera,
+                                          fps: isGIF ? prefs.recordGIFPS : prefs.recordFPS,
                                           showCursor: prefs.recordShowCursor,
                                           format: prefs.recordFormat,
                                           quality: prefs.recordQuality,
                                           showsHUD: false)
             recorder = controller
             isRecording = true
+            isPaused = false
+            pausedTotal = 0
+            pauseStartedAt = nil
             startDate = Date()
             recordButton?.image = NSImage(systemSymbolName: "stop.circle.fill",
                                           accessibilityDescription: "停止录制")?
                 .withSymbolConfiguration(.init(pointSize: 14, weight: .medium))
             recordButton?.contentTintColor = .systemRed
+            pauseButton?.isEnabled = true
+            pauseButton?.image = NSImage(systemSymbolName: "pause.circle",
+                                         accessibilityDescription: "暂停录制")?
+                .withSymbolConfiguration(.init(pointSize: 16, weight: .medium))
+            pauseButton?.contentTintColor = nil
+            timeLabel?.textColor = .white
             timeLabel?.isHidden = false
             timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
                 DispatchQueue.main.async { self?.tick() }
@@ -242,11 +290,18 @@ final class RecordToolbarController: NSObject {
         recorder.stop(reason: .user)
         self.recorder = nil
         isRecording = false
+        isPaused = false
         timer?.invalidate()
         timer = nil
         recordButton?.image = NSImage(systemSymbolName: "record.circle",
                                       accessibilityDescription: "开始录制")?
             .withSymbolConfiguration(.init(pointSize: 14, weight: .medium))
+        pauseButton?.isEnabled = false
+        pauseButton?.image = NSImage(systemSymbolName: "pause.circle",
+                                     accessibilityDescription: "暂停录制")?
+            .withSymbolConfiguration(.init(pointSize: 16, weight: .medium))
+        pauseButton?.contentTintColor = nil
+        timeLabel?.textColor = .white
         timeLabel?.isHidden = true
         onRecordingChange?(false)
         // 录完自动收工具条（文件已落盘，给个反馈就撤）
@@ -257,8 +312,11 @@ final class RecordToolbarController: NSObject {
 
     private func tick() {
         guard let startDate else { return }
-        let elapsed = max(0, Int(Date().timeIntervalSince(startDate)))
-        timeLabel?.stringValue = String(format: "%02d:%02d", elapsed / 60, elapsed % 60)
+        // 计时口径与成片一致：暂停这段时间不算
+        var elapsed = Date().timeIntervalSince(startDate) - pausedTotal
+        if isPaused, let pauseStartedAt { elapsed -= Date().timeIntervalSince(pauseStartedAt) }
+        let seconds = max(0, Int(elapsed))
+        timeLabel?.stringValue = String(format: "%02d:%02d", seconds / 60, seconds % 60)
     }
 
     func close(stopRecording shouldStop: Bool) {
@@ -350,16 +408,35 @@ final class DashedFrameView: NSView {
 final class RecordOptionsView: NSView {
 
     private weak var model: AppModel?
+    private var gifFPSSegment: NSSegmentedControl?
 
     init(model: AppModel) {
         self.model = model
-        super.init(frame: NSRect(x: 0, y: 0, width: 240, height: 170))
+        super.init(frame: NSRect(x: 0, y: 0, width: 240, height: 208))
 
         let prefs = model.prefs.value
 
         let formatLabel = label("格式")
-        let format = NSSegmentedControl(labels: ["MOV", "MP4"], trackingMode: .selectOne, target: self, action: #selector(formatChanged(_:)))
-        format.selectedSegment = prefs.recordFormat == .mov ? 0 : 1
+        let format = NSSegmentedControl(labels: ["MOV", "MP4", "GIF"],
+                                        trackingMode: .selectOne,
+                                        target: self, action: #selector(formatChanged(_:)))
+        switch prefs.recordFormat {
+        case .mov: format.selectedSegment = 0
+        case .mp4: format.selectedSegment = 1
+        case .gif: format.selectedSegment = 2
+        }
+
+        let fpsLabel = label("GIF 帧率")
+        let fps = NSSegmentedControl(labels: ["5", "10", "15"],
+                                     trackingMode: .selectOne,
+                                     target: self, action: #selector(gifFPSChanged(_:)))
+        switch prefs.recordGIFPS {
+        case 5:  fps.selectedSegment = 0
+        case 15: fps.selectedSegment = 2
+        default: fps.selectedSegment = 1
+        }
+        fps.isEnabled = prefs.recordFormat == .gif
+        gifFPSSegment = fps
 
         let qualityLabel = label("质量")
         let quality = NSSegmentedControl(labels: ["高", "中等", "低"], trackingMode: .selectOne, target: self, action: #selector(qualityChanged(_:)))
@@ -368,15 +445,15 @@ final class RecordOptionsView: NSView {
         let cursor = NSButton(checkboxWithTitle: "显示光标", target: self, action: #selector(cursorChanged(_:)))
         cursor.state = prefs.recordShowCursor ? .on : .off
 
-        let note = NSTextField(wrappingLabelWithString: "输出保存到桌面；区域/全屏在工具条上选择。")
+        let note = NSTextField(wrappingLabelWithString: "GIF 为动图，无声音、无摄像头画中画；最长 600 帧。输出保存到桌面。")
         note.font = NSFont.systemFont(ofSize: 11)
         note.textColor = .secondaryLabelColor
-        note.frame = NSRect(x: 16, y: 8, width: 208, height: 30)
+        note.frame = NSRect(x: 16, y: 6, width: 208, height: 34)
 
         let rows: [(NSView, NSView)] = [
-            (formatLabel, format), (qualityLabel, quality), (NSView(), cursor),
+            (formatLabel, format), (fpsLabel, fps), (qualityLabel, quality), (NSView(), cursor),
         ]
-        var y: CGFloat = 128
+        var y: CGFloat = 168
         for (left, right) in rows {
             left.frame = NSRect(x: 16, y: y, width: 52, height: 22)
             right.frame = NSRect(x: 76, y: y - 2, width: 150, height: 26)
@@ -397,7 +474,20 @@ final class RecordOptionsView: NSView {
     }
 
     @objc private func formatChanged(_ sender: NSSegmentedControl) {
-        model?.prefs.value.recordFormat = sender.selectedSegment == 0 ? .mov : .mp4
+        switch sender.selectedSegment {
+        case 0: model?.prefs.value.recordFormat = .mov
+        case 1: model?.prefs.value.recordFormat = .mp4
+        default: model?.prefs.value.recordFormat = .gif
+        }
+        gifFPSSegment?.isEnabled = model?.prefs.value.recordFormat == .gif
+    }
+
+    @objc private func gifFPSChanged(_ sender: NSSegmentedControl) {
+        switch sender.selectedSegment {
+        case 0: model?.prefs.value.recordGIFPS = 5
+        case 2: model?.prefs.value.recordGIFPS = 15
+        default: model?.prefs.value.recordGIFPS = 10
+        }
     }
 
     @objc private func qualityChanged(_ sender: NSSegmentedControl) {

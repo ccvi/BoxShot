@@ -26,6 +26,7 @@ enum EditorTool: String, CaseIterable, Identifiable {
     case blur
     case measure    // 像素测距
     case colorPick  // 取色标注
+    case crop       // 裁剪：拖出保留范围，⏎ 应用（不是标注，不进形状表）
 
     var id: String { rawValue }
 
@@ -43,6 +44,7 @@ enum EditorTool: String, CaseIterable, Identifiable {
         case .blur:      return "drop"
         case .measure:   return "ruler"
         case .colorPick: return "eyedropper"
+        case .crop:      return "crop"
         }
     }
 
@@ -60,6 +62,7 @@ enum EditorTool: String, CaseIterable, Identifiable {
         case .blur:      return "模糊"
         case .measure:   return "测距"
         case .colorPick: return "取色"
+        case .crop:      return "裁剪（拖出保留范围，⏎ 应用）"
         }
     }
 
@@ -97,6 +100,8 @@ struct AnnotationShape: Equatable {
         switch tool {
         case .select:
             return false
+        case .crop:
+            return false
         case .rect, .ellipse, .mosaic, .blur, .measure:
             guard let a = points.first, let b = points.last else { return false }
             return rect(from: a, to: b).insetBy(dx: -hitPadding, dy: -hitPadding).contains(p)
@@ -126,6 +131,8 @@ struct AnnotationShape: Equatable {
     var displayBounds: CGRect? {
         switch tool {
         case .select:
+            return nil
+        case .crop:
             return nil
         case .rect, .ellipse, .mosaic, .blur, .measure:
             guard let a = points.first, let b = points.last else { return nil }
@@ -293,7 +300,7 @@ enum EditorRenderer {
         let width = max(1, shape.lineWidth)
 
         switch shape.tool {
-        case .select:
+        case .select, .crop:
             return
         case .pen, .marker:
             guard let path = strokePath(of: shape) else { return }

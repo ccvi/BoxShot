@@ -2,6 +2,7 @@ import AVFoundation
 import CoreGraphics
 import CoreImage
 import ScreenCaptureKit
+import UniformTypeIdentifiers
 
 // ============================================================
 // 屏幕录制
@@ -46,6 +47,8 @@ final class RecorderController: NSObject {
     /// 用 NSLock 保护：两边的回调频率都高，读写竞争真实存在。
     private let cameraLock = NSLock()
     private var cameraCIImage: CIImage?
+    /// 摄像头是否真的在用（决定视频帧要不要走合成路径）
+    private var cameraActive = false
 
     private var sessionStarted = false
     private var isStopping = false
@@ -55,6 +58,53 @@ final class RecorderController: NSObject {
     /// 用工具条录制时不再弹自带 HUD（曾经两个"计时+停止"同时上屏）
     private var showsHUD = true
 
+    // ── 暂停 / 恢复 ─────────────────────────────────────────
+    //
+    // 暂停不能真的"停流"（SCStream 一停，恢复时首帧要等几百毫秒，
+    // 而且 writer 的会话起点会乱）。做法是照旧收帧、但全部丢弃，
+    // 恢复后把"暂停这段时间"从后续帧的 PTS 里减掉 —— 这样成片里
+    // 时间轴是连续的，不会出现一段卡住的静止画面。
+    //
+    // 时间轴补偿必须靠 PTS 算，不能靠墙钟：SCStream 的 PTS 来自
+    // 主机时钟，两者刻度不同，混用会算出一个离谱的偏移量。
+    //
+    // 这些状态由主线程写、采集回调读，用一把锁保护。
+    private let stateLock = NSLock()
+    private var paused = false
+    private var pausedTotal = CMTime.zero
+    private var pausedAt: CMTime?
+    private var lastVideoPTS: CMTime?
+    private var awaitingResumeGap = false
+
+    /// 界面只读：当前是否处于暂停
+    var isPaused: Bool {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return paused
+    }
+
+    func setPaused(_ value: Bool) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard paused != value else { return }
+        paused = value
+        if value {
+            pausedAt = lastVideoPTS
+        } else {
+            // 恢复后的第一帧到达时再算这段空隙（那时才知道"现在"是多少）
+            awaitingResumeGap = pausedAt != nil
+            if pausedAt == nil { awaitingResumeGap = false }
+        }
+    }
+
+    // ── GIF 帧序列（不走 AVAssetWriter） ─────────────────────
+    private var gifFrames: [CGImage] = []
+    private var gifContext: CIContext?
+    private var gifInterval: TimeInterval = 0.1
+    private var gifLastCapture: CFTimeInterval = 0
+    /// 上限：600 帧。GIF 每帧都是完整位图，10fps 下 600 帧 ≈ 60 秒、几十 MB。
+    private let gifMaxFrames = 600
+    private var isGIF = false
+
     // ── 启动 ────────────────────────────────────────────────
 
     /// region 为 nil = 全屏；否则为显示器局部坐标（点）
@@ -62,16 +112,14 @@ final class RecorderController: NSObject {
                         camera: Bool, fps: Int, showCursor: Bool,
                         format: RecordFileFormat = .mov, quality: RecordQuality = .high,
                         showsHUD: Bool = true) throws {
-        guard writer == nil else { return }
+        guard writer == nil, gifFrames.isEmpty else { return }
         self.showsHUD = showsHUD
+        isGIF = (format == .gif)
+
         let url = Support.uniqueFileURL(in: Support.defaultSaveDirectory,
                                         name: Support.shotFileName(prefix: "boxshot-rec",
                                                                    ext: format.fileExtension))
         outputURL = url
-
-        let writer = try AVAssetWriter(outputURL: url,
-                                       fileType: format == .mp4 ? .mp4 : .mov)
-        self.writer = writer
 
         let scale = ScreenCapture.scaleFactor(for: displayID)
         let displayBounds = ScreenCapture.displayBoundsGlobal(displayID)
@@ -79,53 +127,71 @@ final class RecorderController: NSObject {
         let pixelW = Int(sourceRect.width * scale)
         let pixelH = Int(sourceRect.height * scale)
 
-        // ── 视频输入（码率按质量档：像素 × 帧率 × 系数）──
-        let bitrate = Int(Double(pixelW * pixelH) * Double(max(10, fps)) * quality.bitrateFactor)
-        let videoSettings: [String: Any] = [
-            AVVideoCodecKey: AVVideoCodecType.h264,
-            AVVideoWidthKey: pixelW,
-            AVVideoHeightKey: pixelH,
-            AVVideoAverageBitRateKey: bitrate,
-        ]
-        let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
-        videoInput.expectsMediaDataInRealTime = true
-        let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: videoInput,
-            sourcePixelBufferAttributes: [
-                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
-                kCVPixelBufferWidthKey as String: pixelW,
-                kCVPixelBufferHeightKey as String: pixelH,
-            ])
-        if writer.canAdd(videoInput) { writer.add(videoInput) }
-        self.videoInput = videoInput
-        self.videoAdaptor = adaptor
+        if isGIF {
+            // GIF 走另一条路：不建 writer，逐帧收 CGImage，收工时一次性编码。
+            // 音频 / 摄像头画中画在 GIF 里没有意义，直接忽略。
+            gifContext = CIContext(options: [:])
+            gifInterval = 1.0 / Double(max(5, min(15, fps)))
+            gifFrames.reserveCapacity(64)
+            gifLastCapture = 0
+        } else {
+            let writer = try AVAssetWriter(outputURL: url,
+                                           fileType: format == .mp4 ? .mp4 : .mov)
+            self.writer = writer
 
-        // ── 音频输入（AAC 48k 立体声）──
-        let audioSettings: [String: Any] = [
-            AVFormatIDKey: kAudioFormatMPEG4AAC,
-            AVSampleRateKey: 48000,
-            AVNumberOfChannelsKey: 2,
-            AVEncoderBitRateKey: 128_000,
-        ]
-        if audio == .system {
-            let input = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
-            input.expectsMediaDataInRealTime = true
-            if writer.canAdd(input) { writer.add(input) }
-            systemAudioInput = input
-        }
-        if audio == .mic {
-            let input = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
-            input.expectsMediaDataInRealTime = true
-            if writer.canAdd(input) { writer.add(input) }
-            micAudioInput = input
-        }
+            // ── 视频输入（码率按质量档：像素 × 帧率 × 系数）──
+            let bitrate = Int(Double(pixelW * pixelH) * Double(max(10, fps)) * quality.bitrateFactor)
+            let videoSettings: [String: Any] = [
+                AVVideoCodecKey: AVVideoCodecType.h264,
+                AVVideoWidthKey: pixelW,
+                AVVideoHeightKey: pixelH,
+                AVVideoAverageBitRateKey: bitrate,
+            ]
+            let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
+            videoInput.expectsMediaDataInRealTime = true
+            let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: videoInput,
+                sourcePixelBufferAttributes: [
+                    kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                    kCVPixelBufferWidthKey as String: pixelW,
+                    kCVPixelBufferHeightKey as String: pixelH,
+                ])
+            if writer.canAdd(videoInput) { writer.add(videoInput) }
+            self.videoInput = videoInput
+            self.videoAdaptor = adaptor
 
-        if camera {
+            // ── 音频输入（AAC 48k 立体声）──
+            let audioSettings: [String: Any] = [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVSampleRateKey: 48000,
+                AVNumberOfChannelsKey: 2,
+                AVEncoderBitRateKey: 128_000,
+            ]
+            if audio == .system {
+                let input = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
+                input.expectsMediaDataInRealTime = true
+                if writer.canAdd(input) { writer.add(input) }
+                systemAudioInput = input
+            }
+            if audio == .mic {
+                let input = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
+                input.expectsMediaDataInRealTime = true
+                if writer.canAdd(input) { writer.add(input) }
+                micAudioInput = input
+            }
+
+            // CIContext 一律建：暂停后要走"重编时间戳"的合成路径，
+            // 那条路必须有 CIContext（以前只在开摄像头时才建）。
             ciContext = CIContext(options: [:])
+
+            guard writer.startWriting() else {
+                throw writer.error ?? NSError(domain: "BoxShot", code: 1,
+                                              userInfo: [NSLocalizedDescriptionKey: "无法创建录制文件"])
+            }
         }
 
-        guard writer.startWriting() else {
-            throw writer.error ?? NSError(domain: "BoxShot", code: 1,
-                                          userInfo: [NSLocalizedDescriptionKey: "无法创建录制文件"])
+        // ── 麦克风 ──
+        if audio == .mic && !isGIF {
+            requestMicThenCapture()
         }
 
         // ── 麦克风 ──
@@ -192,16 +258,23 @@ final class RecorderController: NSObject {
 
         let streamRef = stream
         let writerRef = writer
-        let hadOutput = hasOutput
         let url = outputURL
+        let gif = isGIF
+        let frames = gifFrames
+        let interval = gifInterval
+        let hadOutput = gif ? !frames.isEmpty : hasOutput
 
-        // 1) 先停流（没有新帧了），2) 再 finishWriting（拿到完整文件），
+        // 1) 先停流（没有新帧了），2) 再 finishWriting / 编码 GIF，
         //    3) 最后回主线程收 HUD。
         Task {
             try? await streamRef?.stopCapture()
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
                 DispatchQueue.global().async {
-                    if let writer = writerRef {
+                    if gif {
+                        if let url, !frames.isEmpty {
+                            RecorderController.writeGIF(frames: frames, interval: interval, to: url)
+                        }
+                    } else if let writer = writerRef {
                         let semaphore = DispatchSemaphore(value: 0)
                         writer.finishWriting { semaphore.signal() }
                         _ = semaphore.wait(timeout: .now() + 10)
@@ -226,6 +299,28 @@ final class RecorderController: NSObject {
         }
     }
 
+    /// 帧序列 → GIF（循环播放，每帧间隔 interval 秒）
+    static func writeGIF(frames: [CGImage], interval: TimeInterval, to url: URL) {
+        guard let destination = CGImageDestinationCreateWithURL(
+            url as CFURL, UTType.gif.identifier as CFString, frames.count, nil) else { return }
+        let fileProperties: [CFString: Any] = [
+            kCGImagePropertyGIFDictionary: [kCGImagePropertyGIFLoopCount: 0],
+        ]
+        CGImageDestinationSetProperties(destination, fileProperties as CFDictionary)
+        let frameProperties: [CFString: Any] = [
+            kCGImagePropertyGIFDictionary: [
+                kCGImagePropertyGIFDelayTime: interval,
+                kCGImagePropertyGIFUnclampedDelayTime: interval,
+            ],
+        ]
+        for frame in frames {
+            CGImageDestinationAddImage(destination, frame, frameProperties as CFDictionary)
+        }
+        if !CGImageDestinationFinalize(destination) {
+            NSLog("[BoxShot] GIF 写入失败：\(url.path)")
+        }
+    }
+
     private func teardownPipeline() {
         captureSession?.stopRunning()
         captureSession = nil
@@ -236,11 +331,22 @@ final class RecorderController: NSObject {
         systemAudioInput = nil
         micAudioInput = nil
         cameraLock.lock(); cameraCIImage = nil; cameraLock.unlock()
+        cameraActive = false
         ciContext = nil
         sessionStarted = false
         isStopping = false
         hasOutput = false
         outputURL = nil
+        gifFrames.removeAll()
+        gifContext = nil
+        isGIF = false
+        stateLock.lock()
+        paused = false
+        pausedTotal = .zero
+        pausedAt = nil
+        lastVideoPTS = nil
+        awaitingResumeGap = false
+        stateLock.unlock()
     }
 
     private func notifyState(_ recording: Bool) {
@@ -279,6 +385,7 @@ final class RecorderController: NSObject {
         session.commitConfiguration()
         session.startRunning()
         captureSession = session
+        cameraActive = true
     }
 
     private func requestMicThenCapture() {
@@ -316,41 +423,122 @@ final class RecorderController: NSObject {
 extension RecorderController: SCStreamOutput {
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
-        guard !isStopping, let writer else { return }
+        guard !isStopping else { return }
         switch type {
         case .screen:
-            guard let videoInput, let videoAdaptor,
-                  CMSampleBufferDataIsReady(sampleBuffer),
-                  let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-            let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-            if !sessionStarted {
-                writer.startSession(atSourceTime: pts)
-                sessionStarted = true
-            }
-            guard videoInput.isReadyForMoreMediaData else { return }
-            hasOutput = true
-
-            if ciContext != nil {
-                // 摄像头画中画：GPU 合成后经池缓冲交给 writer
-                composeAndAppend(screen: pixelBuffer, pts: pts, adaptor: videoAdaptor)
-            } else {
-                // 无摄像头：零拷贝直通
-                videoInput.append(sampleBuffer)
-            }
-
+            handleScreenBuffer(sampleBuffer)
         case .audio:
-            guard sessionStarted, CMSampleBufferDataIsReady(sampleBuffer) else { return }
-            // 系统音频与麦克风共用"会话已开始"的门；各自的 input 独立 ready
-            if let input = systemAudioInput, input.isReadyForMoreMediaData {
-                input.append(sampleBuffer)
-            } else if systemAudioInput == nil, let micInput = micAudioInput, micInput.isReadyForMoreMediaData {
-                // 理论不会走到（SCStream 只在 system 音源时才给音频）——兜底
-                micInput.append(sampleBuffer)
-            }
-
+            handleAudioBuffer(sampleBuffer)
         default:
             break
         }
+    }
+
+    // ── 视频帧 ──
+
+    private func handleScreenBuffer(_ sampleBuffer: CMSampleBuffer) {
+        guard CMSampleBufferDataIsReady(sampleBuffer),
+              let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+
+        // 时间轴：暂停期间整帧丢弃；恢复后把这段空隙从 PTS 里减掉。
+        stateLock.lock()
+        let pausedNow = paused
+        if awaitingResumeGap, let pausePoint = pausedAt {
+            pausedTotal = CMTimeAdd(pausedTotal, CMTimeSubtract(pts, pausePoint))
+            awaitingResumeGap = false
+            pausedAt = nil
+        }
+        if !pausedNow { lastVideoPTS = pts }
+        let shift = pausedTotal
+        stateLock.unlock()
+
+        if pausedNow { return }
+
+        if isGIF {
+            captureGIFFrame(pixelBuffer)
+            return
+        }
+
+        guard let writer, let videoInput, let videoAdaptor else { return }
+        let adjusted = shift > .zero ? CMTimeSubtract(pts, shift) : pts
+        if !sessionStarted {
+            writer.startSession(atSourceTime: adjusted)
+            sessionStarted = true
+        }
+        guard videoInput.isReadyForMoreMediaData else { return }
+        hasOutput = true
+
+        if shift > .zero || cameraActive {
+            // 需要重编时间戳（暂停补偿）或叠加摄像头 → 走合成路径
+            composeAndAppend(screen: pixelBuffer, pts: adjusted, adaptor: videoAdaptor)
+        } else {
+            // 无摄像头、没暂停过：零拷贝直通
+            videoInput.append(sampleBuffer)
+        }
+    }
+
+    /// 收一帧做 GIF（按目标帧率抽帧，不跟着 SCStream 的帧率跑）
+    private func captureGIFFrame(_ pixelBuffer: CVPixelBuffer) {
+        guard gifFrames.count < gifMaxFrames, let gifContext else { return }
+        let now = CACurrentMediaTime()
+        if gifLastCapture > 0, now - gifLastCapture < gifInterval * 0.9 { return }
+        gifLastCapture = now
+
+        let image = CIImage(cvPixelBuffer: pixelBuffer)
+        // 最长边压到 1000 px：GIF 每帧都是完整位图，原尺寸会做出几十 MB 的怪物
+        let longest = max(image.extent.width, image.extent.height)
+        let scale = longest > 1000 ? 1000 / longest : 1
+        let scaled = image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        guard let frame = gifContext.createCGImage(scaled, from: scaled.extent) else { return }
+        gifFrames.append(frame)
+        hasOutput = true
+    }
+
+    // ── 音频帧 ──
+
+    private func handleAudioBuffer(_ sampleBuffer: CMSampleBuffer) {
+        guard !isGIF, CMSampleBufferDataIsReady(sampleBuffer) else { return }
+        stateLock.lock()
+        let pausedNow = paused
+        let shift = pausedTotal
+        stateLock.unlock()
+        guard sessionStarted, !pausedNow else { return }
+
+        let buffer = shift > .zero ? retimed(sampleBuffer, shift: shift) : sampleBuffer
+        guard let buffer else { return }
+        // 系统音频与麦克风各自的 input 独立 ready
+        if let input = systemAudioInput, input.isReadyForMoreMediaData {
+            input.append(buffer)
+        } else if systemAudioInput == nil, let micInput = micAudioInput, micInput.isReadyForMoreMediaData {
+            micInput.append(buffer)
+        }
+    }
+
+    /// 把一个 sample buffer 的整体时间戳往前挪 shift（暂停补偿）
+    private func retimed(_ sampleBuffer: CMSampleBuffer, shift: CMTime) -> CMSampleBuffer? {
+        var count: CMItemCount = 0
+        guard CMSampleBufferGetSampleTimingInfoArray(sampleBuffer, entryCount: 0,
+                                                     arrayToFill: nil,
+                                                     entriesNeededOut: &count) == noErr,
+              count > 0 else { return nil }
+        var timings = [CMSampleTimingInfo](repeating: CMSampleTimingInfo(), count: Int(count))
+        guard CMSampleBufferGetSampleTimingInfoArray(sampleBuffer, entryCount: count,
+                                                     arrayToFill: &timings,
+                                                     entriesNeededOut: &count) == noErr else { return nil }
+        for i in 0..<Int(count) {
+            timings[i].presentationTimeStamp = CMTimeSubtract(timings[i].presentationTimeStamp, shift)
+            if timings[i].decodeTimeStamp.isValid {
+                timings[i].decodeTimeStamp = CMTimeSubtract(timings[i].decodeTimeStamp, shift)
+            }
+        }
+        var out: CMSampleBuffer?
+        let status = CMSampleBufferCreateCopyWithNewTiming(allocator: kCFAllocatorDefault,
+                                                           sampleBuffer: sampleBuffer,
+                                                           sampleTimingEntryCount: count,
+                                                           sampleTimingArray: &timings,
+                                                           sampleBufferOut: &out)
+        return status == noErr ? out : nil
     }
 
     private func composeAndAppend(screen: CVPixelBuffer, pts: CMTime, adaptor: AVAssetWriterInputPixelBufferAdaptor) {

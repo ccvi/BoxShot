@@ -195,7 +195,34 @@ enum SelfTest {
                 }
             }
 
-            // 撤销重做
+            // ── 裁剪（1.0.4）──
+            do {
+                // 100×80 底图，两个矩形：一个在裁剪区内、一个在区外
+                let canvas = solidImage(width: 100, height: 80,
+                                        color: CGColor(srgbRed: 0.3, green: 0.3, blue: 0.3, alpha: 1))
+                let inside = AnnotationShape(tool: .rect,
+                                             points: [CGPoint(x: 20, y: 10), CGPoint(x: 40, y: 30)],
+                                             color: .red, lineWidth: 3)
+                let outside = AnnotationShape(tool: .rect,
+                                              points: [CGPoint(x: 80, y: 60), CGPoint(x: 95, y: 75)],
+                                              color: .blue, lineWidth: 3)
+                let cropDoc = EditorDocument(image: canvas, shapes: [inside, outside])
+                let result = cropDoc.croppedResult(to: CGRect(x: 10, y: 5, width: 50, height: 40))
+                check("裁剪输出尺寸正确",
+                      result?.image.width == 50 && result?.image.height == 40)
+                check("裁剪后只留画面内的标注", result?.shapes.count == 1)
+                check("裁剪后标注坐标随原点平移",
+                      result?.shapes.first?.points.first == CGPoint(x: 10, y: 5))
+                check("裁剪框过小返回 nil",
+                      cropDoc.croppedResult(to: CGRect(x: 0, y: 0, width: 4, height: 4)) == nil)
+                let cropShape = AnnotationShape(tool: .crop,
+                                                points: [CGPoint(x: 0, y: 0), CGPoint(x: 50, y: 50)],
+                                                color: .red, lineWidth: 2)
+                check("裁剪工具不是标注（不参与命中/显示）",
+                      !cropShape.hitTest(CGPoint(x: 10, y: 10)) && cropShape.displayBounds == nil)
+            }
+
+            // ── 撤销重做
             doc.commit(shapes[0])
             check("提交后撤销栈可用", doc.canUndo)
             doc.undo()
@@ -219,6 +246,47 @@ enum SelfTest {
             check("删除可撤销", doc.canUndo)
             doc.undo()
             check("撤销删除恢复形状", doc.shapes.count == 1)
+        }
+
+        // ── GIF 帧序列编码（1.0.4）──
+        do {
+            let frames = (0..<3).map { index in
+                solidImage(width: 32, height: 32,
+                           color: CGColor(srgbRed: 0, green: Double(index) / 4, blue: 1, alpha: 1))
+            }
+            let url = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("boxshot-selftest.gif")
+            try? FileManager.default.removeItem(at: url)
+            RecorderController.writeGIF(frames: frames, interval: 0.1, to: url)
+            let count = CGImageSourceCreateWithURL(url as CFURL, nil).map { CGImageSourceGetCount($0) } ?? 0
+            check("GIF 写出 3 帧（实际 \(count)）", count == 3)
+            try? FileManager.default.removeItem(at: url)
+        }
+
+        // ── 录制暂停状态（1.0.4）──
+        do {
+            let recorder = RecorderController()
+            check("默认非暂停", !recorder.isPaused)
+            recorder.setPaused(true)
+            check("暂停生效", recorder.isPaused)
+            recorder.setPaused(false)
+            check("恢复生效", !recorder.isPaused)
+        }
+
+        // ── 截图历史（1.0.4）──
+        do {
+            let store = ShotHistoryStore.shared
+            let before = store.items.count
+            store.record(solidImage(width: 12, height: 9, color: CGColor(gray: 0.5, alpha: 1)), limit: 50)
+            check("历史记录新增一条", store.items.count == before + 1)
+            if let item = store.items.first {
+                check("历史条目尺寸正确", item.pixelWidth == 12 && item.pixelHeight == 9)
+                check("能从历史读回图片", store.image(for: item)?.width == 12)
+                store.delete(item)
+                check("删除历史条目", store.items.count == before)
+            } else {
+                check("历史记录新增一条（读不到条目）", false)
+            }
         }
 
         // ── 文本渲染贴图 ──

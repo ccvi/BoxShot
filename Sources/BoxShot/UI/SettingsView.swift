@@ -141,6 +141,20 @@ private struct ShotPane: View {
             }
             Toggle("自动保存（浮层关闭即落盘；保存/滚动截图不再弹面板）", isOn: model.prefs.binding(\.autoSave))
                 .padding(.leading, 90)
+            HStack {
+                Text("截图历史").frame(width: 90, alignment: .trailing)
+                Picker("", selection: model.prefs.binding(\.maxShotHistory)) {
+                    Text("不记录").tag(0)
+                    Text("10 张").tag(10)
+                    Text("20 张").tag(20)
+                    Text("50 张").tag(50)
+                }
+                .labelsHidden()
+                .frame(width: 120)
+                Button("打开历史面板") { model.showShotHistory() }
+                    .disabled(model.prefs.value.maxShotHistory == 0)
+                Spacer()
+            }
         }
         .font(.body)
     }
@@ -258,6 +272,29 @@ private struct RecordPane: View {
                 }
                 .labelsHidden()
                 .frame(width: 90)
+            }
+            HStack {
+                Text("格式").frame(width: 90, alignment: .trailing)
+                Picker("", selection: model.prefs.binding(\.recordFormat)) {
+                    ForEach(RecordFileFormat.allCases) { format in
+                        Text(format.title).tag(format)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 100)
+                Text(model.prefs.value.recordFormat == .gif ? "动图：无声音、无画中画" : "")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
+            HStack {
+                Text("GIF 帧率").frame(width: 90, alignment: .trailing)
+                Picker("", selection: model.prefs.binding(\.recordGIFPS)) {
+                    Text("5").tag(5)
+                    Text("10").tag(10)
+                    Text("15").tag(15)
+                }
+                .labelsHidden()
+                .frame(width: 90)
+                .disabled(model.prefs.value.recordFormat != .gif)
             }
             Toggle("录制中显示鼠标指针", isOn: model.prefs.binding(\.recordShowCursor))
                 .padding(.leading, 90)

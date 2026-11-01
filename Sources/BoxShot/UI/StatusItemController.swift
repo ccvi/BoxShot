@@ -65,6 +65,7 @@ final class StatusItemController: NSObject {
         menu.addItem(item("全屏截图", .fullscreenShot, symbol: "rectangle.inset.filled"))
         menu.addItem(item("窗口截图", .windowShot, symbol: "macwindow"))
         menu.addItem(item("滚动截图", .scrollShot, symbol: "arrow.down.to.line.compact"))
+        menu.addItem(item("截图历史…", nil, selector: #selector(showHistory), symbol: "clock.arrow.circlepath"))
         menu.addItem(.separator())
 
         menu.addItem(item("截图 OCR", .ocrShot, key: keyHint(.ocrShot), symbol: "text.below.photo"))
@@ -110,6 +111,10 @@ final class StatusItemController: NSObject {
 
     @objc private func closeAllPins() {
         model.closeAllPins()
+    }
+
+    @objc private func showHistory() {
+        model.showShotHistory()
     }
 
     func showSettings() {

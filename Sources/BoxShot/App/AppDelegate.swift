@@ -40,6 +40,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.showDiagnosticOverlay()
             }
         }
+        // 诊断入口：--show-history 直接打开截图历史面板（库为空时先塞三张合成图），
+        // 用来核对网格布局 / 缩略图 / 选中态，不用真的去截屏。
+        if CommandLine.arguments.contains("--show-history") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                self?.showDiagnosticHistory()
+            }
+        }
+    }
+
+    private func showDiagnosticHistory() {
+        let store = ShotHistoryStore.shared
+        if store.items.isEmpty {
+            for index in 0..<3 {
+                let w = 320 + index * 60, h = 200 + index * 40
+                let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                    space: CGColorSpaceCreateDeviceRGB(),
+                                    bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)!
+                ctx.setFillColor(CGColor(srgbRed: 0.2 + 0.25 * Double(index), green: 0.4, blue: 0.8 - 0.2 * Double(index), alpha: 1))
+                ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+                ctx.setFillColor(CGColor(gray: 1, alpha: 1))
+                ctx.fill(CGRect(x: 20, y: 20, width: Double(w) / 2, height: 24))
+                if let image = ctx.makeImage() {
+                    store.record(image, limit: 20)
+                }
+            }
+        }
+        model.showShotHistory()
     }
 
     private func showDiagnosticOverlay() {

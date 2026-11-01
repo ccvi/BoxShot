@@ -37,10 +37,14 @@ enum RecordAudioSource: String, Codable, CaseIterable, Identifiable {
 enum RecordFileFormat: String, Codable, CaseIterable, Identifiable {
     case mov
     case mp4
+    case gif      // 动图：不写视频容器，帧序列直接编码成 GIF
 
     var id: String { rawValue }
     var title: String { rawValue.uppercased() }
     var fileExtension: String { rawValue }
+
+    /// GIF 没有音轨，也没有摄像头画中画合成（帧序列逐帧解码太重）
+    var supportsAudio: Bool { self != .gif }
 }
 
 /// 录制质量（映射 H.264 平均码率系数）
@@ -88,6 +92,8 @@ struct Preferences: Codable, Equatable {
     var autoSave: Bool = false
     /// Retina 截图缩小到 1x
     var downscaleRetina: Bool = false
+    /// 截图历史保留张数（0 = 不记录）
+    var maxShotHistory: Int = 20
 
     // ── 贴图 ──
     var pinDoubleClick: PinDoubleClickAction = .close
@@ -114,6 +120,8 @@ struct Preferences: Codable, Equatable {
     var recordQuality: RecordQuality = .high
     /// 录制完成后在 Finder 里定位文件（不然文件默默躺在桌面找不到）
     var recordRevealInFinder: Bool = true
+    /// GIF 录制帧率（5 / 10 / 15；GIF 每帧都是完整位图，越大越卡）
+    var recordGIFPS: Int = 10
 
     var shortcuts: [String: KeySpec] = [:]   // 出厂不预置热键（1.0.1 用户要求）
 
@@ -138,6 +146,7 @@ struct Preferences: Codable, Equatable {
         saveDirectory = try c.decodeIfPresent(String.self, forKey: .saveDirectory) ?? f.saveDirectory
         autoSave = try c.decodeIfPresent(Bool.self, forKey: .autoSave) ?? f.autoSave
         downscaleRetina = try c.decodeIfPresent(Bool.self, forKey: .downscaleRetina) ?? f.downscaleRetina
+        maxShotHistory = try c.decodeIfPresent(Int.self, forKey: .maxShotHistory) ?? f.maxShotHistory
         pinDoubleClick = try c.decodeIfPresent(PinDoubleClickAction.self, forKey: .pinDoubleClick) ?? f.pinDoubleClick
         pinOpacity = try c.decodeIfPresent(Double.self, forKey: .pinOpacity) ?? f.pinOpacity
         pinShadow = try c.decodeIfPresent(Bool.self, forKey: .pinShadow) ?? f.pinShadow
@@ -154,6 +163,7 @@ struct Preferences: Codable, Equatable {
         recordFormat = try c.decodeIfPresent(RecordFileFormat.self, forKey: .recordFormat) ?? f.recordFormat
         recordQuality = try c.decodeIfPresent(RecordQuality.self, forKey: .recordQuality) ?? f.recordQuality
         recordRevealInFinder = try c.decodeIfPresent(Bool.self, forKey: .recordRevealInFinder) ?? f.recordRevealInFinder
+        recordGIFPS = try c.decodeIfPresent(Int.self, forKey: .recordGIFPS) ?? f.recordGIFPS
         // 快捷键缺省就是空表（1.0.1 起出厂不预置）
         shortcuts = try c.decodeIfPresent([String: KeySpec].self, forKey: .shortcuts) ?? [:]
     }
@@ -163,11 +173,12 @@ struct Preferences: Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case launchAtLogin, hideDockIcon, playSound, showCrosshair
         case shotFormat, jpgQuality, openEditorAfterShot, windowHighlight, saveDirectory, autoSave, downscaleRetina
+        case maxShotHistory
         case pinDoubleClick, pinOpacity, pinShadow, maxPinHistory
         case ocrKeepLineBreaks, ocrLineOverlap, ocrIncremental, ocrAutoOpenLink
         case measureShowTips
         case recordAudio, recordCamera, recordFPS, recordShowCursor
-        case recordFormat, recordQuality, recordRevealInFinder
+        case recordFormat, recordQuality, recordRevealInFinder, recordGIFPS
         case shortcuts
     }
 }

@@ -11,17 +11,18 @@
 
 ---
 
-## 功能（1.0.3 已实现）
+## 功能（1.0.4 已实现）
 
 | 区域 | 能力 |
 | --- | --- |
-| 截图 | 区域截图（截图后原位弹标注浮层）、截图直进剪贴板、重复上次区域、全屏（鼠标所在屏）、窗口（轻点选窗口，可高亮） |
+| 截图 | 区域截图（**拖出后不立刻截**：八向手柄可调、方向键微调 ⇧×10、Shift 约束正方形，⏎ 或双击确认）、截图直进剪贴板、重复上次区域、全屏（鼠标所在屏）、窗口（轻点选窗口，可高亮） |
+| 历史 | 最近 N 张截图落盘留档（默认 20），菜单「截图历史…」网格重看，可重开标注 / 复制 / 贴图 / Finder 定位 |
 | 滚动截图 | 手动滚动自动抓帧拼接，横向/竖向都能拼，实时预览累积图 |
 | 识别 | OCR（中英混排，可保留换行、可追加到剪贴板）、二维码/条形码 11 种码制 |
 | 屏幕测量 | 全屏遮罩拉框测距，按**物理像素**报数 |
-| 录屏 | 区域/全屏录制，工具条带计时、麦克风/系统声音切换、格式与质量选项、摄像头画中画 |
+| 录屏 | 区域/全屏录制，工具条带计时、**暂停/恢复**、麦克风/系统声音切换、格式（MOV / MP4 / **GIF**）与质量选项、摄像头画中画 |
 | 贴图 | 从截图/剪贴板/Finder 贴图，滚轮缩放、双向翻转、双击动作可选、历史可恢复 |
-| 标注 | 12 种工具：选择、钢笔、马克笔、矩形、椭圆、直线、箭头、文字、马赛克、模糊、测距、取色 |
+| 标注 | 13 种工具：选择、钢笔、马克笔、矩形、椭圆、直线、箭头、文字、马赛克、模糊、测距、取色、裁剪 |
 | 设置 | 7 个页签：通用、截图、贴图、OCR、录制、快捷键、关于 |
 
 **出厂没有任何全局热键**（1.0.1 起）。所有动作都要在「设置 → 快捷键」里自己录一遍，不录就是没有——见下文「快捷键」一节。
@@ -93,6 +94,32 @@ swift build --disable-sandbox   # 只编译（本机 sandbox-exec 受限，必�
 
 录制时把自己的窗口放进 `excludingWindows`，浮条和贴图不会进画面。
 
+## 选区调整：拖出来先别截，等确认
+
+1.0.4 把选区从「松手即截」改成两段式：拖出范围 → `.adjusting` 阶段（八向手柄 / 方向键 / ⇧ 正方形）→ ⏎ 或双击才真正截图。
+
+- **状态机是显式的**（`idle / dragging / adjusting / movingSelection / resizing`），而不是靠一堆布尔变量互相猜。滚动截图、录屏、OCR 共用同一个遮罩，改一处全部受益。
+- **手柄容差 9pt**：太小点不中，太大又会把手柄拖拽变成移动选区。
+- **移动时夹在屏内**（`bounds` 是这块屏幕），否则选区会跑到看不见的地方，截图请求直接失败。
+- 方向键微调 **1px / ⇧ 10px**：对着像素做人眼校准，步长必须是 1。
+
+## 裁剪：不改文档，改成"重开一个"
+
+裁剪没有原地改 `EditorDocument.baseImage`。原因：浮层的 `imageRect`、手柄、面板尺寸都是 `init` 时定死的，原地改会留下半个旧状态（布局按旧尺寸、标注按新尺寸）。
+
+做法是 `croppedResult(to:)` 产出一份「裁好的底图 + 平移到新原点的标注」，然后**关掉当前浮层 / 窗口，按新尺寸重开一个**：
+
+- 坐标换算永远只有一套（`imageRect` ↔ 图像像素），不会出现两套并存；
+- 被裁掉的标注直接丢弃（`displayBounds` 与裁剪区不相交），不会留下"看不见但还在"的幽灵；
+- 重开期间 `suppressAutosave`，否则自动保存会把**裁剪前**的图落盘一份。
+
+## GIF 与暂停：GIF 不走 AVAssetWriter
+
+- **GIF 单独一条路**：不建 writer，按目标帧率（5/10/15）抽帧成 `CGImage`，收工用 `CGImageDestination` 一次性编码（循环 0 = 无限播放）。最长 **600 帧**，且最长边压到 1000px —— GIF 每帧都是完整位图，4K 原尺寸能做出几十 MB 的怪物。
+- **暂停不能真停流**：停了恢复时首帧要等几百毫秒，writer 的会话起点也要重算。做法是照旧收帧全部丢弃，恢复后把这段空隙从后续 PTS 里减掉（`pausedTotal`）。
+- 🔴 **时间轴补偿必须用 PTS 算，不能用墙钟**：SCStream 的 PTS 来自主机时钟，两者刻度不同，混用会得出离谱的偏移量。
+- 暂停期间音频也要丢，恢复后的音频缓冲用 `CMSampleBufferCreateCopyWithNewTiming` 重编时间戳；视频侧只要有过暂停就走 `CVPixelBuffer` 合成路径（零拷贝直通无法改时间戳），所以 `CIContext` 现在一律创建，不再只在开摄像头时才建。
+
 ## 贴图：文本也先光栅化成位图
 
 文本 / HTML 贴图在**创建时**渲染成 2x 位图，之后和图片贴图走同一条窗口链路（拖拽、滚轮缩放、双击、翻转）。代价是文字不可选中，换来的是一份交互代码管所有贴图。
@@ -117,10 +144,10 @@ Sources/BoxShot/
 ├── App/                    AppDelegate（窗口/菜单装配）、AppModel（13 个动作的调度）、SelfTest
 ├── Capture/                RegionSelector（截图前遮罩）、OverlayEditor（截图后原位浮层）、
 │                           ScrollCaptureController、Recorder、RecordToolbar、MeasureOverlay
-├── Core/                   ScreenCapture、Stitch、OCR、Shortcuts、HotKeyCenter、Preferences、Support
+├── Core/                   ScreenCapture、Stitch、OCR、Shortcuts、HotKeyCenter、Preferences、Support、ShotHistory
 ├── Editor/                 AnnotationModels（数据模型 + 渲染器）、EditorView、EditorWindow
 ├── Pin/                    PinController（贴图窗 + 历史）
-└── UI/                     StatusItemController、SettingsView、ResultWindow
+└── UI/                     StatusItemController、SettingsView、ResultWindow、HistoryWindow
 ```
 
 ### 几个不能改坏的约束
@@ -136,8 +163,9 @@ Sources/BoxShot/
 
 | 用途 | 路径 |
 | --- | --- |
-| 设置 | `UserDefaults["com.pcxx.boxshot.preferences"]`，JSON 编码的 `Preferences`（27 个字段） |
+| 设置 | `UserDefaults["com.pcxx.boxshot.preferences"]`，JSON 编码的 `Preferences`（29 个字段） |
 | 贴图历史 | `~/Library/Application Support/BoxShot/pins/` + `pins.json` |
+| 截图历史 | `~/Library/Application Support/BoxShot/History/` + `history.json`（PNG 原图 + 清单；删条目连文件一起删） |
 | 开机自启 | `~/Library/LaunchAgents/com.pcxx.boxshot.plist`（`/usr/bin/open -g`，不是 SMAppService） |
 | 默认截图目录 | 桌面（`saveDirectory` 为 nil 时每次弹面板问） |
 
@@ -162,6 +190,7 @@ Sources/BoxShot/
 | `--selftest` | 跑自检，退出码即结果 |
 | `--version` | 打印版本号 |
 | `--show-overlay` | 延迟 0.6s 用**合成渐变图**打开标注浮层并预置四条标注，不走截图权限，配合 `screencapture -R` 核对浮层有没有真的把图画出来 |
+| `--show-history` | 延迟 0.6s 打开截图历史面板；历史为空时先塞三张合成图（会**真的写进**历史目录，看完记得删） |
 
 ## 已知问题（待修）
 
