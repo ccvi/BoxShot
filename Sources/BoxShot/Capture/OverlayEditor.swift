@@ -17,10 +17,22 @@ import AppKit
 @MainActor
 final class OverlayEditorController: NSObject {
 
+    /// 整屏原图 + 它在 AppKit 坐标里的框 + 「点 → 像素」倍率。
+    /// 有了它，标注阶段才能随时把截图框拉大：扩出去的那块直接从这一帧里取，
+    /// 不需要重新截屏（重新截会把我们自己的浮层拍进去，内容也可能已经变了）。
+    struct FullDisplay {
+        var image: CGImage
+        var frameAppKit: CGRect
+        var pixelScale: CGFloat
+    }
+
     private let doc: EditorDocument
     private weak var model: AppModel?
-    private let selectionFrame: CGRect   // AppKit 全局坐标（点）
+    /// 当前截图框（AppKit 全局坐标，点）。拖手柄改尺寸后整个浮层会按新框重开，
+    /// 所以这里是 var 而不是 let。
+    private(set) var selectionFrame: CGRect
     private let displayScale: CGFloat
+    private let fullDisplay: FullDisplay?
 
     private var imagePanel: NSPanel!
     private var toolbarPanel: NSPanel!
@@ -28,6 +40,9 @@ final class OverlayEditorController: NSObject {
     private var toolButtons: [EditorTool: NSButton] = [:]
     private var swatchButtons: [String: NSButton] = [:]
     private var widthButtons: [CGFloat: NSButton] = [:]
+    private var colorAnchorButton: NSButton?
+    private var colorPopover: NSPopover?
+    private var morePopover: NSPopover?
     private var monitors: [Any] = []
     /// 本次截图是否已落盘（保存过 / 自动保存过就不再重复写）
     private var didPersist = false
@@ -61,29 +76,38 @@ final class OverlayEditorController: NSObject {
         let frame = croppedFrame(for: rect)
         suppressAutosave = true
         close()
-        model?.openOverlayEditor(image: result.image, frame: frame, shapes: result.shapes)
+        model?.openOverlayEditor(image: result.image, frame: frame,
+                                 fullDisplay: fullDisplay, shapes: result.shapes)
         return true
     }
 
     /// 裁剪框（图像像素）→ 新浮层在屏幕上的位置（AppKit 全局坐标）。
     /// 图像顶边贴着 selectionFrame.maxY，y 轴方向相反，别把两个轴搞混。
     private func croppedFrame(for rect: CGRect) -> CGRect {
-        let unit = 1 / displayScale
+        let unit = 1 / selectionPixelScale
         return CGRect(x: selectionFrame.minX + rect.minX * unit,
                       y: selectionFrame.maxY - rect.maxY * unit,
                       width: rect.width * unit,
                       height: rect.height * unit)
     }
 
+    /// 这份文档里「1 个视图点 = 多少图像像素」。不要直接用屏幕 backingScaleFactor：
+    /// 开了「Retina 缩小到 1x」之后文档是 1x 的，两者对不上，裁剪框会整体缩一半。
+    private var selectionPixelScale: CGFloat {
+        CGFloat(doc.baseImage.width) / max(1, selectionFrame.width)
+    }
+
     /// 诊断专用：读浮层的文档（自检预置形状用）
     var docForDiagnostics: EditorDocument { doc }
 
     init(model: AppModel, image: CGImage, selectionFrameAppKit frame: CGRect,
-         shapes: [AnnotationShape] = []) {
+         fullDisplay: FullDisplay? = nil, shapes: [AnnotationShape] = []) {
         self.model = model
         self.doc = EditorDocument(image: image, shapes: shapes)
         self.selectionFrame = frame
-        self.displayScale = NSScreen.screens.first?.backingScaleFactor ?? 2
+        self.fullDisplay = fullDisplay
+        self.displayScale = fullDisplay?.pixelScale
+            ?? NSScreen.screens.first?.backingScaleFactor ?? 2
         super.init()
     }
 
@@ -93,27 +117,42 @@ final class OverlayEditorController: NSObject {
     private let toolbarHeight: CGFloat = 64
 
     func show() {
-        let pointSize = CGSize(width: CGFloat(doc.baseImage.width) / displayScale,
-                               height: CGFloat(doc.baseImage.height) / displayScale)
-        let windowFrame = CGRect(x: selectionFrame.minX - margin,
-                                 y: selectionFrame.minY - margin,
-                                 width: selectionFrame.width + margin * 2,
-                                 height: selectionFrame.height + barHeight + margin)
+        // 🔴 有整屏原图时，浮层**铺满整块屏幕**：截图框要能往任意方向拉大，
+        // 窗口要是只比图大一圈，拖出去的预览框就被窗口裁掉了。
+        // 窗口其余部分是透明的，看着和没窗口一样（桌面照旧可见）。
+        let panelFrame: CGRect
+        let imageRectInView: CGRect
+        if let full = fullDisplay {
+            panelFrame = full.frameAppKit
+            // 视图是 flipped（左上原点），AppKit 是左下原点
+            imageRectInView = CGRect(x: selectionFrame.minX - panelFrame.minX,
+                                     y: panelFrame.maxY - selectionFrame.maxY,
+                                     width: selectionFrame.width,
+                                     height: selectionFrame.height)
+        } else {
+            panelFrame = CGRect(x: selectionFrame.minX - margin,
+                                y: selectionFrame.minY - margin,
+                                width: selectionFrame.width + margin * 2,
+                                height: selectionFrame.height + barHeight + margin)
+            imageRectInView = CGRect(x: margin, y: barHeight,
+                                     width: selectionFrame.width,
+                                     height: selectionFrame.height)
+        }
 
-        // ── 图像浮层 ──
-        let panel = NSPanel(contentRect: windowFrame,
+        let panel = NSPanel(contentRect: panelFrame,
                             styleMask: [.borderless, .nonactivatingPanel],
                             backing: .buffered, defer: false)
         panel.level = .floating
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.hasShadow = true
+        panel.hasShadow = fullDisplay == nil
+        panel.isReleasedWhenClosed = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
 
         let view = OverlayEditorView(doc: doc, controller: self,
-                                     imageRect: NSRect(origin: CGPoint(x: margin, y: barHeight),
-                                                       size: pointSize),
-                                     displayScale: displayScale)
+                                     imageRect: imageRectInView,
+                                     displayScale: displayScale,
+                                     canResize: fullDisplay != nil)
         contentView = view
         panel.contentView = view
         imagePanel = panel
@@ -128,10 +167,54 @@ final class OverlayEditorController: NSObject {
         refresh()
     }
 
+    // MARK: 拖动截图框改尺寸
+
+    /// AppKit 全局坐标（左下原点）→ 整屏原图的像素矩形（左上原点）。
+    /// 两个轴方向相反，别把 y 算成 `frame.minY` 那一套 —— 弄反了拖框会上下镜像。
+    static func pixelRect(for frame: CGRect, displayFrame: CGRect, pixelScale: CGFloat) -> CGRect {
+        CGRect(x: (frame.minX - displayFrame.minX) * pixelScale,
+               y: (displayFrame.maxY - frame.maxY) * pixelScale,
+               width: frame.width * pixelScale,
+               height: frame.height * pixelScale).integral
+    }
+
+    /// 用户拖手柄把截图框改成了 newFrame（AppKit 全局坐标）。
+    /// 做法和裁剪一致：从整屏原图里按新框重新切一份，标注跟着平移，然后
+    /// "关掉自己、按新尺寸重开" —— 坐标换算永远只有一套，不会留下半个旧状态。
+    func commitResize(to newFrame: CGRect) {
+        guard let full = fullDisplay else { return }
+        let target = newFrame.intersection(full.frameAppKit).integral
+        guard target.width >= 40, target.height >= 40 else { return }
+
+        // 视图点 ≈ 文档像素时才能平移标注；「缩小到 1x」下两边倍率不同，宁可不改
+        guard abs(selectionPixelScale - full.pixelScale) < 0.01 else { return }
+
+        func pixelRect(_ r: CGRect) -> CGRect {
+            Self.pixelRect(for: r, displayFrame: full.frameAppKit, pixelScale: full.pixelScale)
+        }
+        let newPX = pixelRect(target)
+        let oldPX = pixelRect(selectionFrame)
+        guard newPX != oldPX else { return }
+        guard let cropped = full.image.cropping(to: newPX) else { return }
+
+        let dx = oldPX.minX - newPX.minX
+        let dy = oldPX.minY - newPX.minY
+        let shapes = doc.shapes.map { $0.translated(dx: dx, dy: dy) }
+
+        suppressAutosave = true
+        close()
+        model?.openOverlayEditor(image: cropped, frame: target,
+                                 fullDisplay: full, shapes: shapes)
+    }
+
     func close() {
         autosaveIfNeeded()
         monitors.forEach { NSEvent.removeMonitor($0) }
         monitors.removeAll()
+        colorPopover?.close()
+        morePopover?.close()
+        colorPopover = nil
+        morePopover = nil
         imagePanel?.orderOut(nil)
         toolbarPanel?.orderOut(nil)
         imagePanel = nil
@@ -156,10 +239,16 @@ final class OverlayEditorController: NSObject {
     private func buildToolbarPanel() -> NSPanel {
         let stack = NSStackView()
         stack.orientation = .horizontal
-        stack.spacing = 3
-        stack.edgeInsets = NSEdgeInsets(top: 10, left: 10, bottom: 10, right: 10)
+        stack.spacing = 2
+        stack.edgeInsets = NSEdgeInsets(top: 9, left: 10, bottom: 9, right: 10)
 
-        for tool in EditorTool.allCases {
+        // 图标顺序按用户给的参考图排：选择 → 箭头 → 画笔 → 矩形 → 椭圆 → 直线 →
+        // 文字 → 马克笔 → 马赛克 → 模糊 → 测距 → 取色，然后是裁剪。
+        // 颜色 / 粗细不再平铺（那是 6+3 个按钮，工具条能撑到 1300pt），
+        // 收进左边那个颜色圆点的弹出层里；OCR / 贴图这类低频动作收进 ⋯。
+        let toolOrder: [EditorTool] = [.select, .arrow, .pen, .rect, .ellipse, .line,
+                                       .text, .marker, .mosaic, .blur, .measure, .colorPick]
+        for tool in toolOrder {
             let button = toolbarButton(symbol: tool.symbol, title: tool.title) { [weak self] in
                 self?.selectTool(tool)
             }
@@ -168,28 +257,35 @@ final class OverlayEditorController: NSObject {
         }
         stack.addArrangedSubview(divider())
 
-        // 颜色 / 粗细：改变后续绘制的默认值；有选中标注时直接改它
-        for color in [RGBColor.red, .blue, .yellow, .green, .white, .black] {
-            let dot = colorDotButton(color)
-            swatchButtons[color.hexString] = dot
-            stack.addArrangedSubview(dot)
-        }
-        for width: CGFloat in [3, 6, 12] {
-            let button = lineWidthButton(width)
-            widthButtons[width] = button
-            stack.addArrangedSubview(button)
-        }
+        // 颜色圆点：点开是 6 色 + 3 档粗细
+        let colorAnchor = colorDotAnchorButton()
+        stack.addArrangedSubview(colorAnchor)
         stack.addArrangedSubview(divider())
 
-        stack.addArrangedSubview(toolbarButton(symbol: "arrow.uturn.backward", title: "撤销 ⌘Z") { [weak self] in self?.doc.undo(); self?.refresh() })
-        stack.addArrangedSubview(toolbarButton(symbol: "arrow.uturn.forward", title: "重做 ⇧⌘Z") { [weak self] in self?.doc.redo(); self?.refresh() })
+        stack.addArrangedSubview(toolbarButton(symbol: "arrow.uturn.backward", title: "撤销 ⌘Z") { [weak self] in
+            self?.doc.undo(); self?.refresh()
+        })
+        stack.addArrangedSubview(toolbarButton(symbol: "arrow.uturn.forward", title: "重做 ⇧⌘Z") { [weak self] in
+            self?.doc.redo(); self?.refresh()
+        })
+
+        let crop = toolbarButton(symbol: EditorTool.crop.symbol, title: EditorTool.crop.title) { [weak self] in
+            self?.selectTool(.crop)
+        }
+        toolButtons[.crop] = crop
+        stack.addArrangedSubview(crop)
+
+        stack.addArrangedSubview(toolbarButtonWithSender(symbol: "ellipsis", title: "更多（OCR / 贴图）") { [weak self] sender in
+            self?.showMorePopover(anchor: sender)
+        })
         stack.addArrangedSubview(divider())
 
-        stack.addArrangedSubview(toolbarButton(symbol: "text.below.photo", title: "OCR 识别文字") { [weak self] in self?.ocr() })
-        stack.addArrangedSubview(toolbarButton(symbol: "qrcode.viewfinder", title: "解码 QR/条形码") { [weak self] in self?.decodeQR() })
-        stack.addArrangedSubview(toolbarButton(symbol: "pin", title: "贴图") { [weak self] in self?.pin() })
-        stack.addArrangedSubview(toolbarButton(symbol: "doc.on.doc", title: "复制 ⌘C") { [weak self] in self?.copyToClipboard() })
-        stack.addArrangedSubview(toolbarButton(symbol: "arrow.down.circle", title: "保存 ⌘S") { [weak self] in self?.save() })
+        stack.addArrangedSubview(toolbarButton(symbol: "doc.on.doc", title: "复制 ⌘C") { [weak self] in
+            self?.copyToClipboard()
+        })
+        stack.addArrangedSubview(toolbarButton(symbol: "arrow.down.circle", title: "保存 ⌘S") { [weak self] in
+            self?.save()
+        })
         stack.addArrangedSubview(divider())
 
         let close = toolbarButton(symbol: "xmark", title: "关闭（丢弃未保存的标注）") { [weak self] in self?.close() }
@@ -202,7 +298,7 @@ final class OverlayEditorController: NSObject {
         container.material = .hudWindow
         container.state = .active
         container.wantsLayer = true
-        container.layer?.cornerRadius = 12
+        container.layer?.cornerRadius = 14
         container.addSubview(stack)
         stack.frame = container.bounds
 
@@ -213,10 +309,120 @@ final class OverlayEditorController: NSObject {
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = true
+        panel.isReleasedWhenClosed = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.contentView = container
         positionToolbar(panel)
         return panel
+    }
+
+    /// 工具条左边那个"当前颜色"圆点，点开是配色/粗细面板
+    private func colorDotAnchorButton() -> NSButton {
+        let button = NSButton(title: "", target: nil, action: nil)
+        button.bezelStyle = .regularSquare
+        button.isBordered = false
+        button.wantsLayer = true
+        button.layer?.cornerRadius = 10
+        button.layer?.borderWidth = 1.5
+        button.layer?.borderColor = NSColor.white.withAlphaComponent(0.75).cgColor
+        button.toolTip = "颜色与粗细"
+        button.setButtonType(.momentaryChange)
+        button.onAction = { [weak self] in self?.showColorPopover(anchor: button) }
+        button.frame = NSRect(x: 0, y: 0, width: 30, height: 30)
+        colorAnchorButton = button
+        updateColorAnchor()
+        return button
+    }
+
+    private func updateColorAnchor() {
+        colorAnchorButton?.layer?.backgroundColor = doc.color.cgColor
+    }
+
+    private func showColorPopover(anchor: NSView) {
+        if let popover = colorPopover, popover.isShown {
+            popover.close()
+            colorPopover = nil
+            return
+        }
+        let stack = NSStackView()
+        stack.orientation = .horizontal
+        stack.spacing = 6
+        stack.edgeInsets = NSEdgeInsets(top: 10, left: 12, bottom: 10, right: 12)
+        for color in [RGBColor.red, .blue, .yellow, .green, .white, .black] {
+            let dot = colorDotButton(color)
+            swatchButtons[color.hexString] = dot
+            stack.addArrangedSubview(dot)
+        }
+        stack.addArrangedSubview(divider())
+        for width: CGFloat in [3, 6, 12] {
+            let button = lineWidthButton(width)
+            widthButtons[width] = button
+            stack.addArrangedSubview(button)
+        }
+        stack.layoutSubtreeIfNeeded()
+        let container = NSVisualEffectView(frame: NSRect(origin: .zero, size: stack.fittingSize))
+        container.material = .hudWindow
+        container.state = .active
+        container.wantsLayer = true
+        container.layer?.cornerRadius = 10
+        container.addSubview(stack)
+        stack.frame = container.bounds
+
+        let content = NSViewController()
+        content.view = container
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.contentViewController = content
+        popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .maxY)
+        colorPopover = popover
+        refresh()
+    }
+
+    private func showMorePopover(anchor: NSView) {
+        if let popover = morePopover, popover.isShown {
+            popover.close()
+            morePopover = nil
+            return
+        }
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 2
+        stack.edgeInsets = NSEdgeInsets(top: 8, left: 8, bottom: 8, right: 8)
+
+        func row(_ symbol: String, _ title: String, _ action: @escaping () -> Void) {
+            let button = NSButton(title: "  " + title, target: nil, action: nil)
+            button.bezelStyle = .regularSquare
+            button.isBordered = false
+            button.alignment = .left
+            button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)?
+                .withSymbolConfiguration(.init(pointSize: 13, weight: .medium))
+            button.imagePosition = .imageLeading
+            button.onAction = action
+            button.frame = NSRect(x: 0, y: 0, width: 180, height: 30)
+            stack.addArrangedSubview(button)
+        }
+        row("text.below.photo", "OCR 识别文字") { [weak self] in self?.ocr(); self?.morePopover?.close() }
+        row("qrcode.viewfinder", "解码 QR/条形码") { [weak self] in self?.decodeQR(); self?.morePopover?.close() }
+        row("pin", "贴图") { [weak self] in self?.pin(); self?.morePopover?.close() }
+        row("doc.on.doc", "复制到剪贴板") { [weak self] in self?.copyToClipboard(); self?.morePopover?.close() }
+
+        stack.layoutSubtreeIfNeeded()
+        let container = NSVisualEffectView(frame: NSRect(origin: .zero, size: stack.fittingSize))
+        container.material = .hudWindow
+        container.state = .active
+        container.wantsLayer = true
+        container.layer?.cornerRadius = 10
+        container.addSubview(stack)
+        stack.frame = container.bounds
+
+        let content = NSViewController()
+        content.view = container
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.contentViewController = content
+        popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .maxY)
+        morePopover = popover
     }
 
     private func positionToolbar(_ panel: NSPanel) {
@@ -238,18 +444,23 @@ final class OverlayEditorController: NSObject {
     }
 
     private func toolbarButton(symbol: String, title: String, action: @escaping () -> Void) -> NSButton {
+        toolbarButtonWithSender(symbol: symbol, title: title) { _ in action() }
+    }
+
+    private func toolbarButtonWithSender(symbol: String, title: String,
+                                         action: @escaping (NSButton) -> Void) -> NSButton {
         let button = NSButton(title: "", target: nil, action: nil)
         button.bezelStyle = .regularSquare
         button.isBordered = false
         button.wantsLayer = true
-        button.layer?.cornerRadius = 5
+        button.layer?.cornerRadius = 6
         button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)?
             .withSymbolConfiguration(.init(pointSize: 19, weight: .medium))
         button.imageScaling = .scaleNone
         button.toolTip = title
         button.setButtonType(.momentaryChange)
-        button.onAction = action
-        button.frame = NSRect(x: 0, y: 0, width: 46, height: 40)
+        button.onAction = { [weak button] in if let button { action(button) } }
+        button.frame = NSRect(x: 0, y: 0, width: 40, height: 38)
         return button
     }
 
@@ -289,6 +500,7 @@ final class OverlayEditorController: NSObject {
                 button.layer?.backgroundColor = NSColor.clear.cgColor
             }
         }
+        updateColorAnchor()
         contentView?.needsDisplay = true
     }
 
@@ -459,12 +671,45 @@ final class OverlayEditorView: NSView {
 
     private let doc: EditorDocument
     private unowned let controller: OverlayEditorController
-    private let imageRect: NSRect      // 视图坐标（点，flipped）
+    /// 底图在视图里的位置（flipped 视图坐标）。拖手柄改尺寸时以它为准。
+    private var imageRect: NSRect
     private let displayScale: CGFloat
+    /// 能不能拖手柄改截图框（要有整屏原图才做得到）
+    private let canResize: Bool
 
     private var pixelScale: CGFloat {
         CGFloat(doc.baseImage.width) / imageRect.width
     }
+
+    // ── 改截图框尺寸 ────────────────────────────────────────
+    enum ResizeHandle: CaseIterable {
+        case topLeft, top, topRight, left, right, bottomLeft, bottom, bottomRight
+        func point(in rect: CGRect) -> CGPoint {
+            switch self {
+            case .topLeft:     return CGPoint(x: rect.minX, y: rect.minY)
+            case .top:         return CGPoint(x: rect.midX, y: rect.minY)
+            case .topRight:    return CGPoint(x: rect.maxX, y: rect.minY)
+            case .left:        return CGPoint(x: rect.minX, y: rect.midY)
+            case .right:       return CGPoint(x: rect.maxX, y: rect.midY)
+            case .bottomLeft:  return CGPoint(x: rect.minX, y: rect.maxY)
+            case .bottom:      return CGPoint(x: rect.midX, y: rect.maxY)
+            case .bottomRight: return CGPoint(x: rect.maxX, y: rect.maxY)
+            }
+        }
+        var cursor: NSCursor {
+            switch self {
+            case .topLeft, .bottomRight: return .crosshair
+            case .topRight, .bottomLeft: return .crosshair
+            case .left, .right: return .resizeLeftRight
+            case .top, .bottom: return .resizeUpDown
+            }
+        }
+    }
+    private var resizeHandle: ResizeHandle?
+    private var resizeStartRect: CGRect?
+    private var resizeStartPoint: CGPoint?
+    /// 拖动中的新框（视图坐标），松手才提交
+    private(set) var previewRect: CGRect?
 
     private var draft: AnnotationShape?
     private var draftStart: CGPoint?
@@ -485,15 +730,17 @@ final class OverlayEditorView: NSView {
     var isEditingText: Bool { textField != nil }
 
     init(doc: EditorDocument, controller: OverlayEditorController,
-         imageRect: NSRect, displayScale: CGFloat) {
+         imageRect: NSRect, displayScale: CGFloat, canResize: Bool = false) {
         self.doc = doc
         self.controller = controller
         self.imageRect = imageRect
         self.displayScale = displayScale
-        let bounds = NSRect(origin: .zero,
-                            size: NSSize(width: imageRect.maxX + imageRect.minX,
-                                         height: imageRect.maxY + imageRect.minY))
-        super.init(frame: bounds)
+        self.canResize = canResize
+        // 真正的尺寸由 AppKit 按窗口内容区设（设置为 contentView 时会重设 frame），
+        // 这里给个不小于底图的初值就行
+        super.init(frame: NSRect(origin: .zero,
+                                 size: NSSize(width: max(imageRect.maxX, 320),
+                                              height: max(imageRect.maxY, 240))))
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -505,9 +752,6 @@ final class OverlayEditorView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
-
-        // 尺寸条
-        drawSizeBar(ctx)
 
         // 画布底（白底衬托透明 PNG）
         ctx.setFillColor(NSColor.white.cgColor)
@@ -544,12 +788,55 @@ final class OverlayEditorView: NSView {
         ctx.setStrokeColor(NSColor.controlAccentColor.cgColor)
         ctx.setLineWidth(2)
         ctx.stroke(imageRect)
-        ctx.setFillColor(NSColor.white.cgColor)
-        for point in Self.handlePoints(of: imageRect) {
-            ctx.fillEllipse(in: CGRect(x: point.x - 4, y: point.y - 4, width: 8, height: 8))
-        }
+        drawHandleDots(ctx, on: imageRect)
 
         drawCropMask(ctx)
+
+        // 拖手柄改尺寸中的新框：框外压暗 + 白虚线 + 手柄，尺寸条跟着走
+        if let preview = previewRect {
+            fillOutside(preview, ctx: ctx)
+            ctx.setStrokeColor(NSColor.white.cgColor)
+            ctx.setLineWidth(1.5)
+            ctx.setLineDash(phase: 0, lengths: [6, 4])
+            ctx.stroke(preview)
+            ctx.setLineDash(phase: 0, lengths: [])
+            drawHandleDots(ctx, on: preview)
+        }
+
+        // 尺寸条：贴在当前框的正上方（跟着框走，用户要的"工具条跟着框"）
+        drawSizeBar(ctx, above: previewRect ?? imageRect)
+    }
+
+    /// 八个手柄：白底 + 蓝环，跟系统截图那个观感一致
+    private func drawHandleDots(_ ctx: CGContext, on rect: CGRect) {
+        let points = canResize
+            ? ResizeHandle.allCases.map { $0.point(in: rect) }
+            : [
+                CGPoint(x: rect.minX, y: rect.minY), CGPoint(x: rect.midX, y: rect.minY),
+                CGPoint(x: rect.maxX, y: rect.minY), CGPoint(x: rect.minX, y: rect.midY),
+                CGPoint(x: rect.maxX, y: rect.midY), CGPoint(x: rect.minX, y: rect.maxY),
+                CGPoint(x: rect.midX, y: rect.maxY), CGPoint(x: rect.maxX, y: rect.maxY),
+            ]
+        for point in points {
+            let dot = CGRect(x: point.x - 4.5, y: point.y - 4.5, width: 9, height: 9)
+            ctx.setFillColor(NSColor.white.cgColor)
+            ctx.fillEllipse(in: dot)
+            ctx.setStrokeColor(NSColor.controlAccentColor.cgColor)
+            ctx.setLineWidth(1.6)
+            ctx.strokeEllipse(in: dot)
+        }
+    }
+
+    /// 把 rect 以外全部压暗（四条带拼起来，不用 even-odd 填充）
+    private func fillOutside(_ rect: CGRect, ctx: CGContext) {
+        ctx.setFillColor(NSColor.black.withAlphaComponent(0.45).cgColor)
+        let bands = [
+            CGRect(x: bounds.minX, y: bounds.minY, width: bounds.width, height: rect.minY - bounds.minY),
+            CGRect(x: bounds.minX, y: rect.maxY, width: bounds.width, height: bounds.maxY - rect.maxY),
+            CGRect(x: bounds.minX, y: rect.minY, width: rect.minX - bounds.minX, height: rect.height),
+            CGRect(x: rect.maxX, y: rect.minY, width: bounds.maxX - rect.maxX, height: rect.height),
+        ]
+        for band in bands where band.width > 0 && band.height > 0 { ctx.fill(band) }
     }
 
     /// 裁剪取景：范围外压暗 + 白框 + 底部提示
@@ -603,6 +890,14 @@ final class OverlayEditorView: NSView {
     /// 返回 false 时调用方**不要**顺手把浮层关掉 —— 用户要求只有主动点 ✕ 才结束。
     @discardableResult
     func cancelDraft() -> Bool {
+        if resizeHandle != nil {
+            resizeHandle = nil
+            resizeStartRect = nil
+            resizeStartPoint = nil
+            previewRect = nil
+            needsDisplay = true
+            return true
+        }
         guard draft != nil || draftStart != nil || draggingSelection else { return false }
         draft = nil
         draftStart = nil
@@ -612,19 +907,29 @@ final class OverlayEditorView: NSView {
         return true
     }
 
-    private func drawSizeBar(_ ctx: CGContext) {
-        let text = "\(doc.baseImage.width) × \(doc.baseImage.height)" + (statusMessage.map { "   \($0)" } ?? "")
+    /// 尺寸条：贴在框的正上方，框一动它就动（框贴到屏幕顶边时改放框内侧）
+    private func drawSizeBar(_ ctx: CGContext, above rect: CGRect) {
+        var text = "\(Int(rect.width * pixelScale)) × \(Int(rect.height * pixelScale))"
+        if let statusMessage { text += "   \(statusMessage)" }
         let attributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold),
             .foregroundColor: NSColor.white,
         ]
         let size = (text as NSString).size(withAttributes: attributes)
-        let barRect = CGRect(x: imageRect.minX, y: 4,
-                             width: size.width + 20, height: imageRect.minY - 8)
-        ctx.setFillColor(NSColor.black.withAlphaComponent(0.75).cgColor)
-        ctx.addPath(CGPath(roundedRect: barRect, cornerWidth: 6, cornerHeight: 6, transform: nil))
+        let barSize = CGSize(width: size.width + 22, height: size.height + 10)
+        var origin = CGPoint(x: rect.minX, y: rect.minY - barSize.height - 8)
+        if origin.y < bounds.minY + 2 {
+            // 框贴到屏幕顶边：有整屏原图就挪到框内侧；小窗模式放回顶部预留条
+            origin.y = canResize ? rect.minY + 8 : bounds.minY + 3
+        }
+        if origin.x + barSize.width > bounds.maxX - 2 {
+            origin.x = max(bounds.minX + 2, bounds.maxX - barSize.width - 2)
+        }
+        let barRect = CGRect(origin: origin, size: barSize)
+        ctx.setFillColor(NSColor.black.withAlphaComponent(0.72).cgColor)
+        ctx.addPath(CGPath(roundedRect: barRect, cornerWidth: 7, cornerHeight: 7, transform: nil))
         ctx.fillPath()
-        (text as NSString).draw(at: CGPoint(x: barRect.minX + 10, y: barRect.minY + 5),
+        (text as NSString).draw(at: CGPoint(x: barRect.minX + 11, y: barRect.minY + 5),
                                 withAttributes: attributes)
     }
 
@@ -635,7 +940,6 @@ final class OverlayEditorView: NSView {
             CGPoint(x: rect.minX, y: rect.maxY), CGPoint(x: rect.midX, y: rect.maxY), CGPoint(x: rect.maxX, y: rect.maxY),
         ]
     }
-
     func flashStatus(_ message: String) {
         statusMessage = message
         statusUntil = Date().addingTimeInterval(1.6)
@@ -660,12 +964,83 @@ final class OverlayEditorView: NSView {
                 y: min(max(0, p.y), CGFloat(doc.baseImage.height)))
     }
 
+    /// 拖手柄改尺寸：命中判据（先角、再边线中段）
+    private func resizeHandleHit(at point: CGPoint) -> ResizeHandle? {
+        let tolerance: CGFloat = 9
+        for handle in ResizeHandle.allCases {
+            let hp = handle.point(in: imageRect)
+            if abs(point.x - hp.x) <= tolerance && abs(point.y - hp.y) <= tolerance { return handle }
+        }
+        guard imageRect.insetBy(dx: -3, dy: -3).contains(point) else { return nil }
+        if abs(point.x - imageRect.minX) <= 3 { return .left }
+        if abs(point.x - imageRect.maxX) <= 3 { return .right }
+        if abs(point.y - imageRect.minY) <= 3 { return .top }
+        if abs(point.y - imageRect.maxY) <= 3 { return .bottom }
+        return nil
+    }
+
+    /// 按手柄 + 位移算新框，夹在屏幕内，最小 40×40。
+    /// 抽成静态是为了自检能测 —— 这里错了就是"一拖手柄截图框乱飞"。
+    static func resizedRect(_ origin: CGRect, handle: ResizeHandle, delta: CGPoint,
+                            bounds: CGRect) -> CGRect {
+        var minX = origin.minX, maxX = origin.maxX
+        var minY = origin.minY, maxY = origin.maxY
+        switch handle {
+        case .topLeft:     minX += delta.x; minY += delta.y
+        case .top:         minY += delta.y
+        case .topRight:    maxX += delta.x; minY += delta.y
+        case .left:        minX += delta.x
+        case .right:       maxX += delta.x
+        case .bottomLeft:  minX += delta.x; maxY += delta.y
+        case .bottom:      maxY += delta.y
+        case .bottomRight: maxX += delta.x; maxY += delta.y
+        }
+        var rect = CGRect(x: min(minX, maxX), y: min(minY, maxY),
+                          width: abs(maxX - minX), height: abs(maxY - minY)).integral
+        rect.origin.x = min(max(bounds.minX, rect.origin.x), max(bounds.minX, bounds.maxX - 40))
+        rect.origin.y = min(max(bounds.minY, rect.origin.y), max(bounds.minY, bounds.maxY - 40))
+        rect.size.width = min(rect.width, bounds.maxX - rect.minX)
+        rect.size.height = min(rect.height, bounds.maxY - rect.minY)
+        return rect
+    }
+
+    /// 视图坐标（flipped，窗口内）→ AppKit 全局坐标（左下原点）
+    private func appKitRect(fromView rect: CGRect) -> CGRect {
+        let origin = window?.frame.origin ?? .zero
+        return CGRect(x: rect.minX + origin.x,
+                      y: origin.y + (bounds.height - rect.maxY),
+                      width: rect.width, height: rect.height)
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        guard canResize else { return }
+        for handle in ResizeHandle.allCases {
+            let point = handle.point(in: imageRect)
+            addCursorRect(CGRect(x: point.x - 8, y: point.y - 8, width: 16, height: 16),
+                          cursor: handle.cursor)
+        }
+    }
+
     override func mouseDown(with event: NSEvent) {
         // 文字输入中：先提交再继续
         if let field = textField { commitTextField(field) }
 
+        let viewPoint = convert(event.locationInWindow, from: nil)
+
+        // 🔴 拖手柄改截图框优先于一切绘制工具：手柄就压在图边缘上，
+        // 不让它优先的话，想调尺寸永远会先画出一条线。
+        if canResize, let handle = resizeHandleHit(at: viewPoint) {
+            resizeHandle = handle
+            resizeStartRect = imageRect
+            resizeStartPoint = viewPoint
+            previewRect = nil
+            needsDisplay = true
+            return
+        }
+
         let p = clampToImage(pixelPoint(event))
-        guard imageRect.contains(convert(event.locationInWindow, from: nil)) else { return }
+        guard imageRect.contains(viewPoint) else { return }
 
         if doc.tool == .crop {
             // 裁剪：拖出保留范围（按下即清掉上一个草稿）
@@ -706,6 +1081,14 @@ final class OverlayEditorView: NSView {
     }
 
     override func mouseDragged(with event: NSEvent) {
+        let viewPoint = convert(event.locationInWindow, from: nil)
+        if let handle = resizeHandle, let startRect = resizeStartRect, let start = resizeStartPoint {
+            previewRect = Self.resizedRect(startRect, handle: handle,
+                                           delta: CGPoint(x: viewPoint.x - start.x, y: viewPoint.y - start.y),
+                                           bounds: bounds)
+            needsDisplay = true
+            return
+        }
         let p = clampToImage(pixelPoint(event))
         if doc.tool == .crop {
             let anchor = cropAnchor ?? p
@@ -733,6 +1116,16 @@ final class OverlayEditorView: NSView {
     }
 
     override func mouseUp(with event: NSEvent) {
+        if resizeHandle != nil {
+            let target = previewRect
+            resizeHandle = nil
+            resizeStartRect = nil
+            resizeStartPoint = nil
+            previewRect = nil
+            needsDisplay = true
+            if let target { controller.commitResize(to: appKitRect(fromView: target)) }
+            return
+        }
         if doc.tool == .crop {
             cropAnchor = nil
             // 太小就是误触：清掉，别留个几像素的框

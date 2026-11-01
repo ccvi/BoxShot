@@ -261,7 +261,8 @@ private struct RecordPane: View {
             }
             HStack {
                 Text("").frame(width: 90)
-                Toggle("摄像头画中画（画面右下角）", isOn: model.prefs.binding(\.recordCamera))
+                Toggle("录制时显示摄像头取景框（画面右下角，圆形 / 圆角矩形，右键切换）",
+                       isOn: model.prefs.binding(\.recordCamera))
             }
             HStack {
                 Text("帧率").frame(width: 90, alignment: .trailing)

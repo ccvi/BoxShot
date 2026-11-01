@@ -198,14 +198,29 @@ final class AppModel: ObservableObject {
                 frame = ScreenCapture.appKitFrame(
                     fromGlobalTopLeft: ScreenCapture.displayBoundsGlobal(displayID))
             }
-            routeCapturedImage(image, overlayFrame: frame)
+            // 🔴 区域截图额外留一张**整屏原图**：标注浮层要靠它支持"随时把截图框
+            // 拉大"（扩出去的那块必须是当初那一帧，不能重新截——重新截会拍到我们
+            // 自己的浮层，内容也可能已经变了）。没拿到也不影响主流程，只是不能扩。
+            var fullDisplay: OverlayEditorController.FullDisplay?
+            if let region, let frame {
+                if let full = try? await ScreenCapture.captureDisplay(displayID) {
+                    fullDisplay = OverlayEditorController.FullDisplay(
+                        image: full,
+                        frameAppKit: ScreenCapture.appKitFrame(
+                            fromGlobalTopLeft: ScreenCapture.displayBoundsGlobal(displayID)),
+                        pixelScale: CGFloat(full.width) / max(1, ScreenCapture.displayBoundsGlobal(displayID).width))
+                }
+                _ = frame
+            }
+            routeCapturedImage(image, overlayFrame: frame, fullDisplay: fullDisplay)
         } catch {
             presentError("截图失败：\(error.localizedDescription)")
         }
     }
 
     /// 截好的图按 pending 设定分流：直接复制 / OCR / QR / 原位浮层
-    private func routeCapturedImage(_ image: CGImage, overlayFrame frame: CGRect? = nil) {
+    private func routeCapturedImage(_ image: CGImage, overlayFrame frame: CGRect? = nil,
+                                    fullDisplay: OverlayEditorController.FullDisplay? = nil) {
         if prefs.value.playSound { Support.playFeedbackSound() }
         // 历史先记：不管后面是弹浮层还是直接复制，这张图都得留痕
         ShotHistoryStore.shared.record(image, limit: prefs.value.maxShotHistory)
@@ -215,7 +230,7 @@ final class AppModel: ObservableObject {
             if pendingCopyDirectly || !prefs.value.openEditorAfterShot {
                 Support.copyImageToClipboard(image)
             } else if let frame {
-                openOverlayEditor(image: image, frame: frame)
+                openOverlayEditor(image: image, frame: frame, fullDisplay: fullDisplay)
             } else {
                 openEditor(image: image)
             }
@@ -236,9 +251,12 @@ final class AppModel: ObservableObject {
 
     /// 原位钉住浮层（区域/全屏/窗口截图的默认标注界面）
     /// shapes 用于裁剪后重开：把已有标注带进新尺寸的文档里
-    func openOverlayEditor(image: CGImage, frame: CGRect, shapes: [AnnotationShape] = []) {
+    func openOverlayEditor(image: CGImage, frame: CGRect,
+                           fullDisplay: OverlayEditorController.FullDisplay? = nil,
+                           shapes: [AnnotationShape] = []) {
         let controller = OverlayEditorController(model: self, image: image,
                                                  selectionFrameAppKit: frame,
+                                                 fullDisplay: fullDisplay,
                                                  shapes: shapes)
         overlayEditor = controller
         controller.onClose = { [weak self, weak controller] in

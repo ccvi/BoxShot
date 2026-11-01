@@ -427,6 +427,55 @@ enum SelfTest {
             check("清除后不会回退成默认键", prefs.spec(for: .regionShot) == nil)
         }
 
+        // ── 拖手柄改截图框 ──
+        // 这条交互错了就是"一拖框就乱飞"，而且改完要按新框从整屏原图重裁，
+        // 坐标一旦镜像，裁出来的是屏幕另一头的内容 —— 纯函数，必须测。
+        do {
+            let bounds = CGRect(x: 0, y: 0, width: 1000, height: 800)
+            let start = CGRect(x: 100, y: 100, width: 300, height: 200)
+
+            let bigger = OverlayEditorView.resizedRect(start, handle: .bottomRight,
+                                                       delta: CGPoint(x: 40, y: 30), bounds: bounds)
+            check("拖右下角：宽高各加 40/30",
+                  bigger.width == 340 && bigger.height == 230)
+            check("拖右下角：原点不动", bigger.origin == start.origin)
+
+            let fromTopLeft = OverlayEditorView.resizedRect(start, handle: .topLeft,
+                                                            delta: CGPoint(x: 20, y: 10), bounds: bounds)
+            check("拖左上角：原点跟着走，尺寸反向变",
+                  fromTopLeft.origin == CGPoint(x: 120, y: 110)
+                  && fromTopLeft.width == 280 && fromTopLeft.height == 190)
+
+            let leftOnly = OverlayEditorView.resizedRect(start, handle: .right,
+                                                         delta: CGPoint(x: -50, y: 999), bounds: bounds)
+            check("拖右边缘：只有宽度变", leftOnly.width == 250 && leftOnly.height == 200)
+
+            let squashed = OverlayEditorView.resizedRect(start, handle: .bottomRight,
+                                                         delta: CGPoint(x: -999, y: -999), bounds: bounds)
+            check("缩到极限仍有 40×40", squashed.width >= 40 && squashed.height >= 40)
+
+            let overflow = OverlayEditorView.resizedRect(start, handle: .bottomRight,
+                                                         delta: CGPoint(x: 5000, y: 5000), bounds: bounds)
+            check("拖出屏幕会被夹住",
+                  overflow.maxX <= bounds.maxX && overflow.maxY <= bounds.maxY)
+
+            // AppKit 左下原点 → 整屏像素左上原点
+            let display = CGRect(x: 0, y: 0, width: 200, height: 150)
+            let px = OverlayEditorController.pixelRect(for: CGRect(x: 10, y: 20, width: 50, height: 40),
+                                                       displayFrame: display, pixelScale: 2)
+            check("屏幕框 → 像素矩形（y 轴翻转）",
+                  px == CGRect(x: 20, y: 180, width: 100, height: 80))
+
+            // AppKit 的 y=0 是屏幕**底边**，换算到图像里应该是最大 y，别镜像
+            let bottom = OverlayEditorController.pixelRect(for: CGRect(x: 0, y: 0, width: 20, height: 10),
+                                                           displayFrame: display, pixelScale: 1)
+            check("贴屏幕底边的框像素 y = 屏高 − 高",
+                  bottom.minY == 140 && bottom.height == 10)
+            let top = OverlayEditorController.pixelRect(for: CGRect(x: 0, y: 140, width: 20, height: 10),
+                                                        displayFrame: display, pixelScale: 1)
+            check("贴屏幕顶边的框像素 y = 0", top.minY == 0)
+        }
+
             print(failures == 0 ? "\n全部通过" : "\n\(failures) 项失败")
             return failures == 0 ? 0 : 1
         }

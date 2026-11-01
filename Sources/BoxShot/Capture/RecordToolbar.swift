@@ -4,8 +4,11 @@ import AppKit
 // 录屏工具条（1.0.1 按用户截图改版，参考 macOS 原生截图条）
 //
 // 区域录制：选区后虚线框原位钉住 + 底部工具条：
-//   [✕关闭] [全屏] [重选区域] | [●记录/■停止 + 计时] | [🎙麦克风] [🔊系统声音] | [选项▾]
+//   [✕关闭] [全屏] [重选区域] | [●记录/■停止 + 计时] | [🎙麦克风] [🔊系统声音] [📷摄像头] | [选项▾]
 // 全屏录制：同样的工具条，无虚线框。
+//
+// 摄像头取景框是独立的圆形 / 圆角矩形小窗（CameraBubble），贴着选区右下角，
+// 所见即所得地进录像；右键在圆形 ⇄ 圆角矩形之间切换，✕ 或工具条按钮关闭。
 //
 // 选项弹层：格式 MOV/MP4、质量 高/中/低、显示光标（写回偏好设置）。
 // ============================================================
@@ -33,6 +36,8 @@ final class RecordToolbarController: NSObject {
     private var timeLabel: NSTextField?
     private var micButton: NSButton?
     private var systemButton: NSButton?
+    private var cameraButton: NSButton?
+    private var cameraBubble: CameraBubbleController?
     private var popover: NSPopover?
     private var escMonitor: Any?
 
@@ -128,13 +133,16 @@ final class RecordToolbarController: NSObject {
 
         let mic = add("mic", "麦克风声音", tag: 5)
         let sys = add("speaker.wave.2", "系统声音", tag: 6)
+        let cam = add("video", "摄像头取景框", tag: 8)
         micButton = mic
         systemButton = sys
+        cameraButton = cam
         stack.addArrangedSubview(makeDivider())
 
         add("slider.horizontal.3", "录屏选项", tag: 7)
 
         refreshAudioButtons()
+        refreshCameraButton()
 
         stack.layoutSubtreeIfNeeded()
         let size = stack.fittingSize
@@ -186,6 +194,35 @@ final class RecordToolbarController: NSObject {
         systemButton?.contentTintColor = source == .system ? .systemBlue : .white
     }
 
+    private func refreshCameraButton() {
+        let on = cameraBubble?.isVisible == true
+        cameraButton?.contentTintColor = on ? .systemBlue : .white
+        cameraButton?.toolTip = on ? "关闭摄像头取景框" : "打开摄像头取景框（画面右下角）"
+    }
+
+    /// 取景框的落位依据：区域录制贴选区右下角，全屏录制贴整块屏幕右下角
+    private var cameraAnchorFrame: CGRect {
+        selectionFrameAppKit ?? (framePanel?.screen ?? NSScreen.main)?.visibleFrame
+            ?? CGRect(x: 0, y: 0, width: 1280, height: 800)
+    }
+
+    private func toggleCameraBubble() {
+        if let bubble = cameraBubble, bubble.isVisible {
+            bubble.close()
+            cameraBubble = nil
+            refreshCameraButton()
+            return
+        }
+        let bubble = CameraBubbleController()
+        bubble.onClose = { [weak self] in
+            self?.cameraBubble = nil
+            self?.refreshCameraButton()
+        }
+        cameraBubble = bubble
+        bubble.show(anchor: cameraAnchorFrame)
+        refreshCameraButton()
+    }
+
     // ── 动作 ────────────────────────────────────────────────
 
     @objc private func toolbarAction(_ sender: NSButton) {
@@ -196,6 +233,7 @@ final class RecordToolbarController: NSObject {
             region = nil
             hideFrame()
             if let panel = toolbarPanel { position(panel) }
+            if let bubble = cameraBubble, bubble.isVisible { bubble.show(anchor: cameraAnchorFrame) }
         case 3: // 重选区域：先收掉自己，让 AppModel 重新走选区
             close(stopRecording: true)
             model?.perform(.recordRegion)
@@ -207,6 +245,8 @@ final class RecordToolbarController: NSObject {
         case 6: // 系统声音
             model?.prefs.value.recordAudio = (model?.prefs.value.recordAudio == .system) ? .none : .system
             refreshAudioButtons()
+        case 8: // 摄像头取景框
+            toggleCameraBubble()
         case 7: // 选项弹层
             toggleOptionsPopover(anchor: sender)
         case 9: // 暂停 / 继续
@@ -275,11 +315,16 @@ final class RecordToolbarController: NSObject {
         }
         do {
             let isGIF = prefs.recordFormat == .gif
+            // 🔴 摄像头取景框改成"上屏 + 被录进画面"（见 CameraBubble 注释），
+            // 编码端不再合成画中画 —— 否则同一个摄像头会在成片里出现两次。
+            if !isGIF, prefs.recordCamera, cameraBubble == nil {
+                toggleCameraBubble()
+            }
             try controller.startRecording(displayID: displayID,
                                           region: region,
                                           // GIF 没有音轨：这里明确传 none，别让引擎白开一路采集
                                           audio: isGIF ? .none : prefs.recordAudio,
-                                          camera: isGIF ? false : prefs.recordCamera,
+                                          camera: false,
                                           fps: isGIF ? prefs.recordGIFPS : prefs.recordFPS,
                                           showCursor: prefs.recordShowCursor,
                                           format: prefs.recordFormat,
@@ -387,6 +432,8 @@ final class RecordToolbarController: NSObject {
         timer?.invalidate()
         timer = nil
         startingUp = false
+        cameraBubble?.close()
+        cameraBubble = nil
         framePanel?.orderOut(nil)
         toolbarPanel?.orderOut(nil)
         framePanel = nil
