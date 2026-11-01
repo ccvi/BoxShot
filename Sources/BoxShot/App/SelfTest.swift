@@ -392,6 +392,41 @@ enum SelfTest {
             try? FileManager.default.removeItem(at: first)
         }
 
+        // ── 全局热键的可用性门槛 ──
+        // 「快捷键设置不可用」有两条独立的病因：一是录制控件根本收不到键盘
+        // （NSButton 默认不接受第一响应者），二是录下来的键不符合注册条件
+        // （纯字母会和打字冲突，Carbon 直接拒）。第二条是纯函数，必须能测。
+        do {
+            let plainLetter = KeySpec(keyCode: 0, label: "A")
+            check("纯字母键不能当全局热键", plainLetter.isUsableAsGlobal == false)
+
+            let plainDigit = KeySpec(keyCode: 29, label: "0")
+            check("纯数字键不能当全局热键", plainDigit.isUsableAsGlobal == false)
+
+            let withCommand = KeySpec(keyCode: 0, command: true, label: "A")
+            check("⌘+字母可以当全局热键", withCommand.isUsableAsGlobal)
+
+            let withOption = KeySpec(keyCode: 0, option: true, label: "A")
+            check("⌥+字母可以当全局热键", withOption.isUsableAsGlobal)
+
+            // F7 的虚拟键码是 98（kVK_F7），功能键不带修饰键也该放行
+            let plainF7 = KeySpec(keyCode: 98, label: "F7")
+            check("F7 不带修饰键也能注册", plainF7.isUsableAsGlobal)
+
+            let plainSpace = KeySpec(keyCode: 49, label: "空格")
+            check("空格不能当全局热键", plainSpace.isUsableAsGlobal == false)
+        }
+
+        // ── 设置里的键位不回退默认值 ──
+        do {
+            var prefs = Preferences()
+            check("出厂不带任何热键", prefs.spec(for: .regionShot) == nil)
+            prefs.shortcuts[ShotAction.regionShot.rawValue] = KeySpec(keyCode: 98, label: "F7")
+            check("录过的键位读得回来", prefs.spec(for: .regionShot)?.label == "F7")
+            prefs.shortcuts.removeValue(forKey: ShotAction.regionShot.rawValue)
+            check("清除后不会回退成默认键", prefs.spec(for: .regionShot) == nil)
+        }
+
             print(failures == 0 ? "\n全部通过" : "\n\(failures) 项失败")
             return failures == 0 ? 0 : 1
         }

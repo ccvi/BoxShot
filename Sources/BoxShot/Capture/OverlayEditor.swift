@@ -410,9 +410,13 @@ final class OverlayEditorController: NSObject {
             if self.contentView?.isEditingText == true { return event }
             let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             switch event.keyCode {
-            case 53: // Esc：有待确认的裁剪就只撤裁剪，不关浮层
+            case 53: // Esc：只撤"正在进行的动作"，不关浮层
+                // 🔴 用户明确要求「没主动点取消就不能结束截图」。Esc 以前直接
+                // close() 丢弃整张标注好的图，手一抖就白干了。现在：待确认的裁剪
+                // → 撤裁剪；正在画/正在拖 → 撤这一笔；什么都没有 → 什么都不做。
+                // 关浮层只有 ✕ 按钮（和 ⌘W 之类显式关闭）。
                 if self.cancelCropIfPending() { return nil }
-                self.close()
+                _ = self.contentView?.cancelDraft()
                 return nil
             case 36, 76: // ⏎ / 小键盘 Enter：应用裁剪
                 if self.applyCropIfPending() { return nil }
@@ -443,7 +447,7 @@ final class OverlayEditorController: NSObject {
         // 🔴 这里**故意不监听框外点击**。
         // 以前点一下浮层外面就直接关闭并丢标注 —— 用户点一下别处（或者只是
         // 切个窗口）辛苦标的就没了，属于"没主动取消却被结束"。
-        // 现在只有 ✕ 和 Esc 能关；浮层是 .floating 层，不会自己跑掉。
+        // 现在只有 ✕ 能关（Esc 也降级成"撤当前动作"了）；浮层是 .floating 层，不会自己跑掉。
     }
 }
 
@@ -593,6 +597,19 @@ final class OverlayEditorView: NSView {
         pendingCrop = nil
         cropAnchor = nil
         needsDisplay = true
+    }
+
+    /// Esc 用：丢掉正在拖/正在画的那一笔（没有正在进行的就返回 false）。
+    /// 返回 false 时调用方**不要**顺手把浮层关掉 —— 用户要求只有主动点 ✕ 才结束。
+    @discardableResult
+    func cancelDraft() -> Bool {
+        guard draft != nil || draftStart != nil || draggingSelection else { return false }
+        draft = nil
+        draftStart = nil
+        draggingSelection = false
+        dragLastPoint = nil
+        needsDisplay = true
+        return true
     }
 
     private func drawSizeBar(_ ctx: CGContext) {

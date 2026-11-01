@@ -30,6 +30,10 @@ final class RecorderController: NSObject {
 
     var onStateChange: (@MainActor (Bool) -> Void)?
     var onError: (@MainActor (String) -> Void)?
+    /// 非致命提醒（没麦克风 / 没摄像头这类）：录还是录得下去，只是少一路音视频。
+    /// 和 onError 分开是必须的 —— 混在一起时，工具条会把"麦克风没授权"
+    /// 当成"录制启动失败"，把好好的录制界面退回去。
+    var onWarning: (@MainActor (String) -> Void)?
     /// 录制完成后在 Finder 里定位文件（默认关，由工具条按设置传入）
     var revealInFinderOnFinish = false
 
@@ -104,6 +108,10 @@ final class RecorderController: NSObject {
     /// 上限：600 帧。GIF 每帧都是完整位图，10fps 下 600 帧 ≈ 60 秒、几十 MB。
     private let gifMaxFrames = 600
     private var isGIF = false
+    /// 麦克风授权只问一次（重复调用会叠出多条请求）
+    private var micRequested = false
+    /// 首帧只打一行日志：查"点了录制却一帧都没有"时，这行是分水岭
+    private var loggedFirstFrame = false
 
     // ── 启动 ────────────────────────────────────────────────
 
@@ -112,7 +120,14 @@ final class RecorderController: NSObject {
                         camera: Bool, fps: Int, showCursor: Bool,
                         format: RecordFileFormat = .mov, quality: RecordQuality = .high,
                         showsHUD: Bool = true) throws {
-        guard writer == nil, gifFrames.isEmpty else { return }
+        // 🔴 这里以前是 `guard … else { return }`：真正的"点了录制没反应"。
+        // 上一路录制还没收完尾就再点一次，函数静默返回，调用方以为已经在录，
+        // 按钮变成停止、计时器开始走，可一帧都不会有。宁可抛错让用户看见原因。
+        guard writer == nil, gifFrames.isEmpty, stream == nil, captureSession == nil else {
+            throw NSError(domain: "BoxShot", code: 3, userInfo: [
+                NSLocalizedDescriptionKey: "上一次录制还在收尾，请稍等一秒再试",
+            ])
+        }
         self.showsHUD = showsHUD
         isGIF = (format == .gif)
 
@@ -124,8 +139,10 @@ final class RecorderController: NSObject {
         let scale = ScreenCapture.scaleFactor(for: displayID)
         let displayBounds = ScreenCapture.displayBoundsGlobal(displayID)
         let sourceRect = region ?? CGRect(origin: .zero, size: displayBounds.size)
-        let pixelW = Int(sourceRect.width * scale)
-        let pixelH = Int(sourceRect.height * scale)
+        // 🔴 H.264 要求宽高是偶数：奇数尺寸在部分编码器上直接拒绝/出花屏。
+        // 选区是用户随手拖的，500×301 这种很常见，这里统一向下取偶数。
+        let pixelW = max(2, Int(sourceRect.width * scale) & ~1)
+        let pixelH = max(2, Int(sourceRect.height * scale) & ~1)
 
         if isGIF {
             // GIF 走另一条路：不建 writer，逐帧收 CGImage，收工时一次性编码。
@@ -141,11 +158,21 @@ final class RecorderController: NSObject {
 
             // ── 视频输入（码率按质量档：像素 × 帧率 × 系数）──
             let bitrate = Int(Double(pixelW * pixelH) * Double(max(10, fps)) * quality.bitrateFactor)
+            // 🔴 码率**必须**藏在 AVVideoCompressionPropertiesKey 里面。
+            // 放在 outputSettings 顶层是老的写法，macOS 26 直接抛
+            // NSInvalidArgumentException：
+            //   "Output settings dictionary contains one or more invalid keys: AverageBitRate"
+            // 而这是 ObjC 异常，Swift 的 try/catch **接不住** —— 进程当场 SIGABRT。
+            // 症状就是「点一下录制，应用直接消失」，一条日志都留不下。
             let videoSettings: [String: Any] = [
                 AVVideoCodecKey: AVVideoCodecType.h264,
                 AVVideoWidthKey: pixelW,
                 AVVideoHeightKey: pixelH,
-                AVVideoAverageBitRateKey: bitrate,
+                AVVideoCompressionPropertiesKey: [
+                    AVVideoAverageBitRateKey: bitrate,
+                    AVVideoExpectedSourceFrameRateKey: max(10, fps),
+                    AVVideoMaxKeyFrameIntervalKey: max(10, fps),
+                ],
             ]
             let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
             videoInput.expectsMediaDataInRealTime = true
@@ -190,12 +217,11 @@ final class RecorderController: NSObject {
         }
 
         // ── 麦克风 ──
+        // 🔴 这里原来连着写了两遍（`audio == .mic && !isGIF` 和 `audio == .mic`），
+        // 于是每次录音都会建两个 AVCaptureSession：第二个把第一个从 captureSession
+        // 上顶掉，第一个就此失控地一直跑着占着麦克风，两路音频输出还同时往同一个
+        // writer input 上 append —— 轻则成片音轨错乱，重则 writer 直接报错。
         if audio == .mic && !isGIF {
-            requestMicThenCapture()
-        }
-
-        // ── 麦克风 ──
-        if audio == .mic {
             requestMicThenCapture()
         }
 
@@ -207,9 +233,12 @@ final class RecorderController: NSObject {
                     throw NSError(domain: "BoxShot", code: 2,
                                   userInfo: [NSLocalizedDescriptionKey: "找不到目标显示器"])
                 }
-                // 排除自己：录制浮条 / 贴图不进画面
+                // 排除自己：录制浮条 / 贴图不进画面。
+                // 🔴 按 pid 认自己，不按 bundleIdentifier —— 裸二进制调试时它是 nil，
+                //   过滤结果恒为空，等于没排除。ScreenCapture.captureRegion 早就是 pid 口径，这里跟上。
+                let ownPID = ProcessInfo.processInfo.processIdentifier
                 let ownWindows = content.windows.filter {
-                    $0.owningApplication?.bundleIdentifier == Bundle.main.bundleIdentifier
+                    $0.owningApplication?.processID == ownPID
                 }
                 let filter = SCContentFilter(display: display, excludingWindows: ownWindows)
 
@@ -236,12 +265,14 @@ final class RecorderController: NSObject {
                     startCameraCapture()
                 }
                 try await stream.startCapture()
+                NSLog("[BoxShot] 录制已开始 \(pixelW)×\(pixelH) → \(url.lastPathComponent)")
 
                 DispatchQueue.main.async {
                     self.showHUD()
                     self.notifyState(true)
                 }
             } catch {
+                NSLog("[BoxShot] 录制启动失败：\(error)")
                 self.teardownPipeline()
                 DispatchQueue.main.async {
                     self.onError?("无法开始录制：\(error.localizedDescription)")
@@ -340,6 +371,8 @@ final class RecorderController: NSObject {
         gifFrames.removeAll()
         gifContext = nil
         isGIF = false
+        micRequested = false
+        loggedFirstFrame = false
         stateLock.lock()
         paused = false
         pausedTotal = .zero
@@ -373,7 +406,7 @@ final class RecorderController: NSObject {
         guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front)
                 ?? AVCaptureDevice.default(for: .video),
               let input = try? AVCaptureDeviceInput(device: device) else {
-            DispatchQueue.main.async { self.onError?("找不到可用摄像头，本次录制不含画中画") }
+            DispatchQueue.main.async { self.onWarning?("找不到可用摄像头，本次录制不含画中画") }
             return
         }
         session.beginConfiguration()
@@ -389,10 +422,13 @@ final class RecorderController: NSObject {
     }
 
     private func requestMicThenCapture() {
+        // 幂等：TCC 面板弹着的时候再点一次"录制"，不该再发一次请求
+        guard !micRequested else { return }
+        micRequested = true
         AVCaptureDevice.requestAccess(for: .audio) { granted in
             guard granted else {
                 DispatchQueue.main.async {
-                    self.onError?("没有麦克风权限，本次录制无声（可在系统设置里授权）")
+                    self.onWarning?("没有麦克风权限，本次录制无声（可在系统设置里授权）")
                 }
                 return
             }
@@ -404,7 +440,7 @@ final class RecorderController: NSObject {
         let session = AVCaptureSession()
         guard let device = AVCaptureDevice.default(for: .audio),
               let input = try? AVCaptureDeviceInput(device: device) else {
-            DispatchQueue.main.async { self.onError?("找不到可用麦克风，本次录制无声") }
+            DispatchQueue.main.async { self.onWarning?("找不到可用麦克风，本次录制无声") }
             return
         }
         session.beginConfiguration()
@@ -454,6 +490,11 @@ extension RecorderController: SCStreamOutput {
         stateLock.unlock()
 
         if pausedNow { return }
+
+        if !loggedFirstFrame {
+            loggedFirstFrame = true
+            NSLog("[BoxShot] 录制收到首帧")
+        }
 
         if isGIF {
             captureGIFFrame(pixelBuffer)
@@ -613,6 +654,10 @@ final class RecordHUD: NSPanel {
         isOpaque = false
         backgroundColor = .clear
         hasShadow = true
+        // 🔴 程序化创建的 NSWindow 默认 isReleasedWhenClosed = true：
+        // close() 会自己 release 一次，而我们这边 `hud = nil` 又 release 一次 →
+        // 双重释放，表现为"停止录制后随机闪退"（崩溃栈是 objc_release / __NSArrayM dealloc）。
+        isReleasedWhenClosed = false
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
 
         let container = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: 148, height: 40))

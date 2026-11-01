@@ -23,6 +23,8 @@ final class RecordToolbarController: NSObject {
     private var toolbarPanel: NSPanel?
     private var recorder: RecorderController?
     private var isRecording = false
+    /// 已按"开始"但引擎还没回话（SCStream.startCapture 是异步的）
+    private var startingUp = false
     private var timer: Timer?
     private var startDate: Date?
 
@@ -70,6 +72,8 @@ final class RecordToolbarController: NSObject {
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = false
+        // 程序化窗口默认 close() 会自我释放，和 ARC 抢着放 → 随机闪退
+        panel.isReleasedWhenClosed = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.contentView = DashedFrameView(frame: NSRect(origin: .zero, size: frame.size))
         framePanel = panel
@@ -86,16 +90,16 @@ final class RecordToolbarController: NSObject {
     private func showToolbar() {
         let stack = NSStackView()
         stack.orientation = .horizontal
-        stack.spacing = 6
-        stack.edgeInsets = NSEdgeInsets(top: 8, left: 12, bottom: 8, right: 12)
+        stack.spacing = 10
+        stack.edgeInsets = NSEdgeInsets(top: 10, left: 14, bottom: 10, right: 14)
 
         func add(_ symbol: String, _ title: String, tag: Int, tint: NSColor? = nil) -> NSButton {
             let button = NSButton(title: "", target: self, action: #selector(toolbarAction(_:)))
             button.bezelStyle = .regularSquare
             button.isBordered = false
             button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)?
-                .withSymbolConfiguration(.init(pointSize: 16, weight: .medium))
-            button.frame = NSRect(x: 0, y: 0, width: 38, height: 32)
+                .withSymbolConfiguration(.init(pointSize: 19, weight: .medium))
+            button.frame = NSRect(x: 0, y: 0, width: 44, height: 38)
             button.toolTip = title
             button.tag = tag
             button.contentTintColor = tint
@@ -115,7 +119,7 @@ final class RecordToolbarController: NSObject {
         pause.isEnabled = false
         pauseButton = pause
         let time = NSTextField(labelWithString: "00:00")
-        time.font = NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .semibold)
+        time.font = NSFont.monospacedDigitSystemFont(ofSize: 15, weight: .semibold)
         time.textColor = .white
         time.isHidden = true
         timeLabel = time
@@ -138,7 +142,7 @@ final class RecordToolbarController: NSObject {
         container.material = .hudWindow
         container.state = .active
         container.wantsLayer = true
-        container.layer?.cornerRadius = 12
+        container.layer?.cornerRadius = 14
         container.addSubview(stack)
         stack.frame = container.bounds
 
@@ -149,6 +153,7 @@ final class RecordToolbarController: NSObject {
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = true
+        panel.isReleasedWhenClosed = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.contentView = container
 
@@ -169,7 +174,7 @@ final class RecordToolbarController: NSObject {
     }
 
     private func makeDivider() -> NSView {
-        let view = NSView(frame: NSRect(x: 0, y: 0, width: 1, height: 22))
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: 1, height: 26))
         view.wantsLayer = true
         view.layer?.backgroundColor = NSColor.separatorColor.cgColor
         return view
@@ -241,9 +246,31 @@ final class RecordToolbarController: NSObject {
         let prefs = model.prefs.value
         let controller = RecorderController()
         controller.revealInFinderOnFinish = prefs.recordRevealInFinder
+        controller.onStateChange = { [weak self] recording in
+            guard let self, recording else { return }
+            self.startingUp = false
+            self.tick()
+        }
         controller.onError = { [weak self] message in
-            self?.recordButton?.contentTintColor = .systemRed
-            // 异步启动失败（SCStream 起不来等）不能只染红按钮，用户看不见原因
+            guard let self else { return }
+            // 🔴 开始录制是**异步**的（SCStream 还要等系统把显示器/窗口列表给我们）。
+            // 失败可能发生在按钮已经变成"停止"、计时器已经在走之后 —— 此时如果不
+            // 把界面退回去，用户看到的就是"在录"，实际上一个字节都没写。
+            if self.startingUp {
+                self.recorder = nil
+                self.isRecording = false
+                self.startingUp = false
+                self.timer?.invalidate()
+                self.timer = nil
+                self.resetRecordButton()
+                self.onRecordingChange?(false)
+            }
+            self.model?.presentError(message)
+        }
+        // 少一路麦克风/摄像头不算启动失败：把话说清楚，录制继续。
+        controller.onWarning = { [weak self] message in
+            NSLog("[BoxShot] 录制提醒：\(message)")
+            self?.timeLabel?.toolTip = message
             self?.model?.presentError(message)
         }
         do {
@@ -260,29 +287,51 @@ final class RecordToolbarController: NSObject {
                                           showsHUD: false)
             recorder = controller
             isRecording = true
+            startingUp = true
             isPaused = false
             pausedTotal = 0
             pauseStartedAt = nil
             startDate = Date()
             recordButton?.image = NSImage(systemSymbolName: "stop.circle.fill",
                                           accessibilityDescription: "停止录制")?
-                .withSymbolConfiguration(.init(pointSize: 14, weight: .medium))
+                .withSymbolConfiguration(.init(pointSize: 17, weight: .medium))
             recordButton?.contentTintColor = .systemRed
-            pauseButton?.isEnabled = true
+            pauseButton?.isEnabled = false   // 首帧到货前按暂停没意义
             pauseButton?.image = NSImage(systemSymbolName: "pause.circle",
                                          accessibilityDescription: "暂停录制")?
-                .withSymbolConfiguration(.init(pointSize: 16, weight: .medium))
+                .withSymbolConfiguration(.init(pointSize: 19, weight: .medium))
             pauseButton?.contentTintColor = nil
             timeLabel?.textColor = .white
             timeLabel?.isHidden = false
+            timeLabel?.stringValue = "启动中…"
             timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
                 DispatchQueue.main.async { self?.tick() }
             }
-            tick()
             onRecordingChange?(true)
         } catch {
+            recorder = nil
+            isRecording = false
+            startingUp = false
+            resetRecordButton()
             model.presentError("无法开始录制：\(error.localizedDescription)")
         }
+    }
+
+    /// 把"记录"按钮和计时器退回未录制状态（启动失败 / 停止后都要走这里）
+    private func resetRecordButton() {
+        timer?.invalidate()
+        timer = nil
+        recordButton?.image = NSImage(systemSymbolName: "record.circle",
+                                      accessibilityDescription: "开始录制")?
+            .withSymbolConfiguration(.init(pointSize: 17, weight: .medium))
+        recordButton?.contentTintColor = .systemRed
+        pauseButton?.isEnabled = false
+        pauseButton?.image = NSImage(systemSymbolName: "pause.circle",
+                                     accessibilityDescription: "暂停录制")?
+            .withSymbolConfiguration(.init(pointSize: 19, weight: .medium))
+        pauseButton?.contentTintColor = nil
+        timeLabel?.textColor = .white
+        timeLabel?.isHidden = true
     }
 
     private func stopRecording() {
@@ -290,19 +339,9 @@ final class RecordToolbarController: NSObject {
         recorder.stop(reason: .user)
         self.recorder = nil
         isRecording = false
+        startingUp = false
         isPaused = false
-        timer?.invalidate()
-        timer = nil
-        recordButton?.image = NSImage(systemSymbolName: "record.circle",
-                                      accessibilityDescription: "开始录制")?
-            .withSymbolConfiguration(.init(pointSize: 14, weight: .medium))
-        pauseButton?.isEnabled = false
-        pauseButton?.image = NSImage(systemSymbolName: "pause.circle",
-                                     accessibilityDescription: "暂停录制")?
-            .withSymbolConfiguration(.init(pointSize: 16, weight: .medium))
-        pauseButton?.contentTintColor = nil
-        timeLabel?.textColor = .white
-        timeLabel?.isHidden = true
+        resetRecordButton()
         onRecordingChange?(false)
         // 录完自动收工具条（文件已落盘，给个反馈就撤）
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
@@ -312,19 +351,26 @@ final class RecordToolbarController: NSObject {
 
     private func tick() {
         guard let startDate else { return }
+        guard !startingUp else { return }   // 启动中不跳秒，等首帧
         // 计时口径与成片一致：暂停这段时间不算
         var elapsed = Date().timeIntervalSince(startDate) - pausedTotal
         if isPaused, let pauseStartedAt { elapsed -= Date().timeIntervalSince(pauseStartedAt) }
         let seconds = max(0, Int(elapsed))
         timeLabel?.stringValue = String(format: "%02d:%02d", seconds / 60, seconds % 60)
+        // 引擎真的起来了才让暂停可用
+        if pauseButton?.isEnabled == false { pauseButton?.isEnabled = true }
     }
 
     func close(stopRecording shouldStop: Bool) {
         if isRecording, shouldStop {
             stopRecording()
         }
-        // 给 writer 一点收尾时间
-        if shouldStop {
+        // 🔴 以前无论有没有在录，teardown 都延后 1 秒。而 AppModel 要等
+        // onClosed 回调才把 recordToolbar 置 nil —— 这一秒里再点菜单的
+        // 「区域录制」会被 `if recordToolbar != nil` 当成"停止"，于是
+        // 关掉刚打开的工具条：表现就是"点了区域录制没反应"。
+        // 没在录就立刻收；在录才留时间给 writer 收尾。
+        if shouldStop && isRecording {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
                 self?.teardown()
             }
@@ -338,12 +384,17 @@ final class RecordToolbarController: NSObject {
             NSEvent.removeMonitor(escMonitor)
             self.escMonitor = nil
         }
+        timer?.invalidate()
+        timer = nil
+        startingUp = false
         framePanel?.orderOut(nil)
         toolbarPanel?.orderOut(nil)
         framePanel = nil
         toolbarPanel = nil
         popover?.close()
         popover = nil
+        // 一定要回调：AppModel 靠它把 recordToolbar 置 nil，
+        // 不回调就等于留了个僵尸，之后点「区域录制」全被当成"停止"。
         onClosed?()
     }
 
@@ -352,7 +403,11 @@ final class RecordToolbarController: NSObject {
         // 曾经只加不删，事件链上越积越多。
         escMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, self.toolbarPanel != nil, event.keyCode == 53 else { return event }
-            self.close(stopRecording: true)
+            // 🔴 录制中按 Esc **不再停录**：录了十分钟的素材不该被一个误触的
+            // Esc 直接掐断。要停就点工具条上的停止按钮（用户明确要求：
+            // 没主动取消就不能结束）。没开录时 Esc 才收掉工具条。
+            if self.isRecording || self.startingUp { return nil }
+            self.close(stopRecording: false)
             return nil
         }
     }

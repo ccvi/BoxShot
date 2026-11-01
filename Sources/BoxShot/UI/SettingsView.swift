@@ -59,7 +59,7 @@ struct SettingsRootView: View {
                     case 2: PinPane(model: model)
                     case 3: OCRPane(model: model)
                     case 4: RecordPane(model: model)
-                    case 5: ShortcutsPane(model: model)
+                    case 5: ShortcutsPane(model: model, prefs: model.prefs)
                     default: AboutPane()
                     }
                 }
@@ -311,6 +311,8 @@ private struct RecordPane: View {
 
 private struct ShortcutsPane: View {
     @ObservedObject var model: AppModel
+    /// 直接观察设置本身：只观察 model 的话，录完键位这一栏不会刷新
+    @ObservedObject var prefs: PreferencesStore
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -319,30 +321,42 @@ private struct ShortcutsPane: View {
                 Text("键值").frame(width: 150, alignment: .leading).font(.callout).foregroundStyle(.secondary)
             }
             ForEach(ShotAction.allCases) { action in
+                let spec = prefs.value.spec(for: action)
                 HStack {
                     Text(action.title).frame(width: 150, alignment: .leading)
                     ShortcutRecorderView(
                         spec: Binding(
-                            get: { model.prefs.value.spec(for: action) },
-                            set: { spec in
-                                if let spec {
-                                    model.prefs.value.shortcuts[action.rawValue] = spec
+                            get: { prefs.value.spec(for: action) },
+                            set: { newValue in
+                                if let newValue {
+                                    prefs.value.shortcuts[action.rawValue] = newValue
                                 } else {
-                                    model.prefs.value.shortcuts.removeValue(forKey: action.rawValue)
+                                    prefs.value.shortcuts.removeValue(forKey: action.rawValue)
                                 }
                             }))
                     .frame(width: 150)
                     Button("清除") {
-                        model.prefs.value.shortcuts.removeValue(forKey: action.rawValue)
+                        prefs.value.shortcuts.removeValue(forKey: action.rawValue)
                     }
                     .font(.footnote)
+                    // 录了但不能当全局热键的，当场标出来，别等用户去试
+                    if let spec, !spec.isUsableAsGlobal {
+                        Text("要加 ⌘/⌥/⌃，或改用 F1–F12")
+                            .font(.footnote)
+                            .foregroundStyle(.orange)
+                    } else if let spec, model.failedShortcuts.contains(spec) {
+                        Text("被系统占用，注册失败")
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                    }
+                    Spacer()
                 }
             }
             Button("清空全部快捷键") {
-                model.prefs.value.shortcuts = [:]
+                prefs.value.shortcuts = [:]
             }
             .padding(.top, 8)
-            Text("F1–F12 功能键可以不带修饰键注册为全局热键；其余按键需要配合 ⌘ / ⌥ / ⌃。")
+            Text("F1–F12 功能键可以不带修饰键注册为全局热键；其余按键必须配合 ⌘ / ⌥ / ⌃，否则会和正常打字冲突，系统不会让你注册。录好后点一下别的行生效。")
                 .font(.callout).foregroundStyle(.secondary)
         }
         .font(.body)
@@ -368,18 +382,34 @@ struct ShortcutRecorderView: NSViewRepresentable {
     final class RecorderButton: NSButton {
         var onCapture: ((KeySpec?) -> Void)?
         private var recording = false
+        private var shownSpec: KeySpec?
 
         init() {
             super.init(frame: .zero)
             bezelStyle = .rounded
             isBordered = true
             setButtonType(.momentaryPushIn)
+            // 没这几个字显示不出来；顺手给个最小高度，别让 SwiftUI 把它压扁
+            title = "记录快捷键"
+            setContentHuggingPriority(.defaultLow, for: .horizontal)
         }
 
         required init?(coder: NSCoder) { fatalError("not used") }
 
+        /// 🔴 关键：NSButton **默认不接受第一响应者**，点它也不会变成 firstResponder，
+        /// 于是 keyDown 永远收不到 —— 这就是"快捷键设置不可用"的根因：
+        /// 点进去看着像在等按键，其实键盘事件全被窗口吃了。
+        override var acceptsFirstResponder: Bool { true }
+
+        override func mouseDown(with event: NSEvent) {
+            // 点一下 = 进入录制态。不要调 super（那会走 momentary 高亮跟踪，
+            // 按下的键还是到不了我们这里）。
+            window?.makeFirstResponder(self)
+        }
+
         func updateLabel(_ spec: KeySpec?) {
-            if recording { return }
+            shownSpec = spec
+            guard !recording else { return }
             title = spec?.display ?? "记录快捷键"
         }
 
@@ -393,6 +423,7 @@ struct ShortcutRecorderView: NSViewRepresentable {
             // 只退出录制态，**不写绑定**——之前在这里回写 nil，
             // 会把刚录好的键位立刻抹掉（"快捷键清除不了"的另一半病因）。
             recording = false
+            title = shownSpec?.display ?? "记录快捷键"
             return true
         }
 
@@ -404,11 +435,19 @@ struct ShortcutRecorderView: NSViewRepresentable {
             }
             if event.keyCode == 51 { // Delete 清除键位
                 onCapture?(nil)
+                shownSpec = nil
                 recording = false
                 window?.makeFirstResponder(nil)
                 return
             }
+            // 只按住修饰键（⌘/⌥/⌃/⇧）时不该被当成一个键位录下来
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            let isPureModifier = flags.subtracting([.command, .shift, .option, .control]).isEmpty
+                && [54, 55, 56, 58, 59, 60, 61, 62].contains(Int(event.keyCode))
+            if isPureModifier { return }
+
             let spec = KeySpec.from(event)
+            shownSpec = spec
             onCapture?(spec)
             recording = false
             title = spec.display

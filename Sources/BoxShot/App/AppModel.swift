@@ -26,6 +26,11 @@ final class AppModel: ObservableObject {
     /// 录制中状态（状态栏菜单显示"停止录制"）
     @Published private(set) var isRecording = false
 
+    /// 上一次注册全局热键时被系统拒掉的键位。
+    /// 🔴 这个必须能被界面看到：注册失败以前只 NSLog，用户在设置里录了个
+    /// 纯字母键，看着"设置成功了"，实际一次都不会触发 —— 这就是"快捷键不可用"。
+    @Published private(set) var failedShortcuts: [KeySpec] = []
+
     init(prefs store: PreferencesStore? = nil) {
         let resolved = store ?? MainActor.assumeIsolated { PreferencesStore() }
         self.prefs = resolved
@@ -84,6 +89,7 @@ final class AppModel: ObservableObject {
             entries.append((spec, { [weak self] in self?.perform(action) }))
         }
         let failed = HotKeyCenter.shared.replaceAll(with: entries)
+        failedShortcuts = failed
         if !failed.isEmpty {
             NSLog("[BoxShot] 热键注册失败：\(failed.map(\.display).joined(separator: ", "))")
         }
@@ -138,6 +144,9 @@ final class AppModel: ObservableObject {
         guard ScreenCapture.ensurePermission() else { return }
         // 已经有编辑器开着时先收掉，避免同时改两张图
         guard editorController == nil || !editorController!.isVisible else { return }
+        // Esc 不再负责退出选区遮罩了，万一上一块遮罩还挂着，这里主动收掉，
+        // 否则新遮罩会叠在旧遮罩上（点哪儿都没反应）。
+        discardActiveSelector()
         pendingCopyDirectly = copyDirectly
         pendingPipeline = pipeline
         regionMode = .capture
@@ -147,6 +156,13 @@ final class AppModel: ObservableObject {
         regionSelector = selector
         selector.begin(highlightWindows: prefs.value.windowHighlight,
                        crosshair: prefs.value.showCrosshair)
+    }
+
+    /// 收掉可能还留在屏上的选区遮罩（重复触发截图/录制时用）
+    private func discardActiveSelector() {
+        guard let selector = regionSelector else { return }
+        regionSelector = nil
+        if selector.isActive { selector.cancel() }
     }
 
     private func shotFullscreen(copyDirectly: Bool) {
@@ -365,6 +381,7 @@ final class AppModel: ObservableObject {
     private func startScrollShot() {
         guard ScreenCapture.ensurePermission() else { return }
         guard scrollController == nil else { return }
+        discardActiveSelector()
         regionMode = .scroll
         let selector = RegionSelector()
         selector.delegate = self
@@ -378,15 +395,21 @@ final class AppModel: ObservableObject {
     /// 区域模式选区后虚线框钉住；全屏模式直接出工具条，按"记录"才真正开录。
     private func startRecording(fullscreen: Bool) {
         guard ScreenCapture.ensurePermission() else { return }
-        if recordToolbar != nil {
-            // 工具条已经开着：菜单项视为"停止"
-            recordToolbar?.close(stopRecording: true)
-            return
+        if let existing = recordToolbar {
+            // 已经有一根工具条：录制中 = 菜单项就是"停止"；
+            // 没在录 = 先把它收掉，然后照常重新选区，而不是什么都不做。
+            // 🔴 以前这里无条件 `return`，只要工具条还挂着（哪怕已经点过 ✕，
+            // 收尾延后一秒），再点「区域录制」就完全没反应 —— 这就是"点击录制不了"。
+            let wasRecording = isRecording
+            existing.close(stopRecording: true)
+            if wasRecording { return }
         }
         let displayID = ScreenCapture.display(for: ScreenCapture.activeScreen())
         if fullscreen {
+            discardActiveSelector()
             showRecordToolbar(displayID: displayID, region: nil)
         } else {
+            discardActiveSelector()
             regionMode = .record
             let selector = RegionSelector()
             selector.delegate = self

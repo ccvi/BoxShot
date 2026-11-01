@@ -47,6 +47,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.showDiagnosticHistory()
             }
         }
+        // 诊断入口：--recordtest 不开界面、直接跑一遍录制引擎（3 秒）。
+        // 结果写 /tmp/boxshot-recordtest.log —— 「点了录制没反应」这类问题
+        // 只有把引擎单独拎出来跑一次，才知道是引擎起不来还是界面没接上。
+        //
+        // 也认标记文件：某些环境下 `open -a App --args …` 不会把参数传进来
+        // （实测 LaunchServices 直接按原 argv 起进程），那就 touch 一个触发文件。
+        let recordTestTrigger = "/tmp/boxshot-recordtest.trigger"
+        if CommandLine.arguments.contains("--recordtest")
+            || FileManager.default.fileExists(atPath: recordTestTrigger) {
+            try? FileManager.default.removeItem(atPath: recordTestTrigger)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+                self?.runRecordDiagnostics()
+            }
+        }
+    }
+
+    private var recordTestRecorder: RecorderController?
+
+    private func runRecordDiagnostics() {
+        let logURL = URL(fileURLWithPath: "/tmp/boxshot-recordtest.log")
+        try? "".write(to: logURL, atomically: true, encoding: .utf8)
+        func log(_ text: String) {
+            NSLog("[BoxShot][recordtest] %@", text)
+            guard let handle = try? FileHandle(forWritingTo: logURL) else { return }
+            handle.seekToEndOfFile()
+            handle.write("\(text)\n".data(using: .utf8)!)
+            try? handle.close()
+        }
+
+        log("屏幕录制权限 = \(ScreenPermission.isGranted)")
+        let displayID = ScreenCapture.display(for: ScreenCapture.activeScreen())
+
+        let recorder = RecorderController()
+        recorder.onError = { message in log("引擎报错：\(message)") }
+        recorder.onStateChange = { recording in log("状态变更 recording=\(recording)") }
+        recordTestRecorder = recorder
+
+        do {
+            try recorder.startRecording(displayID: displayID,
+                                        region: CGRect(x: 0, y: 0, width: 320, height: 240),
+                                        audio: .none, camera: false, fps: 30, showCursor: false,
+                                        format: .mp4, quality: .medium, showsHUD: false)
+            log("startRecording 同步部分成功")
+        } catch {
+            log("startRecording 抛错：\(error.localizedDescription)")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { exit(0) }
+            return
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+            log("准备停止")
+            recorder.stop(reason: .user)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                log("诊断结束")
+                exit(0)
+            }
+        }
     }
 
     private func showDiagnosticHistory() {

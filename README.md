@@ -15,7 +15,7 @@
 
 | 区域 | 能力 |
 | --- | --- |
-| 截图 | 区域截图（**拖出后不立刻截**：八向手柄可调、方向键微调 ⇧×10、Shift 约束正方形，⏎ 或双击确认）、截图直进剪贴板、重复上次区域、全屏（鼠标所在屏）、窗口（轻点选窗口，可高亮） |
+| 截图 | 区域截图（**拖出后不立刻截**：八向手柄可调、方向键微调 ⇧×10、Shift 约束正方形，⏎ 或选区内单击确认）、截图直进剪贴板、重复上次区域、全屏（鼠标所在屏）、窗口（轻点选窗口，可高亮） |
 | 历史 | 最近 N 张截图落盘留档（默认 20），菜单「截图历史…」网格重看，可重开标注 / 复制 / 贴图 / Finder 定位 |
 | 滚动截图 | 手动滚动自动抓帧拼接，横向/竖向都能拼，「缩略图」窗口实时跟着长 |
 | 识别 | OCR（中英混排，可保留换行、可追加到剪贴板）、二维码/条形码 11 种码制 |
@@ -113,14 +113,34 @@ swift build --disable-sandbox   # 只编译（本机 sandbox-exec 受限，必�
 
 声音是三选一互斥枚举（无 / 系统声 / 麦克风），**没有系统声 + 麦克风同时录的路径**。默认麦克风。无摄像头时 `sampleBuffer` 零拷贝直通，有摄像头时合成 CIImage 再走 pixelBufferPool。
 
-录制时把自己的窗口放进 `excludingWindows`，浮条和贴图不会进画面。
+录制时把自己的窗口放进 `excludingWindows`，浮条和贴图不会进画面。过滤条件按 **pid** 认自己，不按 `bundleIdentifier`：裸二进制调试时后者是 nil，过滤结果恒为空，等于没排除。
+
+### 三个把「点录制」直接干掉的坑
+
+1. 🔴 **`AVVideoAverageBitRateKey` 不能放在 `outputSettings` 顶层**。那是老写法，macOS 26 的 `AVAssetWriterInput` 当场抛
+   `NSInvalidArgumentException: Output settings dictionary contains one or more invalid keys: AverageBitRate`，
+   而这是 **ObjC 异常，Swift 的 `try/catch` 接不住** —— 进程直接 SIGABRT。
+   表现就是「点一下录制，应用从菜单栏消失」，一行日志都留不下。码率必须塞进
+   `AVVideoCompressionPropertiesKey` 字典里（`AVVideoExpectedSourceFrameRateKey` 一并放进去）。
+   这个 bug 活了三个版本，因为它是**必崩**而不是偶发：`Recorder.swift` 里从前没有一行代码跑到过。
+2. **H.264 要求宽高是偶数**：选区是随手拖的，501×301 之类很常见，像素宽高统一向下取偶。
+3. **麦克风授权只问一次**：`requestMicThenCapture()` 以前被连着写了两遍，于是每次录音建两个
+   `AVCaptureSession`，第二个把第一个顶掉、第一个继续失控地占着麦克风，两路音频还同时往同一个
+   writer input 上 append。
+
+启动是**异步**的（`SCStream` 还要等系统把显示器/窗口列表给回来），所以工具条在按钮已变成"停止"、
+计时器已经在走之后才可能收到失败。失败必须把界面退回去（`startingUp` 标记），否则用户看到的是
+"正在录"，实际一个字节都没写。麦克风/摄像头缺失走 **`onWarning`** 而不是 `onError` —— 少一路声音
+不该把好好的录制退回去。
 
 ## 选区调整：拖出来先别截，等确认
 
 两段式：拖出范围 → `.adjusting` 阶段（八向手柄 / 方向键 / ⇧ 正方形）→ **在选区内单击一下**（或回车）才真正截图。
 
 - 🔴 **不要双击**。1.0.4 要求双击确认，用户明确否掉了 —— 单击最顺手。判定就一条：按下到松开的位移 ≤ 2pt 算单击（`RegionSelector.OverlayView.isTap`），超过就是"拖动选区"，手柄拖拽更不受影响。
-- 截图浮层（标注工具栏那个）**点框外不会关闭**，只有 ✕ 和 Esc 能关。原来点一下外面就把浮层关了、标注一起丢，属于"没主动取消却被结束"。
+- **Esc 不是出口**。用户要求「截图没完成，或没主动点击取消，都不能结束截图」：选区遮罩里 Esc 只撤当前选区，标注浮层里 Esc 只撤"正在画的那一笔"或待确认的裁剪，都不结束流程。要退出选区就**右键**（画面上常驻提示「拖动框选区域 · 右键取消」），要关标注浮层就点 ✕。在此之前 Esc 会直接把整条流程/整张标好的图丢掉。
+- 截图浮层（标注工具栏那个）**点框外不会关闭**。原来点一下外面就把浮层关了、标注一起丢，属于"没主动取消却被结束"。
+- `finish()` 里**不能当场把遮罩窗口和视图释放掉** —— 它在 `OverlayView.mouseUp` 的栈上被调用，当场析构就是 use-after-free（崩溃栈 `objc_release ← -[__NSArrayM dealloc] ← objc_autoreleasePoolPop`，随机闪退）。现在的做法是先 `orderOut`，强引用交给下一轮 runloop 再放。同理，所有程序化创建的 `NSPanel` 都设了 `isReleasedWhenClosed = false`，否则 `close()` 和 ARC 会抢着释放同一个窗口。
 
 - **状态机是显式的**（`idle / dragging / adjusting / movingSelection / resizing`），而不是靠一堆布尔变量互相猜。滚动截图、录屏、OCR 共用同一个遮罩，改一处全部受益。
 - **手柄容差 9pt**：太小点不中，太大又会把手柄拖拽变成移动选区。
@@ -157,6 +177,16 @@ swift build --disable-sandbox   # 只编译（本机 sandbox-exec 受限，必�
 能不能当全局热键有门槛：必须有 ⌘/⌥/⌃，或者无修饰键时必须是 F1–F12。其余无修饰的组合一律拒绝，否则打字时应用会被频繁误触。
 
 读取设置是**严格读取**：设置里没录就是 `nil`，不回退默认值。曾经回退默认值，导致点「清除」之后界面又显示回 F7。
+
+🔴 **录制控件必须自己抢第一响应者**。`NSButton` 默认 `acceptsFirstResponder == false`，点它不会变成
+firstResponder，`keyDown` 永远收不到 —— 界面上看着像在等按键，其实键盘事件全被窗口吃了，
+这就是「快捷键设置不可用」的根因。现在 `RecorderButton` 覆写 `acceptsFirstResponder` 返回 true，
+并在 `mouseDown` 里显式 `window?.makeFirstResponder(self)`（不调 `super`，否则走 momentary 高亮跟踪，
+按键还是到不了）。
+
+注册失败必须能被看见：`AppModel.failedShortcuts` 收着被系统拒掉的键位，设置页每行对号入座地标
+「要加 ⌘/⌥/⌃，或改用 F1–F12」/「被系统占用，注册失败」。以前只 NSLog，用户录了个纯字母键，
+看着"设置成功了"，实际一次都不会触发。
 
 应用内的快捷键（⌘Z / ⌘C / ⌘S / Esc）是 NSEvent local monitor，只在浮层窗口是 key window 时生效，文字输入时不抢。
 
@@ -205,7 +235,7 @@ Sources/BoxShot/
 .build/release/BoxShot --selftest
 ```
 
-当前 32 处断言，覆盖键位资格判定、拼接找回 60px 偏移、OCR 行聚类、偏好解码兜底、渲染管线（含「效果区域真的改了像素」和「底图没有上下颠倒」这两条）、撤销/重做、点选移动删除、文本贴图、文件名去重。只测纯逻辑，不碰屏幕捕获——无授权环境下跑不了，打包机也不该弹窗。
+当前 62 处断言，覆盖键位资格判定（含纯字母/空格不能当全局热键、F7 可以这几条）、拼接找回 60px 偏移、OCR 行聚类、偏好解码兜底、渲染管线（含「效果区域真的改了像素」和「底图没有上下颠倒」这两条）、撤销/重做、点选移动删除、文本贴图、文件名去重。只测纯逻辑，不碰屏幕捕获——无授权环境下跑不了，打包机也不该弹窗。
 
 ## 诊断
 
@@ -215,6 +245,8 @@ Sources/BoxShot/
 | `--version` | 打印版本号 |
 | `--show-overlay` | 延迟 0.6s 用**合成渐变图**打开标注浮层并预置四条标注，不走截图权限，配合 `screencapture -R` 核对浮层有没有真的把图画出来 |
 | `--show-history` | 延迟 0.6s 打开截图历史面板；历史为空时先塞三张合成图（会**真的写进**历史目录，看完记得删） |
+| `--recordtest` | 不开界面，直接跑 3 秒真实录制（320×240 / MP4 / 无声），过程逐行写 `/tmp/boxshot-recordtest.log`，结束后自行退出。用于判断「点了录制没反应」是引擎起不来还是界面没接上 |
+| `/tmp/boxshot-recordtest.trigger` | 同上，但靠**标记文件**触发：`touch` 之后正常启动应用即可。某些环境下 `open -a App --args …` 不会把参数传进 `CommandLine.arguments`（实测 LaunchServices 按原 argv 起进程），只能走这条 |
 
 ## 已知问题（待修）
 

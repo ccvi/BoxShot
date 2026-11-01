@@ -6,7 +6,12 @@ import AppKit
 // 全屏透明窗口盖住鼠标所在的那块屏幕：
 //   · 半透明暗幕，拖拽出选区后选区外保持暗、选区内透亮
 //   · 移动鼠标时高亮所在窗口（CGWindowList 几何命中，智能识别窗口）
-//   · 轻点（不拖）= 选中高亮窗口；拖拽 = 自定义区域；Esc 取消
+//   · 轻点（不拖）= 选中高亮窗口；拖拽 = 自定义区域
+//   · Esc 只撤销当前选区（**不结束流程**），右键才是取消整个截图
+//
+// 为什么 Esc 不再退出：用户要求「截图没完成，或没主动点击取消，都不能结束
+// 截图」。Esc 是打字时最容易被误触的键，让它当出口等于随机丢图；右键取消
+// 不可能误触，而且画面上一直有提示，不会把人困住。
 //
 // 为什么盖单屏不盖全部屏：1.0.0 先把单屏做到稳；跨屏拼接留给后续版本。
 // 为什么要独立 NSWindow 而不是 NSOverlayContentView：窗口级别用
@@ -49,6 +54,8 @@ final class RegionSelector: NSObject {
         panel.hasShadow = false
         panel.ignoresMouseEvents = false
         panel.acceptsMouseMovedEvents = true
+        // 程序化窗口默认 close() 会自我释放，和 ARC 抢着放 → 随机闪退
+        panel.isReleasedWhenClosed = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
 
         let view = OverlayView(frame: NSRect(origin: .zero, size: screen.frame.size))
@@ -80,10 +87,23 @@ final class RegionSelector: NSObject {
 
     fileprivate func finish() {
         isActive = false
-        overlayView?.stopTracking()
-        window?.orderOut(nil)
-        window = nil
+        let view = overlayView
+        let panel = window
         overlayView = nil
+        window = nil
+        view?.stopTracking()
+        panel?.orderOut(nil)
+        // 🔴 别在这里就把最后两个强引用放掉。finish() 绝大多数时候是在
+        // OverlayView 自己的 mouseUp / keyDown 里被调进来的：View 和 Window
+        // 当场析构，我们自己的方法还在栈上继续跑（mouseUp 末尾还要写
+        // dragStart = nil），等于是 use-after-free。崩溃栈长这样：
+        //   objc_release ← __RELEASE_OBJECTS_IN_THE_ARRAY__ ← -[__NSArrayM dealloc]
+        //    ← objc_autoreleasePoolPop ← -[NSApplication run]
+        // 所以推迟到下一轮 runloop 再释放，那时 AppKit 已经从事件里退出来了。
+        DispatchQueue.main.async {
+            _ = view
+            _ = panel
+        }
     }
 
     // ── 遮罩视图 ─────────────────────────────────────────────
@@ -256,6 +276,14 @@ final class RegionSelector: NSObject {
             isDragging = false
         }
 
+        /// 右键 = 主动取消（于是 Esc 可以从"退出流程"这个职责上退下来）
+        override func rightMouseDown(with event: NSEvent) {
+            let selectorRef = selector
+            MainActor.assumeIsolated {
+                selectorRef?.cancel()
+            }
+        }
+
         /// 确认选区（视图坐标 = 显示器局部坐标）
         private func confirm(rect: CGRect) {
             guard rect.width >= 8, rect.height >= 8 else { return }
@@ -341,17 +369,18 @@ final class RegionSelector: NSObject {
         override func keyDown(with event: NSEvent) {
             let step: CGFloat = event.modifierFlags.contains(.shift) ? 10 : 1
             switch event.keyCode {
-            case 53: // Esc：有选区先撤选区，再按一次退出
-                if let sel = selection {
+            case 53: // Esc：只撤掉当前选区，**不结束截图流程**
+                // 🔴 用户明确要求：「截图没完成，或没主动点击取消，都不能结束截图」。
+                // 以前第二下 Esc 会把整条流程取消掉，手一抖截到一半就没了。
+                // 现在无论按几下都只做"撤销选区"；真的要退出走右键 / 右键菜单。
+                if selection != nil || phase != .idle {
                     selection = nil
                     phase = .idle
+                    dragStart = nil
+                    dragCurrent = nil
+                    isDragging = false
+                    activeHandle = nil
                     needsDisplay = true
-                } else {
-                    let selectorRef = selector
-                    MainActor.assumeIsolated {
-                        selectorRef?.finish()
-                        selectorRef?.delegate?.regionSelectorDidCancel(selectorRef!)
-                    }
                 }
             case 36: // Return：确认选区（没有选区时确认高亮窗口）
                 if let sel = selection {
@@ -414,6 +443,8 @@ final class RegionSelector: NSObject {
 
             guard let rect = selectionRect else {
                 drawCrosshair(ctx)
+                // 冷启动时屏幕上只有一个暗幕，没有任何提示会让人以为卡住了
+                drawCenteredHint("拖动框选区域 · 右键取消", ctx: ctx)
                 return
             }
 
@@ -441,7 +472,8 @@ final class RegionSelector: NSObject {
                     ctx.fillEllipse(in: dot)
                     ctx.strokeEllipse(in: dot)
                 }
-                drawHint("单击选区内 / 回车 开始截图 · 拖手柄调整 · 方向键微调（⇧ ×10）· Esc 取消", above: rect, ctx: ctx)
+                drawHint("单击选区内 / 回车 开始 · 拖手柄调整 · 方向键微调（⇧ ×10）· Esc 撤销选区 · 右键取消",
+                         above: rect, ctx: ctx)
             }
         }
 
@@ -471,6 +503,24 @@ final class RegionSelector: NSObject {
             ctx.addPath(CGPath(roundedRect: box, cornerWidth: 5, cornerHeight: 5, transform: nil))
             ctx.fillPath()
             (text as NSString).draw(at: CGPoint(x: box.minX + 8, y: box.minY + 4), withAttributes: attributes)
+        }
+
+        /// 底部居中提示条（没有选区时显示，告诉用户还能怎么退出）
+        private func drawCenteredHint(_ text: String, ctx: CGContext) {
+            let attributes: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 12, weight: .regular),
+                .foregroundColor: NSColor.white.withAlphaComponent(0.95),
+            ]
+            let size = (text as NSString).size(withAttributes: attributes)
+            let box = CGRect(x: (bounds.width - size.width) / 2 - 12,
+                             y: bounds.height - size.height - 44,
+                             width: size.width + 24,
+                             height: size.height + 12)
+            ctx.setFillColor(NSColor.black.withAlphaComponent(0.68).cgColor)
+            ctx.addPath(CGPath(roundedRect: box, cornerWidth: 7, cornerHeight: 7, transform: nil))
+            ctx.fillPath()
+            (text as NSString).draw(at: CGPoint(x: box.minX + 12, y: box.minY + 6),
+                                    withAttributes: attributes)
         }
 
         private func drawCrosshair(_ ctx: CGContext) {
