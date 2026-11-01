@@ -4,14 +4,14 @@
 
 零第三方依赖——截图走 ScreenCaptureKit，识别走 Vision，热键走 Carbon，编码走 AVFoundation。
 
-- 当前版本：**1.0.6**
+- 当前版本：**1.0.8**
 - 作者：ccvi1223 · ccvi1223@qq.com
 - 工程最低版本：`.macOS(.v14)`（`Package.swift`）
 - 常驻形态：`LSUIElement = true`，只在菜单栏，不占 Dock
 
 ---
 
-## 功能（1.0.6 已实现）
+## 功能（1.0.8 已实现）
 
 | 区域 | 能力 |
 | --- | --- |
@@ -168,6 +168,7 @@ swift build --disable-sandbox   # 只编译（本机 sandbox-exec 受限，必�
 - **窗口铺满整块屏幕**。窗口要是只比图大一圈，往外拖的预览框会被窗口裁掉，看着像没反应。现在图像面板 = 整个显示器，其余部分透明（透过去就是桌面，观感跟参考图一致）。
 - **提交时"关掉自己、按新尺寸重开"**，和裁剪同一套：从整屏原图按新框 `cropping`，标注按 `旧原点 − 新原点` 平移，然后重开。坐标换算永远只有一套，不会留下半个旧状态。
 - 🔴 **y 轴必须翻**：AppKit 是左下原点，整屏原图是左上原点，`pixelRect(for:displayFrame:pixelScale:)` 里 `y = 显示框.maxY − 框.maxY`。弄反了就是"拖框裁出屏幕另一头的内容"，而且自检看得见 —— 这条有断言。
+- 🔴 **"关掉自己"必须推到下一轮 runloop**：`commitResize` 是被自己视图的 `mouseUp` 调起来的，而 `close()` 会让 AppModel 清掉 `overlayEditor` —— 控制器只剩视图里那个 `unowned` 引用，于是**在方法执行途中被释放**，下一行读 `self.model` 就是野指针（`RegionSelector.finish()` 当初崩四次同款）。做法：要用的值（裁好的图 / 新框 / 平移后的标注）先全部取成局部量 → `orderOut` 把旧框当场藏起来（别让用户看见弹回旧尺寸）→ `DispatchQueue.main.async` 里再 `close()` + 重开，并用局部强引用把控制器活到闭包结束。
 - 「Retina 缩小到 1x」开着时文档是 1x、整屏原图是 2x，两边倍率对不上，标注没法平移，这时候直接不允许改尺寸（宁可不给，也不给错位的结果）。
 
 ## 裁剪：不改文档，改成"重开一个"

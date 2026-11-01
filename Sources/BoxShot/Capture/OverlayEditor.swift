@@ -199,12 +199,23 @@ final class OverlayEditorController: NSObject {
 
         let dx = oldPX.minX - newPX.minX
         let dy = oldPX.minY - newPX.minY
-        let shapes = doc.shapes.map { $0.translated(dx: dx, dy: dy) }
+        let moved = doc.shapes.map { $0.translated(dx: dx, dy: dy) }
 
+        // 🔴 这里会把自己连面板一起拆掉，而此刻正站在自己的 mouseUp 里。
+        // 同步 close() → onClose 让 AppModel 清掉 overlayEditor，controller 就在
+        // 方法执行途中被释放，下一行读 model 已经是野指针（RegionSelector 当初崩
+        // 四次就是同一个形状）。所以：要用的值先全部带走，旧框当场藏起来别闪，
+        // 真正的"拆 + 重开"推到下一轮 runloop，并显式持有自己活到闭包结束。
         suppressAutosave = true
-        close()
-        model?.openOverlayEditor(image: cropped, frame: target,
-                                 fullDisplay: full, shapes: shapes)
+        imagePanel?.orderOut(nil)
+        toolbarPanel?.orderOut(nil)
+        let holder = self
+        DispatchQueue.main.async {
+            holder.close()
+            holder.model?.openOverlayEditor(image: cropped, frame: target,
+                                            fullDisplay: full, shapes: moved)
+            _ = holder
+        }
     }
 
     func close() {
