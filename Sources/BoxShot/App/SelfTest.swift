@@ -40,46 +40,92 @@ enum SelfTest {
         check("⌘C 可注册为全局热键", cmdC.isUsableAsGlobal)
         check("F7 键值显示", f7.display == "F7")
 
-        // ── 拼接算法 ──
-        do {
-            // 合成图：240×160，画三条横线
-            func synthetic(_ seed: Int) -> CGImage {
-                let ctx = CGContext(data: nil, width: 240, height: 160,
-                                    bitsPerComponent: 8, bytesPerRow: 0,
-                                    space: CGColorSpaceCreateDeviceRGB(),
-                                    bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue)!
-                ctx.setFillColor(grayValue(0.9))
-                ctx.fill(CGRect(x: 0, y: 0, width: 240, height: 160))
-                for (index, shade) in [0.2, 0.5, 0.75].enumerated() {
-                    ctx.setFillColor(grayValue(shade))
-                    // CG 左下原点：三条横线分布在不同高度
-                    let y = CGFloat(20 + index * 50 + seed)
-                    ctx.fill(CGRect(x: 10, y: y, width: 220, height: 14))
+        // ── 滚动拼接（1.0.5 重写：逐像素验证"拼出来是连续的"）──
+        // 1.0.4 的老用例只检查"高度差不多"，误差 ±8 像素照样通过 ——
+        // 而用户看到的正是那几像素的错位（重影、内容错行）。
+        // 现在改成：合成一张带随机纹理的"网页"，按已知偏移滚 5 段，
+        // 最后把结果与源页面**逐像素**比对，差一个像素就算失败。
+        // 调试对齐过程时把下面这行打开（会往 stderr 打多窗口搜索的汇总）
+        // ImageStitch.debugLog = true
+        if let page = syntheticPage(width: 480, height: 1600) {
+            let viewH = 500
+            let steps = [137, 89, 210, 63, 174]
+            var visitY = 0
+            var lastFrame = page.cropping(to: CGRect(x: 0, y: 0, width: 480, height: viewH))
+            var accumulated = lastFrame
+            var hint: Int?
+            var foundOffsets: [Int] = []
+            var failureNotes: [String] = []
+
+            for step in steps {
+                visitY += step
+                guard let bottom = page.cropping(to: CGRect(x: 0, y: visitY, width: 480, height: viewH)),
+                      let top = lastFrame, let canvas = accumulated else {
+                    failureNotes.append("第 \(step) 段取帧失败")
+                    break
                 }
-                return ctx.makeImage()!
-            }
-            func grayValue(_ v: Double) -> CGColor {
-                CGColor(srgbRed: v, green: v, blue: v, alpha: 1)
+                guard let alignment = ImageStitch.align(top: top, bottom: bottom, hint: hint) else {
+                    failureNotes.append("第 \(step) 段没对齐")
+                    break
+                }
+                foundOffsets.append(alignment.offset)
+                guard let joined = ImageStitch.append(bottom: bottom, to: canvas, offset: alignment.offset) else {
+                    failureNotes.append("第 \(step) 段拼接失败")
+                    break
+                }
+                accumulated = joined
+                lastFrame = bottom
+                hint = alignment.offset
             }
 
-            // 页面向上滚 60px：新帧内容 = 旧帧从第 60 行起
-            let scrollPx = 60
-            let shifted = cropTop(synthetic(0), droppingTop: scrollPx)
-            let grayA = ImageStitch.GrayImage(image: synthetic(0))
-            let grayB = ImageStitch.GrayImage(image: shifted)
-            let found = ImageStitch.findScrollOffset(top: grayA, bottom: grayB)
-            // 灰度图按宽度 240 采样，1:1 尺度
-            check("拼接算法找回滚动偏移(\(scrollPx)px → \(found ?? -1))",
-                  found != nil && abs(found! - scrollPx) <= 6)
+            check("每段偏移都精确等于滚动量（\(foundOffsets) vs \(steps)）",
+                  failureNotes.isEmpty && foundOffsets == steps)
+            if !failureNotes.isEmpty { print("    ↳ \(failureNotes.joined(separator: "；"))") }
 
-            let stitched = ImageStitch.stitchVertical(top: synthetic(0), bottom: shifted)
-            // 新高度 = top(160) + bottom(100) - offset(60) = 200
-            check("拼接输出高度正确",
-                  stitched != nil && abs(stitched!.height - 200) <= 8)
+            let expectedHeight = visitY + viewH
+            check("拼接总高度正确（\(accumulated?.height ?? -1) vs \(expectedHeight)）",
+                  accumulated?.height == expectedHeight)
+
+            if let acc = accumulated,
+               let expected = page.cropping(to: CGRect(x: 0, y: 0, width: 480, height: expectedHeight)) {
+                let diff = pixelMismatchRatio(acc, expected, tolerance: 3)
+                check(String(format: "拼接结果与源页面逐像素一致（坏点 %.4f%%）", diff * 100), diff < 0.001)
+            } else {
+                check("拼接结果与源页面逐像素一致（取图失败）", false)
+            }
+
+            // 空白画面（纯色）里任何偏移都"像"，必须判失败，否则会瞎拼
+            let blankA = solidImage(width: 200, height: 300, color: CGColor(gray: 0.5, alpha: 1))
+            let blankB = solidImage(width: 200, height: 300, color: CGColor(gray: 0.5, alpha: 1))
+            check("纯色画面拒绝拼接（不瞎拼）", ImageStitch.align(top: blankA, bottom: blankB) == nil)
+
+            // 只滚 2px：要么精确对 2px，要么拒绝（绝不接受一个大偏移）。
+            // 基准必须是"上一帧"，不是第一帧——拿第一帧比等于比两段无关内容。
+            if let tiny = page.cropping(to: CGRect(x: 0, y: visitY + 2, width: 480, height: viewH)) {
+                let result = ImageStitch.align(top: lastFrame ?? page, bottom: tiny)
+                check("微小滚动要么对 2px 要么拒绝（\(result?.offset.description ?? "nil")）",
+                      result == nil || result!.offset <= 6)
+            }
+
+            // 等距重复内容（表格 / 列表）会有多个"完美"候选：137、37、237 全都
+            // 逐像素相等。单靠像素无法区分，必须靠上一段的偏移（hint）拉回正确周期，
+            // 否则每滚一段就跳一个周期，拼出来的图内容会重复 / 缺段。
+            if let periodic = periodicPage(width: 480, height: 1600, period: 100),
+               let pTop = periodic.cropping(to: CGRect(x: 0, y: 0, width: 480, height: viewH)),
+               let pBottom = periodic.cropping(to: CGRect(x: 0, y: 137, width: 480, height: viewH)) {
+                let withHint = ImageStitch.align(top: pTop, bottom: pBottom, hint: 137)
+                check("周期性内容靠 hint 拉回正确周期（\(withHint?.offset.description ?? "nil")）",
+                      withHint?.offset == 137)
+            } else {
+                check("周期性内容靠 hint 拉回正确周期（造图失败）", false)
+            }
+
             check("旋转 90° 尺寸互换", {
-                guard let rotated = ImageStitch.rotate90(synthetic(0)) else { return false }
-                return rotated.width == 160 && rotated.height == 240
+                guard let rotated = ImageStitch.rotate90(page) else { return false }
+                return rotated.width == 1600 && rotated.height == 480
             }())
+        } else {
+            check("合成测试页面", false)
         }
 
         // ── OCR 行聚类 ──
@@ -312,9 +358,108 @@ enum SelfTest {
 
     // ── 工具 ──
 
-    private static func cropTop(_ image: CGImage, droppingTop pixels: Int) -> CGImage {
-        let rect = CGRect(x: 0, y: pixels, width: image.width, height: image.height - pixels)
-        return image.cropping(to: rect)!
+    /// 合成一张"网页"：8×8 随机灰块铺满 + 周期性"文字行" + 逐行细节。
+    ///
+    /// 🔴 逐行细节（每行一条 1 像素高的随机短线）不是装饰，是必需的：
+    /// 8×8 纯色块里连续 8 行完全一样，而对齐采样是"每 6 行取一行"，
+    /// 于是 d 和 d+1 会采到同一块里同样的字节，得分**完全相等**——
+    /// 1.0.5 调试时就被这个假象骗了，看着像"算法差 1 像素"，
+    /// 其实真值 d 的 mad 就是 0，只是并列时取了小者。真实网页有抗锯齿、
+    /// 有半像素的笔画，绝不会 8 行一模一样，所以夹具必须有逐行变化。
+    private static func syntheticPage(width: Int, height: Int) -> CGImage? {
+        guard let ctx = CGContext(data: nil, width: width, height: height,
+                                  bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                                    | CGBitmapInfo.byteOrder32Little.rawValue) else { return nil }
+        ctx.setFillColor(CGColor(gray: 1, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+
+        var seed: UInt64 = 0x9E37_79B9_7F4A_7C15
+        func next() -> UInt64 {
+            seed = seed &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+            return seed >> 33
+        }
+
+        var y = 0
+        while y < height {
+            var x = 0
+            while x < width {
+                let shade = Double(next() % 200) / 255.0
+                ctx.setFillColor(CGColor(red: shade, green: shade, blue: shade, alpha: 1))
+                ctx.fill(CGRect(x: x, y: y, width: 8, height: 8))
+                x += 8
+            }
+            y += 8
+        }
+
+        // "文字行"：每 16 行一条，左端缩进随行号变化，避免整页强周期
+        ctx.setFillColor(CGColor(gray: 0.12, alpha: 1))
+        var lineY = 0
+        while lineY < height {
+            let indent = CGFloat((lineY * 7) % 40)
+            ctx.fill(CGRect(x: indent, y: CGFloat(lineY), width: CGFloat(width) - 60 - indent, height: 2))
+            lineY += 16
+        }
+
+        // 逐行细节：每行一条 1 像素高的随机短线（模拟文字笔画 / 抗锯齿的逐行差异）
+        for row in 0..<height {
+            let shade = Double(next() % 180) / 255.0
+            ctx.setFillColor(CGColor(red: shade, green: shade, blue: shade, alpha: 1))
+            let start = Int(next() % UInt64(max(1, width - 120)))
+            let len = 12 + Int(next() % 100)
+            ctx.fill(CGRect(x: CGFloat(start), y: CGFloat(row),
+                            width: CGFloat(min(len, width - start)), height: 1))
+        }
+        return ctx.makeImage()
+    }
+
+    /// 把合成页面当成"一块瓷砖"按 period 高度重复，做成严格等距重复的长页
+    /// （模拟等行高的表格 / 列表：第 0 行和第 100 行长得一模一样）
+    private static func periodicPage(width: Int, height: Int, period: Int) -> CGImage? {
+        guard let tile = syntheticPage(width: width, height: period),
+              let ctx = CGContext(data: nil, width: width, height: height,
+                                  bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                                    | CGBitmapInfo.byteOrder32Little.rawValue) else { return nil }
+        var y = 0
+        while y < height {
+            ctx.draw(tile, in: CGRect(x: 0, y: CGFloat(y), width: CGFloat(width), height: CGFloat(period)))
+            y += period
+        }
+        return ctx.makeImage()
+    }
+
+    /// 两张同尺寸图里"明显不同"的像素占比
+    private static func pixelMismatchRatio(_ a: CGImage, _ b: CGImage, tolerance: Int) -> Double {
+        guard a.width == b.width, a.height == b.height,
+              let da = pixelBytes(a), let db = pixelBytes(b) else { return 1 }
+        var bad = 0
+        var index = 0
+        while index + 2 < da.count {
+            let dr = abs(Int(da[index]) - Int(db[index]))
+            let dg = abs(Int(da[index + 1]) - Int(db[index + 1]))
+            let dbl = abs(Int(da[index + 2]) - Int(db[index + 2]))
+            if max(dr, dg, dbl) > tolerance { bad += 1 }
+            index += 4
+        }
+        let total = da.count / 4
+        return total > 0 ? Double(bad) / Double(total) : 1
+    }
+
+    private static func pixelBytes(_ image: CGImage) -> [UInt8]? {
+        let w = image.width, h = image.height
+        guard w > 0, h > 0,
+              let ctx = CGContext(data: nil, width: w, height: h,
+                                  bitsPerComponent: 8, bytesPerRow: w * 4,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                                    | CGBitmapInfo.byteOrder32Little.rawValue) else { return nil }
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        guard let data = ctx.data else { return nil }
+        let ptr = data.bindMemory(to: UInt8.self, capacity: w * h * 4)
+        return Array(UnsafeBufferPointer(start: ptr, count: w * h * 4))
     }
 
     private static func solidImage(width: Int, height: Int, color: CGColor) -> CGImage {

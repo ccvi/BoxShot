@@ -112,12 +112,24 @@ enum ScreenCapture {
     }
 
     /// 截取显示器上的一个矩形区域（rect 用该显示器的**局部坐标**，点单位）
-    static func captureRegion(displayID: CGDirectDisplayID, rect: CGRect) async throws -> CGImage {
+    ///
+    /// - Parameter excludingOwnWindows: 把本应用自己的窗口从画面里剔掉。
+    ///   滚动截图必须传 true：取景框是浮在选区**正上方**的，而且框里还在画
+    ///   上一次的拼接预览，不排除的话每帧截到的都是"上一帧的预览"，拼出来全错。
+    ///   （1.0.4 及以前就是这个症状：图不连续、整体错位。）
+    static func captureRegion(displayID: CGDirectDisplayID, rect: CGRect,
+                              excludingOwnWindows: Bool = false) async throws -> CGImage {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         guard let display = content.displays.first(where: { $0.displayID == displayID }) else {
             throw CaptureError.displayNotFound
         }
-        let filter = SCContentFilter(display: display, excludingWindows: [])
+        var ownWindows: [SCWindow] = []
+        if excludingOwnWindows {
+            // 按 pid 认自己，不按 bundleIdentifier：裸二进制调试时 bundle id 是 nil
+            let pid = ProcessInfo.processInfo.processIdentifier
+            ownWindows = content.windows.filter { $0.owningApplication?.processID == pid }
+        }
+        let filter = SCContentFilter(display: display, excludingWindows: ownWindows)
         let config = SCStreamConfiguration()
         config.captureResolution = .best
         config.sourceRect = rect

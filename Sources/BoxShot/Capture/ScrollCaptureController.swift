@@ -31,6 +31,11 @@ final class ScrollCaptureController: NSObject {
     private var pendingGrab = false             // 忙时滚过 → 忙完补抓
     private var scrollDebounce: DispatchWorkItem?
     private var accumulated: CGImage?
+    /// 上一帧原图：对齐只拿"上一帧 vs 当前帧"算。
+    /// 拿整张累积图去搜索的话，累积越长搜索范围越大，越容易匹配到错误的周期上
+    /// —— 而且一旦错一帧，错误就永久留在图里，后面全跟着错。
+    private var lastFrame: CGImage?
+    private var lastOffset: Int?
     private var frameCount = 0
     private var monitors: [Any] = []
 
@@ -162,6 +167,8 @@ final class ScrollCaptureController: NSObject {
         guard !isRunning else { return }
         isRunning = true
         accumulated = nil
+        lastFrame = nil
+        lastOffset = nil
         frameCount = 0
         grabFrame()
         installScrollMonitor()
@@ -217,7 +224,10 @@ final class ScrollCaptureController: NSObject {
         Task.detached(priority: .userInitiated) { [weak self] in
             let frame: CGImage?
             do {
-                frame = try await ScreenCapture.captureRegion(displayID: displayID, rect: region)
+                // 🔴 必须排除自己的窗口：取景框正盖在选区上、里面还画着上一次的
+                // 拼接预览，不排除就变成"每帧都在拍上一帧的预览"，拼出来全错。
+                frame = try await ScreenCapture.captureRegion(displayID: displayID, rect: region,
+                                                              excludingOwnWindows: true)
             } catch {
                 frame = nil
             }
@@ -241,32 +251,52 @@ final class ScrollCaptureController: NSObject {
         }
         defer { frameCount += 1 }
 
-        guard let current = accumulated else {
+        guard let current = lastFrame, let canvas = accumulated else {
             accumulated = frame
+            lastFrame = frame
             frameView?.preview = frame
             frameView?.status = "已捕获 1 段，请滚动内容"
             frameView?.needsDisplay = true
             return
         }
 
+        // ── 对齐：只比较"上一帧 vs 当前帧" ──
+        var alignment: ImageStitch.Alignment?
+        if direction == 1 {
+            if let a = ImageStitch.rotate90(current), let b = ImageStitch.rotate90(frame) {
+                alignment = ImageStitch.align(top: a, bottom: b, hint: lastOffset)
+            }
+        } else {
+            alignment = ImageStitch.align(top: current, bottom: frame, hint: lastOffset)
+        }
+
+        guard let alignment else {
+            // 没对齐就不拼，也别动 lastFrame：下一帧拿同一张基准再比一次
+            frameView?.status = "这一帧没对上（没滚 / 往回滚 / 滚过一屏），继续往下滚"
+            frameView?.needsDisplay = true
+            return
+        }
+
+        // ── 拼接：累积图按偏移追加当前帧 ──
         var stitched: CGImage?
         if direction == 1 {
-            if let a = ImageStitch.rotate90(current),
+            if let acc = ImageStitch.rotate90(canvas),
                let b = ImageStitch.rotate90(frame),
-               let joined = ImageStitch.stitchVertical(top: a, bottom: b) {
+               let joined = ImageStitch.append(bottom: b, to: acc, offset: alignment.offset) {
                 stitched = rotateBack(joined)
             }
         } else {
-            stitched = ImageStitch.stitchVertical(top: current, bottom: frame)
+            stitched = ImageStitch.append(bottom: frame, to: canvas, offset: alignment.offset)
         }
 
         if let stitched {
             accumulated = stitched
+            lastFrame = frame
+            lastOffset = alignment.offset
             frameView?.preview = stitched
             frameView?.status = "已捕获 \(frameCount + 1) 段"
         } else {
-            // 拼接失败 = 内容没滚 / 滚太快对不齐。每帧都提示，不再静默丢
-            frameView?.status = "内容未滚动或对齐失败，请继续滚动（慢一点）"
+            frameView?.status = "拼接失败（图太长？），点「完成」先保存已截部分"
         }
         frameView?.needsDisplay = true
     }
