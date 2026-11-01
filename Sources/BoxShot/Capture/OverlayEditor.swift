@@ -90,7 +90,7 @@ final class OverlayEditorController: NSObject {
     // ── 布局常量 ──
     private let barHeight: CGFloat = 30
     private let margin: CGFloat = 6
-    private let toolbarHeight: CGFloat = 56
+    private let toolbarHeight: CGFloat = 64
 
     func show() {
         let pointSize = CGSize(width: CGFloat(doc.baseImage.width) / displayScale,
@@ -156,8 +156,8 @@ final class OverlayEditorController: NSObject {
     private func buildToolbarPanel() -> NSPanel {
         let stack = NSStackView()
         stack.orientation = .horizontal
-        stack.spacing = 2
-        stack.edgeInsets = NSEdgeInsets(top: 8, left: 8, bottom: 8, right: 8)
+        stack.spacing = 3
+        stack.edgeInsets = NSEdgeInsets(top: 10, left: 10, bottom: 10, right: 10)
 
         for tool in EditorTool.allCases {
             let button = toolbarButton(symbol: tool.symbol, title: tool.title) { [weak self] in
@@ -202,7 +202,7 @@ final class OverlayEditorController: NSObject {
         container.material = .hudWindow
         container.state = .active
         container.wantsLayer = true
-        container.layer?.cornerRadius = 10
+        container.layer?.cornerRadius = 12
         container.addSubview(stack)
         stack.frame = container.bounds
 
@@ -244,17 +244,17 @@ final class OverlayEditorController: NSObject {
         button.wantsLayer = true
         button.layer?.cornerRadius = 5
         button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)?
-            .withSymbolConfiguration(.init(pointSize: 16, weight: .medium))
+            .withSymbolConfiguration(.init(pointSize: 19, weight: .medium))
         button.imageScaling = .scaleNone
         button.toolTip = title
         button.setButtonType(.momentaryChange)
         button.onAction = action
-        button.frame = NSRect(x: 0, y: 0, width: 40, height: 34)
+        button.frame = NSRect(x: 0, y: 0, width: 46, height: 40)
         return button
     }
 
     private func divider() -> NSView {
-        let view = NSView(frame: NSRect(x: 0, y: 0, width: 1, height: 26))
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: 1, height: 32))
         view.wantsLayer = true
         view.layer?.backgroundColor = NSColor.separatorColor.cgColor
         return view
@@ -300,14 +300,14 @@ final class OverlayEditorController: NSObject {
         button.isBordered = false
         button.wantsLayer = true
         button.layer?.backgroundColor = color.cgColor
-        button.layer?.cornerRadius = 7
+        button.layer?.cornerRadius = 8
         button.toolTip = "颜色 \(color.hexString)（有选中标注时直接改它）"
         button.setButtonType(.momentaryChange)
         button.onAction = { [weak self] in
             self?.doc.applyToSelected(color: color)
             self?.refresh()
         }
-        button.frame = NSRect(x: 0, y: 0, width: 18, height: 26)
+        button.frame = NSRect(x: 0, y: 0, width: 21, height: 32)
         return button
     }
 
@@ -320,14 +320,14 @@ final class OverlayEditorController: NSObject {
         button.toolTip = "粗细 \(Int(width)) px"
         button.setButtonType(.momentaryChange)
         // 画一条对应粗细的横线示意
-        let image = NSImage(size: NSSize(width: 18, height: 18))
+        let image = NSImage(size: NSSize(width: 20, height: 20))
         image.lockFocus()
         if let ctx = NSGraphicsContext.current?.cgContext {
             ctx.setStrokeColor(NSColor.white.cgColor)
-            ctx.setLineWidth(min(10, max(2, width / 2)))
+            ctx.setLineWidth(min(11, max(2, width / 2)))
             ctx.setLineCap(.round)
-            ctx.move(to: CGPoint(x: 2, y: 9))
-            ctx.addLine(to: CGPoint(x: 16, y: 9))
+            ctx.move(to: CGPoint(x: 2, y: 10))
+            ctx.addLine(to: CGPoint(x: 18, y: 10))
             ctx.strokePath()
         }
         image.unlockFocus()
@@ -336,7 +336,7 @@ final class OverlayEditorController: NSObject {
             self?.doc.applyToSelected(lineWidth: width)
             self?.refresh()
         }
-        button.frame = NSRect(x: 0, y: 0, width: 24, height: 26)
+        button.frame = NSRect(x: 0, y: 0, width: 27, height: 32)
         return button
     }
 
@@ -440,27 +440,10 @@ final class OverlayEditorController: NSObject {
             }
         })
 
-        // 点击框外 = 关闭（丢弃）。全局 + 本地各装一个：
-        // 自己应用的窗口走本地监听，其他应用走全局监听（鼠标监听不需要辅助功能授权）。
-        let isInside: (NSPoint) -> Bool = { [weak self] location in
-            guard let self else { return true }
-            let inImage = self.imagePanel?.frame.contains(location) ?? false
-            let inToolbar = self.toolbarPanel?.frame.contains(location) ?? false
-            return inImage || inToolbar
-        }
-        monitors.append(NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
-            guard let self else { return }
-            if !isInside(NSEvent.mouseLocation) { self.close() }
-        })
-        monitors.append(NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
-            guard let self else { return event }
-            if let window = event.window, window === self.imagePanel || window === self.toolbarPanel {
-                return event
-            }
-            // 点到本应用其他窗口（如设置）也关闭
-            self.close()
-            return event
-        })
+        // 🔴 这里**故意不监听框外点击**。
+        // 以前点一下浮层外面就直接关闭并丢标注 —— 用户点一下别处（或者只是
+        // 切个窗口）辛苦标的就没了，属于"没主动取消却被结束"。
+        // 现在只有 ✕ 和 Esc 能关；浮层是 .floating 层，不会自己跑掉。
     }
 }
 

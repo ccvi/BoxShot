@@ -152,12 +152,6 @@ final class RegionSelector: NSObject {
         override func mouseDown(with event: NSEvent) {
             let p = convert(event.locationInWindow, from: nil)
 
-            // 双击选区内 = 确认
-            if event.clickCount == 2, let sel = selection, sel.insetBy(dx: -1, dy: -1).contains(p) {
-                confirm(rect: sel)
-                return
-            }
-
             // 调整阶段：手柄缩放 / 选区内拖动移动 / 点外面重新框选
             if phase == .adjusting, let sel = selection {
                 if let handle = handleHit(at: p, in: sel) {
@@ -212,14 +206,24 @@ final class RegionSelector: NSObject {
         override func mouseUp(with event: NSEvent) {
             let p = convert(event.locationInWindow, from: nil)
             switch phase {
-            case .resizing, .movingSelection:
+            case .resizing:
                 phase = .adjusting
                 activeHandle = nil
                 resizeOrigin = nil
                 resizeStart = nil
+                needsDisplay = true
+                return
+            case .movingSelection:
+                // 🔴 选区内**单击**（没有拖动）= 确认开始截图。
+                // 以前要双击，用户明确说不要双击 —— 单击最顺手，而且拖动手柄 /
+                // 拖动选区都还能用（只有位移 ≤2pt 才算单击）。
+                let start = moveStart ?? p
+                let sel = selection
+                phase = .adjusting
                 moveOrigin = nil
                 moveStart = nil
                 needsDisplay = true
+                if Self.isTap(from: start, to: p), let sel { confirm(rect: sel) }
                 return
             default:
                 break
@@ -261,6 +265,13 @@ final class RegionSelector: NSObject {
                 selectorRef?.finish()
                 selectorRef?.delegate?.regionSelector(selectorRef!, didConfirmRegion: rect, displayID: displayID)
             }
+        }
+
+        /// 选区内"单击"（没拖动）的判定：位移 ≤ 2pt 就算单击 = 确认开始截图。
+        /// 抽成静态函数是为了 --selftest 能测 —— 这条阈值同时决定了
+        /// "点一下就截"和"拖一下只是挪选区"，弄错任何一个都很难受。
+        static func isTap(from start: CGPoint, to end: CGPoint) -> Bool {
+            hypot(end.x - start.x, end.y - start.y) <= 2
         }
 
         private func handleHit(at p: CGPoint, in rect: CGRect) -> Handle? {
@@ -430,7 +441,7 @@ final class RegionSelector: NSObject {
                     ctx.fillEllipse(in: dot)
                     ctx.strokeEllipse(in: dot)
                 }
-                drawHint("回车/双击 确认 · 拖手柄调整 · 方向键微调（⇧ ×10）· Esc 取消", above: rect, ctx: ctx)
+                drawHint("单击选区内 / 回车 开始截图 · 拖手柄调整 · 方向键微调（⇧ ×10）· Esc 取消", above: rect, ctx: ctx)
             }
         }
 

@@ -48,6 +48,10 @@ final class ScrollCaptureController: NSObject {
     /// （用户实测症状就是"只截了一次"）。边滚边抓，步子才小。
     private let grabThrottle: TimeInterval = 0.2
     private var monitors: [Any] = []
+    /// 缩略图（实时预览）窗口：整段截下来就更新，别只画一次快照
+    private var previewWindow: NSWindow?
+    private var previewScroll: NSScrollView?
+    private var previewImageView: NSImageView?
 
     init(model: AppModel?) {
         self.model = model
@@ -103,8 +107,8 @@ final class ScrollCaptureController: NSObject {
     private func showToolbar() {
         let stack = NSStackView()
         stack.orientation = .horizontal
-        stack.spacing = 8
-        stack.edgeInsets = NSEdgeInsets(top: 8, left: 10, bottom: 8, right: 10)
+        stack.spacing = 10
+        stack.edgeInsets = NSEdgeInsets(top: 10, left: 12, bottom: 10, right: 12)
 
         func add(_ symbol: String, _ title: String, tint: NSColor? = nil, action: Selector? = nil) -> NSButton {
             let button = NSButton(title: "", target: self,
@@ -112,8 +116,8 @@ final class ScrollCaptureController: NSObject {
             button.bezelStyle = .regularSquare
             button.isBordered = false
             button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)?
-                .withSymbolConfiguration(.init(pointSize: 16, weight: .medium))
-            button.frame = NSRect(x: 0, y: 0, width: 38, height: 32)
+                .withSymbolConfiguration(.init(pointSize: 19, weight: .medium))
+            button.frame = NSRect(x: 0, y: 0, width: 44, height: 38)
             button.toolTip = title
             button.contentTintColor = tint
             button.tag = Self.buttonTag(title)
@@ -135,7 +139,7 @@ final class ScrollCaptureController: NSObject {
         container.material = .hudWindow
         container.state = .active
         container.wantsLayer = true
-        container.layer?.cornerRadius = 10
+        container.layer?.cornerRadius = 12
         container.addSubview(stack)
         stack.frame = container.bounds
 
@@ -175,7 +179,7 @@ final class ScrollCaptureController: NSObject {
     }
 
     private func makeDivider() -> NSView {
-        let view = NSView(frame: NSRect(x: 0, y: 0, width: 1, height: 22))
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: 1, height: 28))
         view.wantsLayer = true
         view.layer?.backgroundColor = NSColor.separatorColor.cgColor
         return view
@@ -286,6 +290,7 @@ final class ScrollCaptureController: NSObject {
             lastFrame = frame
             segmentCount = 1
             frameView?.status = "已捕获 1 段，滚动页面继续"
+            refreshPreview()
             return
         }
 
@@ -326,6 +331,7 @@ final class ScrollCaptureController: NSObject {
         consecutiveFailures = 0
         segmentCount += 1
         frameView?.status = "已捕获 \(segmentCount) 段 · 本段 +\(alignment.offset)px"
+        refreshPreview()
     }
 
     /// 这一帧没对上：先判是不是"往回滚"，再决定要不要重设基准。
@@ -379,19 +385,80 @@ final class ScrollCaptureController: NSObject {
     }
 
     @objc private func showThumbnail() {
-        guard let image = accumulated else { return }
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 560),
+        guard accumulated != nil else { return }
+        if let window = previewWindow {
+            window.makeKeyAndOrderFront(nil)
+            refreshPreview()
+            return
+        }
+
+        let size = NSSize(width: 420, height: 560)
+        let window = NSWindow(contentRect: NSRect(origin: .zero, size: size),
                               styleMask: [.titled, .closable, .resizable],
                               backing: .buffered, defer: false)
-        window.title = "滚动截图预览（\(image.width) × \(image.height)）"
-        let imageView = NSImageView(frame: window.contentView!.bounds)
-        imageView.image = NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
-        imageView.autoresizingMask = [.width, .height]
-        imageView.imageScaling = .scaleProportionallyUpOrDown
-        window.contentView?.addSubview(imageView)
-        window.center()
+        window.title = "滚动截图预览"
+        window.isReleasedWhenClosed = false
+        window.level = .floating
+
+        let scroll = NSScrollView(frame: NSRect(origin: .zero, size: size))
+        scroll.hasVerticalScroller = true
+        scroll.autoresizingMask = [.width, .height]
+        scroll.drawsBackground = true
+        scroll.backgroundColor = .windowBackgroundColor
+
+        let imageView = NSImageView()
+        imageView.imageScaling = .scaleAxesIndependently   // 尺寸由我们自己按宽度算
+        imageView.wantsLayer = true
+        scroll.documentView = imageView
+        window.contentView = scroll
+
+        previewWindow = window
+        previewScroll = scroll
+        previewImageView = imageView
+
+        // 🔴 别放屏幕正中：抓帧会把本应用的窗口一起拍进去（见 ScreenCapture 的注释），
+        // 预览窗口压在选区上就等于每帧都拍到它自己。
+        window.setFrameOrigin(safePreviewOrigin(for: size))
         window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        refreshPreview()
+    }
+
+    /// 预览窗口的位置：优先选区右侧，放不下换左侧，再不行贴屏幕边上，
+    /// 保证**不和选区相交**（避免被自己拍进画面）
+    private func safePreviewOrigin(for size: NSSize) -> NSPoint {
+        let region = selectionFrameAppKit
+        guard let screen = framePanel?.screen ?? NSScreen.main else { return .zero }
+        let visible = screen.visibleFrame
+        let gap: CGFloat = 16
+        let candidates = [
+            NSPoint(x: region.maxX + gap, y: region.maxY - size.height),
+            NSPoint(x: region.minX - gap - size.width, y: region.maxY - size.height),
+            NSPoint(x: visible.maxX - size.width - 8, y: visible.maxY - size.height - 8),
+            NSPoint(x: visible.minX + 8, y: visible.minY + 8),
+        ]
+        for point in candidates {
+            let rect = CGRect(origin: point, size: size)
+            if !rect.intersects(region.insetBy(dx: -4, dy: -4)) { return point }
+        }
+        return candidates[2]
+    }
+
+    /// 把最新的累积图刷进预览窗口（按宽度铺满、滚到最新的一段）
+    private func refreshPreview() {
+        guard let image = accumulated, let imageView = previewImageView,
+              let scroll = previewScroll else { return }
+        previewWindow?.title = "滚动截图预览（\(image.width) × \(image.height)）"
+
+        let viewWidth = max(80, scroll.contentView.bounds.width)
+        let scale = viewWidth / CGFloat(image.width)
+        let docSize = NSSize(width: viewWidth, height: CGFloat(image.height) * scale)
+        imageView.frame = NSRect(origin: .zero, size: docSize)
+        imageView.image = NSImage(cgImage: image,
+                                  size: NSSize(width: image.width, height: image.height))
+        scroll.documentView = imageView
+        // NSImageView 不是 flipped：y=0 在底部，滚到 0 就是看最新的那段
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: 0))
+        scroll.reflectScrolledClipView(scroll.contentView)
     }
 
     private func pin() {
@@ -459,6 +526,10 @@ final class ScrollCaptureController: NSObject {
     }
 
     private func closePanels() {
+        previewWindow?.orderOut(nil)
+        previewWindow = nil
+        previewScroll = nil
+        previewImageView = nil
         framePanel?.orderOut(nil)
         toolbarPanel?.orderOut(nil)
         framePanel = nil

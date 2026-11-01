@@ -162,6 +162,13 @@ enum SelfTest {
             check("合成测试页面", false)
         }
 
+        // ── 选区交互 ──
+        // 单击（不拖动）确认开始截图；拖一下只是挪选区。两者靠位移阈值区分。
+        check("选区内单击算确认（0~2pt）",
+              RegionSelector.OverlayView.isTap(from: .zero, to: CGPoint(x: 1, y: 1)))
+        check("选区内拖动不算确认（>2pt）",
+              !RegionSelector.OverlayView.isTap(from: .zero, to: CGPoint(x: 40, y: 0)))
+
         // ── OCR 行聚类 ──
         do {
             let observations = [
