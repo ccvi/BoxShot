@@ -37,6 +37,16 @@ final class ScrollCaptureController: NSObject {
     private var lastFrame: CGImage?
     private var lastOffset: Int?
     private var frameCount = 0
+    /// 成功拼进来的段数（frameCount 也算失败帧，别拿它当段数用）
+    private var segmentCount = 0
+    /// 连续失败次数：≥3 就把基准换成当前帧重新开始，绝不让自己卡死
+    private var consecutiveFailures = 0
+    private var lastGrabAt = Date.distantPast
+    /// 抓帧节流：滚动过程中最多每 0.2s 抓一帧。
+    /// 🔴 只等"停手后抓一帧"是不够的：一次快速滑动就能滚掉一屏多，
+    /// 两帧重叠不足就没法对齐，而一旦对不上、基准又不动，后面全废
+    /// （用户实测症状就是"只截了一次"）。边滚边抓，步子才小。
+    private let grabThrottle: TimeInterval = 0.2
     private var monitors: [Any] = []
 
     init(model: AppModel?) {
@@ -59,9 +69,19 @@ final class ScrollCaptureController: NSObject {
 
     // ── 钉住的取景框 ────────────────────────────────────────
 
+    /// 取景框面板的矩形（AppKit 坐标）：选区四周各留 2px 画边框，上方留一条状态带。
+    /// 选区本身必须完全落在面板的**透明区域**里，不能有任何绘制。
+    static func panelRect(forRegion region: NSRect,
+                          band: CGFloat = ScrollFrameView.bandHeight) -> NSRect {
+        NSRect(x: region.minX - 2, y: region.minY - 2,
+               width: region.width + 4, height: region.height + band + 4)
+    }
+
     private func showFrame() {
-        let frame = selectionFrameAppKit
-        let panel = NSPanel(contentRect: frame,
+        let region = selectionFrameAppKit
+        // 🔴 面板比选区**大一圈**：左边/右边/下边各多 2px，上方多出一条状态带。
+        // 选区内部必须完全透明 —— 见 ScrollFrameView.draw 的注释。
+        let panel = NSPanel(contentRect: Self.panelRect(forRegion: region),
                             styleMask: [.borderless, .nonactivatingPanel],
                             backing: .buffered, defer: false)
         panel.level = .floating
@@ -170,6 +190,9 @@ final class ScrollCaptureController: NSObject {
         lastFrame = nil
         lastOffset = nil
         frameCount = 0
+        segmentCount = 0
+        consecutiveFailures = 0
+        lastGrabAt = .distantPast
         grabFrame()
         installScrollMonitor()
         installEscMonitor()
@@ -205,10 +228,15 @@ final class ScrollCaptureController: NSObject {
                 frameView?.needsDisplay = true
             }
         }
+        // 滚动过程中就抓（节流），别等停手 —— 见 grabThrottle 的注释
+        if Date().timeIntervalSince(lastGrabAt) >= grabThrottle {
+            grabOrQueue()
+        }
+        // 尾部补一帧：确保最后停下来的那个位置一定被截到
         scrollDebounce?.cancel()
         let item = DispatchWorkItem { [weak self] in self?.grabOrQueue() }
         scrollDebounce = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: item)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: item)
     }
 
     private func grabOrQueue() {
@@ -219,25 +247,27 @@ final class ScrollCaptureController: NSObject {
     private func grabFrame() {
         guard isRunning, !isBusy else { return }
         isBusy = true
+        lastGrabAt = Date()
         let displayID = self.displayID
         let region = self.region
         Task.detached(priority: .userInitiated) { [weak self] in
             let frame: CGImage?
             do {
-                // 🔴 必须排除自己的窗口：取景框正盖在选区上、里面还画着上一次的
-                // 拼接预览，不排除就变成"每帧都在拍上一帧的预览"，拼出来全错。
+                // 保险而已：真正的保证是取景框不在选区里画任何东西。
+                // 别指望这个 excluding 能把本应用的面板剔掉（见 ScreenCapture 的注释）。
                 frame = try await ScreenCapture.captureRegion(displayID: displayID, rect: region,
                                                               excludingOwnWindows: true)
             } catch {
                 frame = nil
             }
-            await MainActor.run {
-                self?.handleFrame(frame)
-                self?.isBusy = false
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.handleFrame(frame)
+                self.isBusy = false
                 // 忙的时候用户又滚了 → 补一帧，保证滚动结果不丢
-                if self?.pendingGrab == true {
-                    self?.pendingGrab = false
-                    self?.grabFrame()
+                if self.pendingGrab {
+                    self.pendingGrab = false
+                    self.grabFrame()
                 }
             }
         }
@@ -254,15 +284,14 @@ final class ScrollCaptureController: NSObject {
         guard let current = lastFrame, let canvas = accumulated else {
             accumulated = frame
             lastFrame = frame
-            frameView?.preview = frame
-            frameView?.status = "已捕获 1 段，请滚动内容"
-            frameView?.needsDisplay = true
+            segmentCount = 1
+            frameView?.status = "已捕获 1 段，滚动页面继续"
             return
         }
 
-        // ── 对齐：只比较"上一帧 vs 当前帧" ──
+        let isHorizontal = direction == 1
         var alignment: ImageStitch.Alignment?
-        if direction == 1 {
+        if isHorizontal {
             if let a = ImageStitch.rotate90(current), let b = ImageStitch.rotate90(frame) {
                 alignment = ImageStitch.align(top: a, bottom: b, hint: lastOffset)
             }
@@ -271,15 +300,13 @@ final class ScrollCaptureController: NSObject {
         }
 
         guard let alignment else {
-            // 没对齐就不拼，也别动 lastFrame：下一帧拿同一张基准再比一次
-            frameView?.status = "这一帧没对上（没滚 / 往回滚 / 滚过一屏），继续往下滚"
-            frameView?.needsDisplay = true
+            handleFailure(frame: frame, current: current)
             return
         }
 
         // ── 拼接：累积图按偏移追加当前帧 ──
         var stitched: CGImage?
-        if direction == 1 {
+        if isHorizontal {
             if let acc = ImageStitch.rotate90(canvas),
                let b = ImageStitch.rotate90(frame),
                let joined = ImageStitch.append(bottom: b, to: acc, offset: alignment.offset) {
@@ -289,16 +316,44 @@ final class ScrollCaptureController: NSObject {
             stitched = ImageStitch.append(bottom: frame, to: canvas, offset: alignment.offset)
         }
 
-        if let stitched {
-            accumulated = stitched
-            lastFrame = frame
-            lastOffset = alignment.offset
-            frameView?.preview = stitched
-            frameView?.status = "已捕获 \(frameCount + 1) 段"
-        } else {
-            frameView?.status = "拼接失败（图太长？），点「完成」先保存已截部分"
+        guard let stitched else {
+            frameView?.status = "拼接失败（图太长？），点 ✓ 先保存已截部分"
+            return
         }
-        frameView?.needsDisplay = true
+        accumulated = stitched
+        lastFrame = frame
+        lastOffset = alignment.offset
+        consecutiveFailures = 0
+        segmentCount += 1
+        frameView?.status = "已捕获 \(segmentCount) 段 · 本段 +\(alignment.offset)px"
+    }
+
+    /// 这一帧没对上：先判是不是"往回滚"，再决定要不要重设基准。
+    ///
+    /// 🔴 绝不能只留一句提示然后原地等 —— 基准不动，用户再往下滚只会离它更远，
+    /// 于是每一帧都失败，看着就像"只截了一次，之后怎么滚都不动"。
+    private func handleFailure(frame: CGImage, current: CGImage) {
+        consecutiveFailures += 1
+
+        // 把当前帧当 top、上一帧当 bottom 反着对一次：能对上说明用户往回滚了
+        let backward = ImageStitch.align(top: frame, bottom: current)
+        if let backward {
+            // 往回滚不需要重设基准：用户再往下滚回来就能继续
+            frameView?.status = "往回滚了 \(backward.offset)px（往回的部分不拼），继续往下滚"
+            return
+        }
+
+        if consecutiveFailures >= 3 {
+            // 连续对不上（滚太快 / 页面自己变了）：换基准继续，别把整个流程卡死。
+            // 代价是被跳过的内容不会出现在图里 —— 状态条上明说。
+            lastFrame = frame
+            lastOffset = nil
+            consecutiveFailures = 0
+            frameView?.status = "内容跳变，已跳过一段从当前画面继续（中间可能有缺口）"
+            return
+        }
+
+        frameView?.status = "这一帧没对上（滚太快 / 页面在动），小步滚动试试"
     }
 
     private func rotateBack(_ image: CGImage) -> CGImage? {
@@ -421,53 +476,71 @@ final class ScrollCaptureController: NSObject {
     }
 }
 
-// ── 取景框视图：画实时拼接结果 + 状态条 ──────────────────────
+// ── 取景框视图：只画选区外侧的边框 + 上方状态带 ──────────────
+//
+// 🔴 选区内部一个像素都不能画。
+//
+// 1.0.5 的教训：原来框里画着实时拼接预览，指望用
+// `SCContentFilter(display:excludingWindows:)` 把自己这个面板从抓帧里剔掉。
+// 实测无效 —— 面板在 `.floating` / `.statusBar` 层，而 `SCShareableContent.windows`
+// 基本只给 layer-0 的普通窗口，按 pid 过滤出来是**空数组**，excluding 成了空操作。
+// 结果每帧拍到的都是"上一帧的预览"（连状态胶囊都烧进画面），第一段之后永远对不上，
+// 用户看到的症状就是"只截了一次"。
+//
+// 现在不依赖那个 API：面板做大一圈，把边框和状态条都放到选区**外面**，
+// 选区内部保持全透明 —— 抓帧拿到的就是干净的页面内容。顺带的好处是
+// 用户能看见页面在滚动，不再对着一帧冻结的图猜"到底截没截上"。
 
 final class ScrollFrameView: NSView {
 
     weak var controller: ScrollCaptureController?
-    var preview: CGImage?
-    var status: String = "正在捕获…"
+
+    /// 选区上方的状态带高度（状态条画在这里）
+    static let bandHeight: CGFloat = 30
+
+    var status: String = "正在捕获…" {
+        didSet { needsDisplay = true }
+    }
 
     override var isFlipped: Bool { true }
+
+    /// 选区（要被截进画面的那块）在本视图里的位置
+    var regionRect: CGRect {
+        CGRect(x: 2, y: Self.bandHeight + 2,
+               width: max(0, bounds.width - 4),
+               height: max(0, bounds.height - Self.bandHeight - 4))
+    }
 
     override func draw(_ dirtyRect: NSRect) {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
 
-        // 实时预览：按宽度 1:1、顶部对齐；比框高就只露出上面部分
-        if let preview {
-            let scale = bounds.width / CGFloat(preview.width)
-            let drawH = CGFloat(preview.height) * scale
-            let drawRect = CGRect(x: 0, y: 0, width: bounds.width, height: drawH)
-            ctx.saveGState()
-            ctx.clip(to: CGRect(origin: .zero, size: bounds.size))
-            ctx.translateBy(x: 0, y: drawRect.maxY)
-            ctx.scaleBy(x: 1, y: -1)
-            ctx.interpolationQuality = .medium
-            ctx.draw(preview, in: CGRect(origin: .zero, size: drawRect.size))
-            ctx.restoreGState()
-        } else {
-            ctx.setFillColor(NSColor.black.withAlphaComponent(0.25).cgColor)
-            ctx.fill(bounds)
-        }
+        // 边框：四条**实心**细条，全部画在选区外侧。
+        // 不用 stroke（2pt 描边居中，一半会压进选区，最终图片边缘多一条蓝线），
+        // 也不用 fill + clear（万一视图被 layer 化，clear 擦不穿，整块会糊住选区）。
+        let r = regionRect
+        ctx.setFillColor(NSColor.controlAccentColor.cgColor)
+        ctx.fill(CGRect(x: 0, y: r.minY - 2, width: bounds.width, height: 2))       // 上
+        ctx.fill(CGRect(x: 0, y: r.maxY, width: bounds.width, height: 2))           // 下
+        ctx.fill(CGRect(x: 0, y: r.minY, width: 2, height: r.height))               // 左
+        ctx.fill(CGRect(x: bounds.width - 2, y: r.minY, width: 2, height: r.height))// 右
 
-        // 边框
-        ctx.setStrokeColor(NSColor.controlAccentColor.cgColor)
-        ctx.setLineWidth(2)
-        ctx.stroke(bounds)
-
-        // 顶部状态条（画在框内顶部，窗口不含框外区域）
+        // 状态条：画在上方留白带里
         let attributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold),
             .foregroundColor: NSColor.white,
         ]
         let text = status
         let size = (text as NSString).size(withAttributes: attributes)
-        let barRect = CGRect(x: 0, y: 4, width: size.width + 20, height: size.height + 10)
-        ctx.setFillColor(NSColor.black.withAlphaComponent(0.75).cgColor)
+        let barRect = CGRect(x: 2, y: 3,
+                             width: min(size.width + 20, bounds.width - 4),
+                             height: Self.bandHeight - 6)
+        ctx.setFillColor(NSColor.black.withAlphaComponent(0.78).cgColor)
         ctx.addPath(CGPath(roundedRect: barRect, cornerWidth: 6, cornerHeight: 6, transform: nil))
         ctx.fillPath()
-        (text as NSString).draw(at: CGPoint(x: barRect.minX + 10, y: barRect.minY + 5),
+        ctx.saveGState()
+        ctx.clip(to: barRect)
+        (text as NSString).draw(at: CGPoint(x: barRect.minX + 10, y: barRect.minY + 4),
                                 withAttributes: attributes)
+        ctx.restoreGState()
     }
 }

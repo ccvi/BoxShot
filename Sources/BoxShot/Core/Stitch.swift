@@ -69,7 +69,13 @@ enum ImageStitch {
         let ratio = Double(t.height) / Double(gTop.height)   // 1 个灰度行 = 多少原像素
 
         var candidates: [(d: Int, score: Double)] = []
-        let maxD = min(gTop.height - 8, Int(Double(gBottom.height) * 0.92))
+        // 搜索上界按"至少留 5% 重叠"算（原来写死 0.92 = 8%，把"滚了大半屏"
+        // 的合法帧也挡在外面，而快速滑动恰好就是这样）
+        // d 的物理含义是"bottom 第 0 行落在 top 第 d 行"，所以上界只看 top 的高度：
+        // 重叠 = min(top 高 - d, bottom 高)。写 `bottom 高 - 重叠` 是错的 ——
+        // 它会连带禁掉"底部帧比 top 矮"的合法情况（页面到底了、最后一帧不满屏）。
+        let minOverlapRows = max(8, gBottom.height / 25)
+        let maxD = gTop.height - minOverlapRows
         var d = 2
         while d <= maxD {
             if let s = score(top: gTop, bottom: gBottom, d: d, rowStep: 2, colStep: 2) {
@@ -97,6 +103,9 @@ enum ImageStitch {
         let rowStep = max(1, fBottom.height / 80)
         let colStep = max(1, targetW / 320)
 
+        if debugLog {
+            FileHandle.standardError.write("[stitch] maxD=\(maxD) 窗口=\(centers.sorted()) ratio=\(String(format: "%.2f", ratio)) span=\(span)\n".data(using: .utf8)!)
+        }
         var solutions: [(d: Int, mad: Double, texture: Double)] = []
         for center in centers.sorted() {
             let base = Int((Double(center) * ratio).rounded())
@@ -133,8 +142,11 @@ enum ImageStitch {
     private static func refineWindow(top: Gray, bottom: Gray, base: Int, span: Int,
                                      rowStep: Int, colStep: Int)
         -> (d: Int, mad: Double, texture: Double)? {
+        // 上界只能按 top 的高度收（d 可以大于 bottom 的高度，
+        // 只要 bottom 第 0 行还能落到 top 里面去）—— 拿 bottom.height 卡会
+        // 把"底部帧不满屏"的合法偏移整个切掉
         let lower = max(2, base - span)
-        let upper = min(bottom.height - 1, base + span)
+        let upper = min(top.height - 2, base + span)
         guard lower <= upper else { return nil }
 
         var best: (d: Int, mad: Double, texture: Double)?
@@ -235,9 +247,12 @@ enum ImageStitch {
         guard overlap > 8 else { return nil }
 
         // 跳过当前帧顶部 10% + 底部 4%：固定表头 / 固定底栏在两帧里位置不变，
-        // 留着它们会把最优解往 d≈0 拖（那样"看起来"最像）
-        let skipTop = max(2, Int(Double(bottom.height) * 0.10))
-        let skipBottom = max(1, Int(Double(bottom.height) * 0.04))
+        // 留着它们会把最优解往 d≈0 拖（那样"看起来"最像）。
+        // 🔴 上限压到 overlap/4：滚到只剩几十行重叠时（快速滑动就是这样），
+        // 按帧高算出来的 50 行比重叠区本身还大，会把比较区削成负数 ——
+        // 结果"明明能对上却返回 nil"，宁可少跳过一点也不能没有可比的像素。
+        let skipTop = min(max(2, Int(Double(bottom.height) * 0.10)), max(2, overlap / 4))
+        let skipBottom = min(max(1, Int(Double(bottom.height) * 0.04)), max(1, overlap / 4))
         let last = overlap - skipBottom
         guard last - skipTop >= 8 else { return nil }
 

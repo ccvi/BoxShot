@@ -113,10 +113,15 @@ enum ScreenCapture {
 
     /// 截取显示器上的一个矩形区域（rect 用该显示器的**局部坐标**，点单位）
     ///
-    /// - Parameter excludingOwnWindows: 把本应用自己的窗口从画面里剔掉。
-    ///   滚动截图必须传 true：取景框是浮在选区**正上方**的，而且框里还在画
-    ///   上一次的拼接预览，不排除的话每帧截到的都是"上一帧的预览"，拼出来全错。
-    ///   （1.0.4 及以前就是这个症状：图不连续、整体错位。）
+    /// - Parameter excludingOwnWindows: 请求把本应用自己的窗口从画面里剔掉。
+    ///
+    ///   🔴 这个参数**不可靠**，别把画面干净与否押在它身上。实测（macOS 26）：
+    ///   我们的取景框是 `.floating` / `.statusBar` 层，而 `SCShareableContent.windows`
+    ///   基本只列 layer-0 的普通窗口，按 pid 过滤出来是空数组 → excluding 变空操作。
+    ///   1.0.5 就是信了它会排除自己，在选区里画实时预览，结果每帧拍到的都是
+    ///   "上一帧的预览"，只截得下第一段。
+    ///   现在的做法是**取景框压根不在选区里画东西**（见 ScrollFrameView），
+    ///   这里传 true 只是额外买一道保险。
     static func captureRegion(displayID: CGDirectDisplayID, rect: CGRect,
                               excludingOwnWindows: Bool = false) async throws -> CGImage {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)

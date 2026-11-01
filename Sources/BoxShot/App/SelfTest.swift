@@ -45,8 +45,8 @@ enum SelfTest {
         // 而用户看到的正是那几像素的错位（重影、内容错行）。
         // 现在改成：合成一张带随机纹理的"网页"，按已知偏移滚 5 段，
         // 最后把结果与源页面**逐像素**比对，差一个像素就算失败。
-        // 调试对齐过程时把下面这行打开（会往 stderr 打多窗口搜索的汇总）
-        // ImageStitch.debugLog = true
+        // 调试对齐过程：BOXSHOT_STITCH_DEBUG=1 时往 stderr 打搜索过程
+        ImageStitch.debugLog = ProcessInfo.processInfo.environment["BOXSHOT_STITCH_DEBUG"] != nil
         if let page = syntheticPage(width: 480, height: 1600) {
             let viewH = 500
             let steps = [137, 89, 210, 63, 174]
@@ -119,6 +119,40 @@ enum SelfTest {
             } else {
                 check("周期性内容靠 hint 拉回正确周期（造图失败）", false)
             }
+
+            // 大跳动的边界：滚到只剩 5% 重叠还能对，滚过一屏就该拒绝
+            if let far = page.cropping(to: CGRect(x: 0, y: visitY + 475, width: 480, height: viewH)) {
+                let near = ImageStitch.align(top: lastFrame ?? page, bottom: far)
+                check("滚到只剩 5% 重叠还对得上（\(near?.offset.description ?? "nil")）",
+                      near?.offset == 475)
+            } else {
+                check("滚到只剩 5% 重叠还对得上（造图失败）", false)
+            }
+            if let over = page.cropping(to: CGRect(x: 0, y: visitY + 560, width: 480, height: viewH)) {
+                check("滚过一屏（无重叠）必须拒绝",
+                      ImageStitch.align(top: lastFrame ?? page, bottom: over) == nil)
+            } else {
+                check("滚过一屏（无重叠）必须拒绝（造图失败）", false)
+            }
+
+            // 取景框几何：选区必须**整个**落在面板的透明区里。
+            // 1.0.5 的血案是面板盖在选区上还画了预览，抓帧把自己拍进去了。
+            let region = NSRect(x: 300, y: 200, width: 480, height: 500)
+            let panel = ScrollCaptureController.panelRect(forRegion: region)
+            check("取景框面板把选区包在透明区里（左/右/下各留 2px，上方留状态带）",
+                  panel.minX == region.minX - 2
+                    && panel.maxX == region.maxX + 2
+                    && panel.minY == region.minY - 2
+                    && panel.maxY == region.maxY + ScrollFrameView.bandHeight + 2)
+
+            let probe = ScrollFrameView(frame: NSRect(x: 0, y: 0,
+                                                      width: region.width + 4,
+                                                      height: region.height + ScrollFrameView.bandHeight + 4))
+            let inner = probe.regionRect
+            check("视图里的选区矩形不贴边（四周至少留 2px 给边框）",
+                  inner.minX >= 2 && inner.minY >= 2
+                    && inner.maxX <= probe.bounds.width - 2
+                    && inner.maxY <= probe.bounds.height - 2)
 
             check("旋转 90° 尺寸互换", {
                 guard let rotated = ImageStitch.rotate90(page) else { return false }
