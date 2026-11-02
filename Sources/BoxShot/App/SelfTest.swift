@@ -349,13 +349,15 @@ enum SelfTest {
             check("图标字号还是 19（没跟着缩）",
                   abs(OverlayEditorController.toolbarIconPointSize - 19) < 0.01)
             // 这几条盯的是"倍率是不是真的只作用在圆点上"：
-            // 内边距 / 间距 / 圆角 / 分隔线一旦跟着变，就是又误伤了整个工具条。
-            check("内边距 / 间距 / 圆角 / 容器圆角都回到原值",
+            // 内边距 / 间距 / 分隔线一旦跟着变，就是又误伤了整个工具条。
+            // 容器圆角 2026-11-02 用户口径从 14 改成 10（与颜色面板一致）。
+            check("内边距 / 间距 / 按钮圆角都回到原值",
                   abs(OverlayEditorController.toolbarInsetV - 9) < 0.01
                     && abs(OverlayEditorController.toolbarInsetH - 10) < 0.01
                     && abs(OverlayEditorController.toolbarSpacing - 2) < 0.01
-                    && abs(OverlayEditorController.toolbarButtonCornerRadius - 6) < 0.01
-                    && abs(OverlayEditorController.toolbarContainerCornerRadius - 14) < 0.01)
+                    && abs(OverlayEditorController.toolbarButtonCornerRadius - 6) < 0.01)
+            check("容器圆角 = 10（与颜色面板一致，工具条 1 = 工具条 2）",
+                  abs(OverlayEditorController.toolbarContainerCornerRadius - 10) < 0.01)
             check("工具条分隔线高度回到 26",
                   abs(OverlayEditorController.toolbarDividerHeight - 26) < 0.01)
             check("「当前颜色」圆点缩到 21（30 的 70%）",

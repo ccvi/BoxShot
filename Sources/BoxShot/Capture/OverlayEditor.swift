@@ -325,8 +325,10 @@ final class OverlayEditorController: NSObject {
     static let toolbarInsetH: CGFloat = 10 * toolbarScale
     /// 工具条上那条竖分隔线的高度（原 26）
     static let toolbarDividerHeight: CGFloat = 26 * toolbarScale
-    /// 工具条容器圆角（原 14）
-    static let toolbarContainerCornerRadius: CGFloat = 14 * toolbarScale
+    /// 工具条容器圆角。2026-11-02 用户口径「工具条 1 改成工具条 2 的圆角矩形」：
+    /// 以前工具条是 14、颜色面板是 10，两条摆在一起圆角对不上；
+    /// 现在共用这一个常量（10），改圆角只动这里。
+    static let toolbarContainerCornerRadius: CGFloat = 10
     /// 工具条 / 颜色面板容器底色：**不透明灰黑**。
     /// 2026-11-02 用户口径「两个工具条变成圆角矩形框，底色为不透明的灰黑色」——
     /// 以前是 NSVisualEffectView(.hudWindow) 毛玻璃，截图内容（晚霞之类的暖色）
@@ -506,10 +508,10 @@ final class OverlayEditorController: NSObject {
         stack.layoutSubtreeIfNeeded()
         let size = stack.fittingSize
 
-        // 同工具条：不透明灰黑实底 + 圆角（2026-11-02 用户口径）
+        // 同工具条：不透明灰黑实底 + 圆角（圆角共用 toolbarContainerCornerRadius）
         let container = NSView(frame: NSRect(origin: .zero, size: size))
         container.wantsLayer = true
-        container.layer?.cornerRadius = 10
+        container.layer?.cornerRadius = Self.toolbarContainerCornerRadius
         container.layer?.backgroundColor = Self.toolbarBackgroundColor.cgColor
         container.addSubview(stack)
         stack.frame = container.bounds
