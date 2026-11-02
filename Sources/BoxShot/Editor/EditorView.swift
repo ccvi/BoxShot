@@ -11,7 +11,9 @@ final class EditorDocument: ObservableObject {
     let effects: EffectImages
 
     @Published var shapes: [AnnotationShape] = []
-    @Published var tool: EditorTool = .rect
+    /// 打开就是箭头（用户口径）：截图十次有九次是拿箭头指一下，
+    /// 默认落在「矩形」上等于每次都要先点一次工具条。
+    @Published var tool: EditorTool = .arrow
     @Published var color: RGBColor = .red
     @Published var lineWidth: CGFloat = 4
     /// 当前选中的标注（"选择"工具点选；⌫ 删除；拖动移动）
@@ -477,16 +479,16 @@ struct EditorView: View {
 
         case .arrow:
             guard let a = shape.points.first, let b = shape.points.last else { return }
+            // 箭杆收在头部里侧（不然 round cap 会在尖端顶出个圆头），
+            // 几何全部来自 EditorRenderer，和导出渲染共用一份
+            let stem = EditorRenderer.arrowStemEnd(from: a, to: b, width: width)
             var path = Path()
-            path.move(to: a); path.addLine(to: b)
+            path.move(to: a); path.addLine(to: stem)
             context.stroke(path, with: .color(color), style: StrokeStyle(lineWidth: width, lineCap: .round))
-            let angle = atan2(b.y - a.y, b.x - a.x)
-            let headLen = max(12, width * 3.5)
-            let spread: CGFloat = 0.42
+            let pts = EditorRenderer.arrowHeadPoints(from: a, to: b, width: width)
             var head = Path()
-            head.move(to: b)
-            head.addLine(to: CGPoint(x: b.x - headLen * cos(angle - spread), y: b.y - headLen * sin(angle - spread)))
-            head.addLine(to: CGPoint(x: b.x - headLen * cos(angle + spread), y: b.y - headLen * sin(angle + spread)))
+            head.move(to: pts[0])
+            for p in pts.dropFirst() { head.addLine(to: p) }
             head.closeSubpath()
             context.fill(head, with: .color(color))
 

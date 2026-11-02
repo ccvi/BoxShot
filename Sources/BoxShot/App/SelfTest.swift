@@ -557,6 +557,40 @@ enum SelfTest {
             check("撤销删除恢复形状", doc.shapes.count == 1)
         }
 
+        // ── 箭头几何（1.0.12：用户说"箭头不够尖"）──
+        do {
+            // 尖不尖 = 顶点张角 + 头长／线宽的比
+            check("顶点张角收到 34°（旧版 48°）",
+                  abs(2 * EditorRenderer.arrowHeadSpread * 180 / .pi - 34.4) < 0.6)
+            check("头长随线宽增长（4pt → 20.8）",
+                  abs(EditorRenderer.arrowHeadLength(width: 4) - 20.8) < 0.01)
+            check("细线头长有下限 16", EditorRenderer.arrowHeadLength(width: 1) == 16)
+            check("头越细长越尖：宽/长 < 0.65",
+                  2 * sin(EditorRenderer.arrowHeadSpread) < 0.65)
+
+            let a = CGPoint(x: 0, y: 0), b = CGPoint(x: 100, y: 0)
+            let headLen = EditorRenderer.arrowHeadLength(width: 4)
+            // 箭杆必须收在尖端后面：留出 round cap 的半径（width/2 = 2）也不该碰到尖
+            let stem = EditorRenderer.arrowStemEnd(from: a, to: b, width: 4)
+            check("箭杆终点收进头部（离尖端 > 头长一半）", stem.x < b.x - headLen * 0.5)
+            check("箭杆终点不会缩到起点之前", stem.x > a.x)
+
+            // 返回顺序： [尖, 左翼, 底边内凹点, 右翼]
+            let pts = EditorRenderer.arrowHeadPoints(from: a, to: b, width: 4)
+            check("头部是四点多边形", pts.count == 4)
+            check("第一点是箭尖（原样落在终点）", pts[0] == b)
+            check("两翼左右对称",
+                  abs((pts[1].y + pts[3].y) - 2 * b.y) < 0.01
+                  && abs(pts[1].x - pts[3].x) < 0.01)
+            check("底边内凹（notch 比两翼更靠近尖端）", pts[2].x > pts[1].x)
+
+            // 打开编辑器就该是箭头（用户口径），不是矩形
+            let blank = solidImage(width: 8, height: 8,
+                                   color: CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
+            let fresh = EditorDocument(image: blank)
+            check("打开编辑器默认选箭头", fresh.tool == .arrow)
+        }
+
         // ── GIF 帧序列编码（1.0.4）──
         do {
             let frames = (0..<3).map { index in

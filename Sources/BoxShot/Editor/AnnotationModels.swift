@@ -381,7 +381,10 @@ enum EditorRenderer {
             ctx.setFillColor(color.cgColor)
             ctx.setLineWidth(width)
             ctx.setLineCap(.round)
-            ctx.move(to: a); ctx.addLine(to: b); ctx.strokePath()
+            // 🔴 箭杆**不能画到箭尖**：round cap 会在尖端留一个半径 width/2 的圆头，
+            // 看上去就是"钝的"。箭杆只画到头部里侧，尖端交给下面那个三角形。
+            let stem = arrowStemEnd(from: a, to: b, width: width)
+            ctx.move(to: a); ctx.addLine(to: stem); ctx.strokePath()
             drawArrowHead(from: a, to: b, width: width, in: ctx)
 
         case .text:
@@ -445,13 +448,45 @@ enum EditorRenderer {
         return path
     }
 
-    private static func drawArrowHead(from a: CGPoint, to b: CGPoint, width: CGFloat, in ctx: CGContext) {
+    // ── 箭头几何（渲染与自检共用） ──
+
+    /// 箭头头部的长度：跟着线宽长，但有下限（细线也得看得出来）。
+    /// 1.0.12 由 `width * 3.5` 加到 `width * 5.2` —— 头越长、同宽下尖角越锐。
+    static func arrowHeadLength(width: CGFloat) -> CGFloat {
+        max(16, width * 5.2)
+    }
+
+    /// 头部两根斜边相对轴线的张角。0.42 → 0.30 弧度（24° → 17°），
+    /// 顶点总张角从 48° 收到 34°，看上去才是"尖的"。
+    static let arrowHeadSpread: CGFloat = 0.30
+
+    /// 箭杆终点：收到头部里侧，避免圆线帽顶出一个钝头
+    static func arrowStemEnd(from a: CGPoint, to b: CGPoint, width: CGFloat) -> CGPoint {
         let angle = atan2(b.y - a.y, b.x - a.x)
-        let headLen = max(12, width * 3.5)
-        let spread: CGFloat = 0.42
+        let back = arrowHeadLength(width: width) * 0.55
+        return CGPoint(x: b.x - back * cos(angle), y: b.y - back * sin(angle))
+    }
+
+    /// 头部四点多边形：[尖, 左翼, 底边内凹点, 右翼]。
+    /// CG 渲染和 SwiftUI 预览**必须共用一个** —— 以前两处各写一遍，
+    /// 改了形状其中一处没跟上，屏幕上和存下来的就不是一支箭头了。
+    static func arrowHeadPoints(from a: CGPoint, to b: CGPoint, width: CGFloat) -> [CGPoint] {
+        let angle = atan2(b.y - a.y, b.x - a.x)
+        let headLen = arrowHeadLength(width: width)
+        let spread = arrowHeadSpread
         let p1 = CGPoint(x: b.x - headLen * cos(angle - spread), y: b.y - headLen * sin(angle - spread))
         let p2 = CGPoint(x: b.x - headLen * cos(angle + spread), y: b.y - headLen * sin(angle + spread))
-        ctx.move(to: b); ctx.addLine(to: p1); ctx.addLine(to: p2); ctx.closePath()
+        // 底边中点向尖端收进去一点 → 两翼往后掠，视觉上更尖（▷ 而不是 ▲）
+        let notch = CGPoint(x: b.x - headLen * 0.78 * cos(angle),
+                            y: b.y - headLen * 0.78 * sin(angle))
+        return [b, p1, notch, p2]
+    }
+
+    private static func drawArrowHead(from a: CGPoint, to b: CGPoint, width: CGFloat, in ctx: CGContext) {
+        let pts = arrowHeadPoints(from: a, to: b, width: width)
+        ctx.move(to: pts[0])
+        for p in pts.dropFirst() { ctx.addLine(to: p) }
+        ctx.closePath()
         ctx.fillPath()
     }
 

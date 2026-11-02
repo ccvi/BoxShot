@@ -198,6 +198,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             runLoupeDiagnostics()
             return
         }
+        // 诊断入口：--arrowtest 离屏渲染三支箭头（用来验「够不够尖」）
+        let arrowTrigger = "/tmp/boxshot-arrowtest.trigger"
+        if CommandLine.arguments.contains("--arrowtest")
+            || FileManager.default.fileExists(atPath: arrowTrigger) {
+            try? FileManager.default.removeItem(atPath: arrowTrigger)
+            runArrowDiagnostics()
+            return
+        }
         // 诊断入口：--show-settings 直接弹设置窗口，用来核对各页控件是否
         // 排对了、值是否真的跟着设置走（改完设置页最好截一张看一眼）。
         // 触发文件里可以写一个页号（0 通用 / 1 截图 / 2 贴图 / 3 OCR / 4 录制 /
@@ -906,6 +914,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                   canvas.width, canvas.height)
         }
         exit(0)
+    }
+
+    /// 诊断入口：`--arrowtest` 把三支不同线宽的箭头**离屏渲染**成 PNG
+    /// （/tmp/boxshot-arrow.png），并打印头部几何。
+    ///
+    /// 用户口径「箭头不够尖」是主观判断，改完不能只靠嘴说"变尖了"：
+    /// 尖不尖 = 顶点张角 + 头部长度 / 线宽。把这两个数打出来，再看图确认。
+    /// 顺便验一件容易漏的事 —— 箭杆的圆线帽有没有顶到尖端（那会让尖端发钝）。
+    private func runArrowDiagnostics() {
+        let w = 640, h = 300
+        guard let base = Self.solidImage(width: w, height: h,
+                                         color: CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1)) else {
+            NSLog("[BoxShot][arrowtest] 造底图失败"); exit(1)
+        }
+        var shapes: [AnnotationShape] = []
+        for (index, width) in [2, 4, 8].enumerated() {
+            let y = CGFloat(50 + index * 90)
+            shapes.append(AnnotationShape(tool: .arrow,
+                                          points: [CGPoint(x: 60, y: y + 40), CGPoint(x: 560, y: y)],
+                                          color: .red, lineWidth: CGFloat(width)))
+        }
+        let effects = EffectImages(base: base)
+        guard let out = EditorRenderer.render(base: base, shapes: shapes, effects: effects),
+              let data = NSBitmapImageRep(cgImage: out).representation(using: .png, properties: [:]) else {
+            NSLog("[BoxShot][arrowtest] 渲染失败"); exit(1)
+        }
+        try? data.write(to: URL(fileURLWithPath: "/tmp/boxshot-arrow.png"), options: .atomic)
+        for width in [2.0, 4.0, 8.0] {
+            let headLen = EditorRenderer.arrowHeadLength(width: width)
+            let apex = 2 * EditorRenderer.arrowHeadSpread * 180 / .pi
+            NSLog("[BoxShot][arrowtest] 线宽 %.0f → 头长 %.1f（%.1f×线宽）· 顶点张角 %.1f°",
+                  width, headLen, headLen / width, apex)
+        }
+        NSLog("[BoxShot][arrowtest] 已写到 /tmp/boxshot-arrow.png %d×%d", w, h)
+        exit(0)
+    }
+
+    private static func solidImage(width: Int, height: Int, color: CGColor) -> CGImage? {
+        guard let ctx = CGContext(data: nil, width: width, height: height,
+                                  bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                                    | CGBitmapInfo.byteOrder32Little.rawValue) else { return nil }
+        ctx.setFillColor(color)
+        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        return ctx.makeImage()
     }
 
     private func runPinDiagnostics() {
