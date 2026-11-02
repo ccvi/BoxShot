@@ -736,7 +736,12 @@ struct EditorView: View {
                         doc.color = RGBColor(red: ns.redComponent, green: ns.greenComponent, blue: ns.blueComponent)
                     }), supportsOpacity: false)
                     .labelsHidden()
-                    .frame(width: 26, height: 22)
+                    // 🔴 布局宽度必须给够：macOS 取色控件的胶囊本体比 26pt 宽，
+                    // frame 限窄它不会缩、只会画出去压住左边的紫色圆点
+                    //（2026-11-02 用户样张「颜色调整挡住了其他颜色」）。
+                    // 44pt 是它的自然宽度，宁可留点空隙别再叠上去。
+                    .padding(.leading, 3)
+                    .frame(width: 46, height: 22)
             }
 
             // 粗细
