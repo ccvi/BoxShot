@@ -413,16 +413,14 @@ private struct RecordPane: View {
                         Text("\(fps)").tag(fps)
                     }
                 }
-                .labelsHidden()
-                .disabled(prefs.value.recordFormat == .gif))
+                .labelsHidden())
             row("格式",
                 Picker("", selection: prefs.binding(\.recordFormat)) {
                     ForEach(RecordFileFormat.allCases) { format in
                         Text(format.title).tag(format)
                     }
                 }
-                .labelsHidden(),
-                trailing: prefs.value.recordFormat == .gif ? "动图：无声音、无画中画" : nil)
+                .labelsHidden())
             row("质量",
                 Picker("", selection: prefs.binding(\.recordQuality)) {
                     ForEach(RecordQuality.allCases) { quality in
@@ -448,14 +446,6 @@ private struct RecordPane: View {
             bareRow(
                 Toggle("录制时显示摄像头取景框（画面右下角，圆形 / 圆角矩形，右键切换）",
                        isOn: prefs.binding(\.recordCamera)))
-            row("GIF 帧率",
-                Picker("", selection: prefs.binding(\.recordGIFPS)) {
-                    Text("5").tag(5)
-                    Text("10").tag(10)
-                    Text("15").tag(15)
-                }
-                .labelsHidden()
-                .disabled(prefs.value.recordFormat != .gif))
             bareRow(Toggle("录制中显示鼠标指针", isOn: prefs.binding(\.recordShowCursor)))
             bareRow(Toggle("录制完成后在 Finder 中显示文件", isOn: prefs.binding(\.recordRevealInFinder)))
             Text("输出 MP4 / MOV（H.264 + AAC），默认保存到桌面。首次录制需要授权「屏幕录制」与「麦克风」。")

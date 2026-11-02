@@ -285,6 +285,8 @@ final class RegionSelector: NSObject {
         override var isFlipped: Bool { true }
 
         private var cursorPoint: CGPoint = .zero
+        /// 放大镜上一次的矩形：局部重绘要把它和新位置一起抹掉
+        private var lastLoupeRect: CGRect = .zero
 
         /// 视图坐标 → 全局坐标（左上原点）。globalOrigin 已是 CGDisplayBounds.origin，
         /// 所以全局-显示局部 = 视图坐标本身。
@@ -488,10 +490,24 @@ final class RegionSelector: NSObject {
                     needsDisplay = true
                 }
             }
-            if showCrosshair || loupeConfig?.enabled == true {
+            if let config = loupeConfig, config.enabled, !showCrosshair {
+                // 🔴 只重绘放大镜自己那块（旧位置 ∪ 新位置）。
+                // 以前光标一动就 `needsDisplay = true` 整屏重画 —— 5K 下一次
+                // 750 万像素，光标悬停就能吃满一核。十字线要跨全屏没法局部化，
+                // 那条路只能保持整屏；只开放大镜时走这条窄路。
+                let newRect = loupeFrame(at: p)
+                setNeedsDisplay(lastLoupeRect.union(newRect).insetBy(dx: -8, dy: -8))
+                lastLoupeRect = newRect
+            } else if showCrosshair || loupeConfig?.enabled == true {
                 // 放大镜必须跟着光标走：不重绘它就会钉在第一次出现的位置
                 needsDisplay = true
             }
+        }
+
+        /// 放大镜的屏幕矩形（局部重绘用）
+        private func loupeFrame(at p: CGPoint) -> CGRect {
+            CGRect(origin: Loupe.origin(cursor: p, size: Loupe.size, bounds: bounds),
+                   size: Loupe.size)
         }
 
         override func keyDown(with event: NSEvent) {

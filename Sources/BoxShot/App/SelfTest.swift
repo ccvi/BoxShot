@@ -591,19 +591,34 @@ enum SelfTest {
             check("打开编辑器默认选箭头", fresh.tool == .arrow)
         }
 
-        // ── GIF 帧序列编码（1.0.4）──
+        // ── GIF 已移除（1.0.12）：老配置迁移必须不丢别的设置 ──
         do {
-            let frames = (0..<3).map { index in
-                solidImage(width: 32, height: 32,
-                           color: CGColor(srgbRed: 0, green: Double(index) / 4, blue: 1, alpha: 1))
+            check("老配置的 gif 格式迁回 mp4",
+                  RecordFileFormat.from(legacyRaw: "gif") == .mp4)
+            check("未知格式迁不回来（走默认值）",
+                  RecordFileFormat.from(legacyRaw: "webm") == nil)
+            check("格式档位只剩 MOV / MP4",
+                  RecordFileFormat.allCases == [.mov, .mp4])
+            // 整包解码：recordFormat 存的是 "gif"（旧 enum 已删），解码必须成功
+            // 且不能把快捷键等其它字段一起冲掉 —— 那等于让用户重配一遍设置。
+            let legacy = """
+            {"recordFormat":"gif","recordFPS":30,"saveDirectory":"/tmp/盒子截图",\
+            "shortcuts":{"regionShot":{"keyCode":99,"command":false,"shift":false,\
+            "option":true,"control":false,"label":"⌥F3"}}}
+            """
+            if let data = legacy.data(using: .utf8) {
+                do {
+                    let decoded = try JSONDecoder().decode(Preferences.self, from: data)
+                    check("含 gif 的整包配置解码成功", decoded.recordFormat == .mp4)
+                    check("迁移不丢快捷键", decoded.spec(for: .regionShot)?.label == "⌥F3")
+                    check("迁移不丢保存目录", decoded.saveDirectory == "/tmp/盒子截图")
+                } catch {
+                    print("  ↳ 解码错误详情：\(error)")
+                    check("含 gif 的整包配置解码成功", false)
+                }
+            } else {
+                check("含 gif 的整包配置解码成功", false)
             }
-            let url = URL(fileURLWithPath: NSTemporaryDirectory())
-                .appendingPathComponent("boxshot-selftest.gif")
-            try? FileManager.default.removeItem(at: url)
-            RecorderController.writeGIF(frames: frames, interval: 0.1, to: url)
-            let count = CGImageSourceCreateWithURL(url as CFURL, nil).map { CGImageSourceGetCount($0) } ?? 0
-            check("GIF 写出 3 帧（实际 \(count)）", count == 3)
-            try? FileManager.default.removeItem(at: url)
         }
 
         // ── 录制暂停状态（1.0.4）──

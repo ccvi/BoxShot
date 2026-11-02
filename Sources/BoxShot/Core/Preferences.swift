@@ -34,17 +34,29 @@ enum RecordAudioSource: String, Codable, CaseIterable, Identifiable {
 }
 
 /// 录制封装格式
+///
+/// 🔴 GIF 已移除（1.0.12）：GIF 走「帧序列逐帧收 CGImage、收工一次性编码」，
+/// 600 帧 × 1000px 全程常驻内存能到 1.8GB，是全应用唯一的内存事故点。
+/// 老配置里存的 `"gif"` 会在解码时迁回 `.mp4`（见 `init(from:)`）——
+/// 不能直接删 enum 项就完事：decodeIfPresent 碰到未知值会抛错，
+/// 整份设置就会回退出厂，快捷键、保存目录全没了。
 enum RecordFileFormat: String, Codable, CaseIterable, Identifiable {
     case mov
     case mp4
-    case gif      // 动图：不写视频容器，帧序列直接编码成 GIF
 
     var id: String { rawValue }
     var title: String { rawValue.uppercased() }
     var fileExtension: String { rawValue }
 
-    /// GIF 没有音轨，也没有摄像头画中画合成（帧序列逐帧解码太重）
-    var supportsAudio: Bool { self != .gif }
+    /// 老配置的迁移：`"gif"` → `.mp4`，其余原样
+    static func from(legacyRaw raw: String?) -> RecordFileFormat? {
+        switch raw {
+        case "gif": return .mp4
+        case "mov": return .mov
+        case "mp4": return .mp4
+        default:    return nil
+        }
+    }
 }
 
 /// MOV / MP4 的帧率档位。
@@ -205,9 +217,6 @@ struct Preferences: Codable, Equatable {
     var recordQuality: RecordQuality = .high
     /// 录制完成后在 Finder 里定位文件（不然文件默默躺在桌面找不到）
     var recordRevealInFinder: Bool = true
-    /// GIF 录制帧率（5 / 10 / 15；GIF 每帧都是完整位图，越大越卡）
-    var recordGIFPS: Int = 10
-
     var shortcuts: [String: KeySpec] = [:]   // 出厂不预置热键（1.0.1 用户要求）
 
     /// 严格读取：设置里没录就是 nil，**不回退默认值**——
@@ -255,10 +264,12 @@ struct Preferences: Codable, Equatable {
         recordCameraSize = try c.decodeIfPresent(CameraBubbleSize.self, forKey: .recordCameraSize) ?? f.recordCameraSize
         recordFPS = try c.decodeIfPresent(Int.self, forKey: .recordFPS) ?? f.recordFPS
         recordShowCursor = try c.decodeIfPresent(Bool.self, forKey: .recordShowCursor) ?? f.recordShowCursor
-        recordFormat = try c.decodeIfPresent(RecordFileFormat.self, forKey: .recordFormat) ?? f.recordFormat
+        // recordFormat 手动映射（不再走 decodeIfPresent(RecordFileFormat.self)）：
+        // 老配置里可能存着 "gif"，直接解 enum 会抛错 → 整份设置回退出厂。
+        let storedFormat = try c.decodeIfPresent(String.self, forKey: .recordFormat)
+        recordFormat = RecordFileFormat.from(legacyRaw: storedFormat) ?? f.recordFormat
         recordQuality = try c.decodeIfPresent(RecordQuality.self, forKey: .recordQuality) ?? f.recordQuality
         recordRevealInFinder = try c.decodeIfPresent(Bool.self, forKey: .recordRevealInFinder) ?? f.recordRevealInFinder
-        recordGIFPS = try c.decodeIfPresent(Int.self, forKey: .recordGIFPS) ?? f.recordGIFPS
         // 快捷键缺省就是空表（1.0.1 起出厂不预置）
         shortcuts = try c.decodeIfPresent([String: KeySpec].self, forKey: .shortcuts) ?? [:]
     }
@@ -274,7 +285,7 @@ struct Preferences: Codable, Equatable {
         case ocrKeepLineBreaks, ocrLineOverlap, ocrIncremental, ocrAutoOpenLink
         case measureShowTips
         case recordAudio, recordCamera, recordCameraSize, recordFPS, recordShowCursor
-        case recordFormat, recordQuality, recordRevealInFinder, recordGIFPS
+        case recordFormat, recordQuality, recordRevealInFinder
         case shortcuts
     }
 }

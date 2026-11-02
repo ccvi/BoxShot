@@ -316,10 +316,9 @@ final class RecordToolbarController: NSObject {
             self?.model?.presentError(message)
         }
         do {
-            let isGIF = prefs.recordFormat == .gif
             // 🔴 摄像头取景框改成"上屏 + 被录进画面"（见 CameraBubble 注释），
             // 编码端不再合成画中画 —— 否则同一个摄像头会在成片里出现两次。
-            if !isGIF, prefs.recordCamera, cameraBubble == nil {
+            if prefs.recordCamera, cameraBubble == nil {
                 toggleCameraBubble()
             }
             // 🔴 取景框是本进程的窗口，而"排除自家窗口"是按 pid 一刀切的：
@@ -329,10 +328,9 @@ final class RecordToolbarController: NSObject {
             controller.keepVisibleWindowNumbers = bubbleNumber > 0 ? [bubbleNumber] : []
             try controller.startRecording(displayID: displayID,
                                           region: region,
-                                          // GIF 没有音轨：这里明确传 none，别让引擎白开一路采集
-                                          audio: isGIF ? .none : prefs.recordAudio,
+                                          audio: prefs.recordAudio,
                                           camera: false,
-                                          fps: isGIF ? prefs.recordGIFPS : prefs.recordFPS,
+                                          fps: prefs.recordFPS,
                                           showCursor: prefs.recordShowCursor,
                                           format: prefs.recordFormat,
                                           quality: prefs.recordQuality,
@@ -517,35 +515,19 @@ final class DashedFrameView: NSView {
 final class RecordOptionsView: NSView {
 
     private weak var model: AppModel?
-    private var gifFPSSegment: NSSegmentedControl?
 
     init(model: AppModel) {
         self.model = model
-        super.init(frame: NSRect(x: 0, y: 0, width: 240, height: 208))
+        // GIF 选项已随 GIF 功能一并移除（1.0.12）
+        super.init(frame: NSRect(x: 0, y: 0, width: 240, height: 118))
 
         let prefs = model.prefs.value
 
         let formatLabel = label("格式")
-        let format = NSSegmentedControl(labels: ["MOV", "MP4", "GIF"],
+        let format = NSSegmentedControl(labels: ["MOV", "MP4"],
                                         trackingMode: .selectOne,
                                         target: self, action: #selector(formatChanged(_:)))
-        switch prefs.recordFormat {
-        case .mov: format.selectedSegment = 0
-        case .mp4: format.selectedSegment = 1
-        case .gif: format.selectedSegment = 2
-        }
-
-        let fpsLabel = label("GIF 帧率")
-        let fps = NSSegmentedControl(labels: ["5", "10", "15"],
-                                     trackingMode: .selectOne,
-                                     target: self, action: #selector(gifFPSChanged(_:)))
-        switch prefs.recordGIFPS {
-        case 5:  fps.selectedSegment = 0
-        case 15: fps.selectedSegment = 2
-        default: fps.selectedSegment = 1
-        }
-        fps.isEnabled = prefs.recordFormat == .gif
-        gifFPSSegment = fps
+        format.selectedSegment = prefs.recordFormat == .mov ? 0 : 1
 
         let qualityLabel = label("质量")
         let quality = NSSegmentedControl(labels: ["高", "中等", "低"], trackingMode: .selectOne, target: self, action: #selector(qualityChanged(_:)))
@@ -554,15 +536,10 @@ final class RecordOptionsView: NSView {
         let cursor = NSButton(checkboxWithTitle: "显示光标", target: self, action: #selector(cursorChanged(_:)))
         cursor.state = prefs.recordShowCursor ? .on : .off
 
-        let note = NSTextField(wrappingLabelWithString: "GIF 为动图，无声音、无摄像头画中画；最长 600 帧。输出保存到桌面。")
-        note.font = NSFont.systemFont(ofSize: 11)
-        note.textColor = .secondaryLabelColor
-        note.frame = NSRect(x: 16, y: 6, width: 208, height: 34)
-
         let rows: [(NSView, NSView)] = [
-            (formatLabel, format), (fpsLabel, fps), (qualityLabel, quality), (NSView(), cursor),
+            (formatLabel, format), (qualityLabel, quality), (NSView(), cursor),
         ]
-        var y: CGFloat = 168
+        var y: CGFloat = 96
         for (left, right) in rows {
             left.frame = NSRect(x: 16, y: y, width: 52, height: 22)
             right.frame = NSRect(x: 76, y: y - 2, width: 150, height: 26)
@@ -570,7 +547,6 @@ final class RecordOptionsView: NSView {
             addSubview(right)
             y -= 38
         }
-        addSubview(note)
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -583,20 +559,7 @@ final class RecordOptionsView: NSView {
     }
 
     @objc private func formatChanged(_ sender: NSSegmentedControl) {
-        switch sender.selectedSegment {
-        case 0: model?.prefs.value.recordFormat = .mov
-        case 1: model?.prefs.value.recordFormat = .mp4
-        default: model?.prefs.value.recordFormat = .gif
-        }
-        gifFPSSegment?.isEnabled = model?.prefs.value.recordFormat == .gif
-    }
-
-    @objc private func gifFPSChanged(_ sender: NSSegmentedControl) {
-        switch sender.selectedSegment {
-        case 0: model?.prefs.value.recordGIFPS = 5
-        case 2: model?.prefs.value.recordGIFPS = 15
-        default: model?.prefs.value.recordGIFPS = 10
-        }
+        model?.prefs.value.recordFormat = sender.selectedSegment == 0 ? .mov : .mp4
     }
 
     @objc private func qualityChanged(_ sender: NSSegmentedControl) {

@@ -223,6 +223,11 @@ final class EffectImages {
     private var pixelatedCache: CGImage?
     private var blurredCache: CGImage?
 
+    /// 全应用共用一个。以前每次出效果图都 `CIContext(options:)` 新建一个 ——
+    /// 创建是几十毫秒级 + 分配一整套 GPU 资源，第一次上马赛克/模糊
+    /// 能感觉到卡一下。OCR 那边早就是 static，这里跟上。
+    private static let ciContext = CIContext(options: [.useSoftwareRenderer: false])
+
     init(base: CGImage) {
         self.base = base
     }
@@ -246,8 +251,7 @@ final class EffectImages {
         filter.setValue(ciBase, forKey: kCIInputImageKey)
         filter.setValue(10.0, forKey: kCIInputRadiusKey)
         guard let output = filter.outputImage?.cropped(to: extent) else { return nil }
-        let context = CIContext(options: [.useSoftwareRenderer: false])
-        blurredCache = context.createCGImage(output, from: extent)
+        blurredCache = Self.ciContext.createCGImage(output, from: extent)
         return blurredCache
     }
 
@@ -258,8 +262,7 @@ final class EffectImages {
         filter.setValue(CIImage(cgImage: image), forKey: kCIInputImageKey)
         configure(filter, extent)
         guard let output = filter.outputImage?.cropped(to: extent) else { return nil }
-        let context = CIContext(options: [.useSoftwareRenderer: false])
-        return context.createCGImage(output, from: extent)
+        return ciContext.createCGImage(output, from: extent)
     }
 }
 
