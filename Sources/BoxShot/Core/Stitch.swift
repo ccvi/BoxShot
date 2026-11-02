@@ -85,8 +85,10 @@ enum ImageStitch {
         }
         guard !candidates.isEmpty else { return nil }
 
-        // 候选窗口：粗搜前几名 + （有 hint 时）离 hint 最近的那个
-        var centers = Set(candidates.sorted { $0.score < $1.score }.prefix(6).map(\.d))
+        // 候选窗口：粗搜前几名 + （有 hint 时）离 hint 最近的那个。
+        // 10 而不是 6：强横向条纹页（表格 / 代码编辑器）在粗搜里同相位候选一大把，
+        // 多精修几个窗口是毫秒级开销，换第一段（无 hint）多一分命中真解的机会。
+        var centers = Set(candidates.sorted { $0.score < $1.score }.prefix(10).map(\.d))
         if let hint {
             let hintCoarse = Double(hint) / ratio
             if let nearest = candidates.min(by: {
@@ -111,8 +113,14 @@ enum ImageStitch {
             let base = Int((Double(center) * ratio).rounded())
             guard let r = refineWindow(top: fTop, bottom: fBottom, base: base, span: span,
                                        rowStep: rowStep, colStep: colStep) else { continue }
-            // 相邻窗口精修出来的可能是同一个偏移，去重
-            if solutions.contains(where: { abs($0.d - r.d) <= 1 }) { continue }
+            // 相邻窗口精修出来的可能是同一个偏移。🔴 合并时留 **mad 更小的那个**，
+            // 不是先到的 —— 窗口按 center 升序扫，低窗口可能先交出一个"还行但不是
+            // 最优"的解（1.0.15 实测：伪解 d=136 mad=14.7 先进队，把真解 d=137
+            // mad=0 当重复项丢了，第一段就差一个像素）。
+            if let idx = solutions.firstIndex(where: { abs($0.d - r.d) <= 1 }) {
+                if r.mad < solutions[idx].mad { solutions[idx] = r }
+                continue
+            }
             solutions.append(r)
         }
         guard !solutions.isEmpty else { return nil }
@@ -162,8 +170,18 @@ enum ImageStitch {
         guard let result = best, !allMads.isEmpty else { return nil }
 
         let meanMad = allMads.reduce(0, +) / Double(allMads.count)
-        guard result.mad <= 6, meanMad - result.mad >= 8 else { return nil }
-        return result
+        if debugLog {
+            let info = "窗口 \(lower)...\(upper) best=d\(result.d) mad=\(String(format: "%.2f", result.mad)) mean=\(String(format: "%.1f", meanMad))"
+            FileHandle.standardError.write("[stitch]   \(info)\n".data(using: .utf8)!)
+        }
+        // 门 ①：整数像素级对上（mad 很小，只容忍亚像素重采样的误差）。
+        if result.mad <= 6, meanMad - result.mad >= 8 { return result }
+        // 门 ②：亚像素余量（1.0.15）。触控板 / 平滑滚动停下的位置经常带小数
+        // （比如 137.4px），两帧各自带着抗锯齿重采样渲染，正确 d 的 mad 会被
+        // 抬到 10~20、跟相邻 d 拉不出深坑 —— 这不是"对错了"，是"对上了但带着
+        // 半像素误差"。放宽容忍，但要求与窗口内其他候选的分离度更大（防低纹理瞎拼）。
+        if result.mad <= 20, meanMad - result.mad >= 12 { return result }
+        return nil
     }
 
     /// 把 bottom 接到 top 下面（内部自己求偏移）。失败返回 nil。

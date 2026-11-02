@@ -6,10 +6,14 @@ import CoreGraphics
 //
 // 选好取景框后：框**原位钉住**，先抓第一帧；之后监听全局滚轮，
 // 等**滚动停止约 250ms** 再抓一帧拼接（自动按滚动方向选横/竖向）。
-// 下方浮动工具栏：
-//   [缩略图] [✕取消] [✓完成] | [贴图] [保存] [复制]
+// 下方浮动工具栏：[✕取消] [✓完成] | [贴图] [保存] [复制]
 //
-// 抓帧后台串行：滚动触发时若上一帧还在处理，记下待抓标记，处理完补一帧。
+// 🔴 只拼"停下来"的帧（1.0.15）：滚动途中抓到的帧带着平滑滚动的
+// 亚像素相位 + 运动残影，像素差天然超标，会被拼接质量门拒掉 —— 用户看到
+// 的就是"明明滚得不快却老提示没对上"；更糟的是连挂 3 帧会重置基准，
+// 拿运动中的帧当基准，后面拼出来全是错位。所以途中不抓帧，停稳再抓。
+//
+// 抓帧后台串行：停稳触发时若上一帧还在处理，记下待抓标记，处理完补一帧。
 // ============================================================
 
 @MainActor
@@ -41,12 +45,6 @@ final class ScrollCaptureController: NSObject {
     private var segmentCount = 0
     /// 连续失败次数：≥3 就把基准换成当前帧重新开始，绝不让自己卡死
     private var consecutiveFailures = 0
-    private var lastGrabAt = Date.distantPast
-    /// 抓帧节流：滚动过程中最多每 0.2s 抓一帧。
-    /// 🔴 只等"停手后抓一帧"是不够的：一次快速滑动就能滚掉一屏多，
-    /// 两帧重叠不足就没法对齐，而一旦对不上、基准又不动，后面全废
-    /// （用户实测症状就是"只截了一次"）。边滚边抓，步子才小。
-    private let grabThrottle: TimeInterval = 0.2
     private var monitors: [Any] = []
     /// 缩略图（实时预览）面板：用户要求"强制打开、不能关闭"，
     /// 所以它在 begin() 里就建好、跟着整个流程存在，连标题栏和关闭按钮都没有。
@@ -200,7 +198,6 @@ final class ScrollCaptureController: NSObject {
         frameCount = 0
         segmentCount = 0
         consecutiveFailures = 0
-        lastGrabAt = .distantPast
         grabFrame()
         installScrollMonitor()
         installEscMonitor()
@@ -219,7 +216,8 @@ final class ScrollCaptureController: NSObject {
         })
     }
 
-    /// 每次滚动：按主导方向识别横/竖向，去抖 250ms 后抓帧
+    /// 每次滚动：按主导方向识别横/竖向；**途中不抓帧**（运动中的帧没法用，
+    /// 见类头注释），去抖 250ms 等停稳后再抓一帧拼接
     private func noteScroll(deltaX: CGFloat, deltaY: CGFloat) {
         guard isRunning else { return }
         let ax = abs(deltaX), ay = abs(deltaY)
@@ -236,15 +234,12 @@ final class ScrollCaptureController: NSObject {
                 frameView?.needsDisplay = true
             }
         }
-        // 滚动过程中就抓（节流），别等停手 —— 见 grabThrottle 的注释
-        if Date().timeIntervalSince(lastGrabAt) >= grabThrottle {
-            grabOrQueue()
-        }
-        // 尾部补一帧：确保最后停下来的那个位置一定被截到
+        // 尾部去抖：停稳 250ms 后抓帧拼接。0.18 太贴 —— 触控板惯性刚结束
+        // 那一下还可能带亚像素相位，宁可多等 70ms 也要拿到"静止"的画面。
         scrollDebounce?.cancel()
         let item = DispatchWorkItem { [weak self] in self?.grabOrQueue() }
         scrollDebounce = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: item)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: item)
     }
 
     private func grabOrQueue() {
@@ -255,7 +250,6 @@ final class ScrollCaptureController: NSObject {
     private func grabFrame() {
         guard isRunning, !isBusy else { return }
         isBusy = true
-        lastGrabAt = Date()
         let displayID = self.displayID
         let region = self.region
         Task.detached(priority: .userInitiated) { [weak self] in
@@ -363,7 +357,7 @@ final class ScrollCaptureController: NSObject {
             return
         }
 
-        frameView?.status = "这一帧没对上（滚太快 / 页面在动），小步滚动试试"
+        frameView?.status = "这一帧没对上（页面变化 / 滚动幅度太大），小步滚动试试"
     }
 
     private func rotateBack(_ image: CGImage) -> CGImage? {
@@ -606,7 +600,7 @@ final class ScrollFrameView: NSView {
     static let bandHeight: CGFloat = 30
 
     var status: String = "正在捕获…" {
-        didSet { needsDisplay = true }
+        didSet { if status != oldValue { needsDisplay = true } }
     }
 
     override var isFlipped: Bool { true }

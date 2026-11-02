@@ -135,6 +135,42 @@ enum SelfTest {
                 check("滚过一屏（无重叠）必须拒绝（造图失败）", false)
             }
 
+            // 亚像素停靠：触控板 / 平滑滚动停下的位置常带小数（如 137.4px），
+            // 两帧各自带着抗锯齿重采样，正确偏移的像素差被抬高 —— 以前会被质量门
+            // 当成"没对上"拒掉（用户症状：明明滚得不快却老提示过帧）。
+            // 要求：分数偏移能对上，且偏移落在 137…138（真值 137.4 的整数邻域）。
+            if let smooth = smoothPage(width: 480, height: 1600),
+               let sTop = smooth.cropping(to: CGRect(x: 0, y: 0, width: 480, height: viewH)) {
+                // 把页面按小数偏移画进 viewH 高的画布，模拟"停在半像素"的一帧
+                func fractionalFrame(_ topFromPageTop: CGFloat) -> CGImage? {
+                    guard let ctx = CGContext(data: nil, width: 480, height: viewH,
+                                              bitsPerComponent: 8, bytesPerRow: 0,
+                                              space: CGColorSpaceCreateDeviceRGB(),
+                                              bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                                                | CGBitmapInfo.byteOrder32Little.rawValue) else { return nil }
+                    ctx.interpolationQuality = .high
+                    // CG 左下原点：页面底边画在 y0 时，页面第 top 行正好落在画布顶
+                    ctx.draw(smooth, in: CGRect(x: 0, y: topFromPageTop - CGFloat(1600 - viewH),
+                                                width: 480, height: 1600))
+                    return ctx.makeImage()
+                }
+                if let frac = fractionalFrame(137.4) {
+                    // hint=137：真实连续滚动时上一段偏移就在附近；无 hint 的
+                    // 强周期页在粗搜里本就无解（同相位候选一大把），那是另一回事
+                    let result = ImageStitch.align(top: sTop, bottom: frac, hint: 137)
+                    check("半像素停靠也能对上（\(result?.offset.description ?? "nil")）",
+                          result.map { (137...138).contains($0.offset) } == true)
+                } else {
+                    check("半像素停靠也能对上（造图失败）", false)
+                }
+                // 但纯色 + 无分离度依旧必须拒绝（放宽容忍不能放开"瞎拼"那道门）
+                let blankMove = solidImage(width: 480, height: viewH, color: CGColor(gray: 0.5, alpha: 1))
+                check("半像素容忍不放走纯色瞎拼",
+                      ImageStitch.align(top: sTop, bottom: blankMove) == nil)
+            } else {
+                check("半像素停靠测试造图失败", false)
+            }
+
             // 取景框几何：选区必须**整个**落在面板的透明区里。
             // 1.0.5 的血案是面板盖在选区上还画了预览，抓帧把自己拍进去了。
             let region = NSRect(x: 300, y: 200, width: 480, height: 500)
@@ -936,6 +972,38 @@ enum SelfTest {
 
     /// 把合成页面当成"一块瓷砖"按 period 高度重复，做成严格等距重复的长页
     /// （模拟等行高的表格 / 列表：第 0 行和第 100 行长得一模一样）
+    /// 中频条纹测试页：8px 明暗横带（模拟 UI 的行 / 文字行）+ 轻微垂直渐变。
+    /// 停在半像素时只有带边缘附近的行带重采样误差，正确偏移的 mad 依然很小；
+    /// 纯渐变页太平（所有偏移 mad 都趋零、分离度不足），噪声页又太尖（半像素
+    /// 直接上百），都造不出"真实 UI 停在半像素"的形态。
+    private static func smoothPage(width: Int, height: Int) -> CGImage? {
+        guard let ctx = CGContext(data: nil, width: width, height: height,
+                                  bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                                    | CGBitmapInfo.byteOrder32Little.rawValue) else { return nil }
+        var y = 0
+        while y < height {
+            // 5px 周期的横带（3 亮 2 暗）：周期必须与精修行距（≈6）互质，
+            // 否则采样行永远落在同一相位，正确 d 与相邻 d 打平、拼界靠先到者
+            let band: CGFloat = (y % 5) < 3 ? 0.72 : 0.28
+            let tilt = 0.1 * Double(y) / Double(max(1, height - 1))
+            let shade = band - CGFloat(tilt)
+            ctx.setFillColor(CGColor(red: shade, green: shade, blue: shade, alpha: 1))
+            ctx.fill(CGRect(x: 0, y: CGFloat(y), width: CGFloat(width), height: 1))
+            y += 1
+        }
+        // 每 90px 一条 4px 深色"文字行"：8px 横带自身有周期歧义（137±8k 全都像），
+        // 90 与 8 不通约，错周期的候选会被文字行杀掉
+        ctx.setFillColor(CGColor(gray: 0.08, alpha: 1))
+        var line = 90
+        while line < height - 4 {
+            ctx.fill(CGRect(x: 0, y: CGFloat(line), width: CGFloat(width), height: 4))
+            line += 90
+        }
+        return ctx.makeImage()
+    }
+
     private static func periodicPage(width: Int, height: Int, period: Int) -> CGImage? {
         guard let tile = syntheticPage(width: width, height: period),
               let ctx = CGContext(data: nil, width: width, height: height,
