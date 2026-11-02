@@ -102,6 +102,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         let recordTitle = model.isRecording ? "停止录制" : "区域录制"
         menu.addItem(item(recordTitle, .recordRegion, symbol: "record.circle"))
         menu.addItem(item("全屏录制", .recordFullscreen, symbol: "video.fill"))
+        // 用户指定：入口就放在「全屏录制」正下方
+        menu.addItem(item("摄像头录制", .recordCamera, symbol: "camera.fill"))
         menu.addItem(.separator())
 
         menu.addItem(item("贴图", .pinClipboard, symbol: "pin"))

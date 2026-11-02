@@ -186,6 +186,11 @@ final class CameraPreviewView: NSView {
     private let fallbackLabel = NSTextField(labelWithString: "")
     private var shape: CameraBubbleController.BubbleShape
 
+    /// 独立取景窗（摄像头录制）自己控制条上有 ✕，画面里就别再挂一个
+    var showsCloseButton = true {
+        didSet { closeButton.isHidden = !showsCloseButton }
+    }
+
     init(frame: NSRect, shape: CameraBubbleController.BubbleShape) {
         self.shape = shape
         super.init(frame: frame)
@@ -247,7 +252,14 @@ final class CameraPreviewView: NSView {
         onClose?()
     }
 
-    /// 右键换形状（圆形 ⇄ 圆角矩形）——用户要求"可以是圆形或圆角矩形"
+    /// 换形状（圆形 ⇄ 圆角矩形）——用户要求"可以是圆形或圆角矩形"。
+    ///
+    /// 🔴 1.0.18 起**单击**也切换：以前只认右键，用户找不到入口（原话
+    /// "点击摄像头框区域可以切换成圆角矩形"）。右键保留，习惯了的照旧。
+    override func mouseDown(with event: NSEvent) {
+        onToggleShape?()
+    }
+
     override func rightMouseDown(with event: NSEvent) {
         onToggleShape?()
     }

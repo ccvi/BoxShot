@@ -19,6 +19,7 @@ final class AppModel: ObservableObject {
     private var measureOverlay: MeasureOverlay?
     private var scrollController: ScrollCaptureController?
     private var recordToolbar: RecordToolbarController?
+    private var cameraRecorder: CameraRecorderWindowController?
     let pinManager = PinManager()
     private var resultWindow: ResultWindowController?
     private var historyWindow: HistoryWindowController?
@@ -45,6 +46,7 @@ final class AppModel: ObservableObject {
 
     func shutdown() {
         recordToolbar?.close(stopRecording: true)
+        cameraRecorder?.close()
     }
 
     // ── 动作路由 ─────────────────────────────────────────────
@@ -73,6 +75,8 @@ final class AppModel: ObservableObject {
             startRecording(fullscreen: false)
         case .recordFullscreen:
             startRecording(fullscreen: true)
+        case .recordCamera:
+            toggleCameraRecording()
         case .pinClipboard:
             pinFromClipboard()
         case .openSettings:
@@ -525,6 +529,9 @@ final class AppModel: ObservableObject {
     /// 区域模式选区后虚线框钉住；全屏模式直接出工具条，按"记录"才真正开录。
     private func startRecording(fullscreen: Bool) {
         guard ScreenCapture.ensurePermission() else { return }
+        // 摄像头取景窗先收掉：它也是本进程的窗口，留在屏上会被录进画面，
+        // 而且它占着摄像头会话（屏幕录制虽然不用摄像头，但没必要留着）。
+        cameraRecorder?.close()
         if let existing = recordToolbar {
             // 已经有一根工具条：录制中 = 菜单项就是"停止"；
             // 没在录 = 先把它收掉，然后照常重新选区，而不是什么都不做。
@@ -560,6 +567,22 @@ final class AppModel: ObservableObject {
             self?.isRecording = recording
         }
         controller.begin(displayID: displayID, region: region)
+    }
+
+    /// 摄像头录制入口（菜单「摄像头录制」）：再点一次收起来
+    private func toggleCameraRecording() {
+        if let existing = cameraRecorder {
+            existing.close()
+            return
+        }
+        let controller = CameraRecorderWindowController(model: self)
+        cameraRecorder = controller
+        controller.onClosed = { [weak self, weak controller] in
+            if let controller, self?.cameraRecorder === controller {
+                self?.cameraRecorder = nil
+            }
+        }
+        controller.show()
     }
 
     func toggleRecording() {

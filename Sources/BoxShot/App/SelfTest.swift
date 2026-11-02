@@ -545,6 +545,30 @@ enum SelfTest {
                   && CameraBubbleSize.small.title == "小")
         }
 
+        // ── 摄像头录制取景窗（1.0.18）──
+        do {
+            // 用户口径：大 600 / 中 550 / 小 500 —— 这是**独立录制窗口**的边长，
+            // 和上面屏幕录制的画中画（200/180/150）不是一套数，别混用
+            check("录制窗口大 = 600pt", CameraBubbleSize.large.windowSide == 600)
+            check("录制窗口中 = 550pt", CameraBubbleSize.medium.windowSide == 550)
+            check("录制窗口小 = 500pt", CameraBubbleSize.small.windowSide == 500)
+            check("录制窗口三档递减",
+                  CameraBubbleSize.large.windowSide > CameraBubbleSize.medium.windowSide
+                    && CameraBubbleSize.medium.windowSide > CameraBubbleSize.small.windowSide)
+            check("画中画与录制窗口不是同一套尺寸",
+                  CameraBubbleSize.large.side != CameraBubbleSize.large.windowSide)
+            check("录制窗口默认大", Preferences().cameraWindowSize == .large)
+            check("录制窗口尺寸读得回来",
+                  (try? JSONDecoder().decode(Preferences.self,
+                                             from: Data(#"{"cameraWindowSize":"small"}"#.bytes)))?
+                    .cameraWindowSize == .small)
+            // 窗口高 = 预览 + 控制条（圆形正方形 / 圆角矩形 4:3）
+            check("圆形录制窗口高 = 边长 + 56",
+                  CameraRecorderWindowController.contentHeight(side: 600, shape: .circle) == 656)
+            check("圆角矩形录制窗口高 = 4:3 + 56",
+                  CameraRecorderWindowController.contentHeight(side: 600, shape: .roundedRect) == 506)
+        }
+
         // ── 录制帧率档位（1.0.12 新增 48/50/60）──
         do {
             check("帧率档位 8 档", recordFPSOptions == [10, 15, 24, 25, 30, 48, 50, 60])
