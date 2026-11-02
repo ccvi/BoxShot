@@ -594,6 +594,29 @@ enum SelfTest {
             check("文本渲染成位图", pinImage != nil && pinImage!.width > 20)
         }
 
+        // ── 贴图窗口：初始尺寸必须是 1:1 ──
+        // `PinWindow.scale` 曾经初始化成 1/backingScale（0.5），而 applyScale 里
+        // 是 baseW × scale —— 窗口一被重排（首次缩放 / 从历史恢复）就只剩一半大。
+        do {
+            let img = solidImage(width: 200, height: 100,
+                                 color: CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
+            if let pinWindow = PinWindow(image: img, opacity: 1, shadow: false) {
+                let backing = NSScreen.main?.backingScaleFactor ?? 2
+                let expectW = 200 / backing
+                check("贴图初始宽度 = 图像宽 ÷ 屏缩放（1:1，不折半）",
+                      abs(pinWindow.frame.width - expectW) < 1)
+                check("贴图初始高度 = 图像高 ÷ 屏缩放",
+                      abs(pinWindow.frame.height - 100 / backing) < 1)
+                // 缩放 2 倍后再看：应该正好翻倍，而不是变成原来的一半
+                pinWindow.zoom(by: 2)
+                check("贴图放大 2 倍是原尺寸的 2 倍",
+                      abs(pinWindow.frame.width - expectW * 2) < 1)
+                pinWindow.close()
+            } else {
+                check("贴图窗口能建出来", false)
+            }
+        }
+
         // ── 文件名/去重 ──
         do {
             let dir = URL(fileURLWithPath: NSTemporaryDirectory())

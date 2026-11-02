@@ -48,7 +48,6 @@ final class OverlayEditorController: NSObject {
     private var widthButtons: [CGFloat: NSButton] = [:]
     private var colorAnchorButton: NSButton?
     private var colorPanel: NSPanel?
-    private var morePopover: NSPopover?
     private var monitors: [Any] = []
     /// 本次截图是否已落盘（保存过 / 自动保存过就不再重复写）
     private var didPersist = false
@@ -276,8 +275,6 @@ final class OverlayEditorController: NSObject {
         monitors.removeAll()
         colorPanel?.orderOut(nil)
         colorPanel = nil
-        morePopover?.close()
-        morePopover = nil
         imagePanel?.orderOut(nil)
         toolbarPanel?.orderOut(nil)
         imagePanel = nil
@@ -370,17 +367,26 @@ final class OverlayEditorController: NSObject {
             self?.doc.redo(); self?.refresh()
         })
 
-        // 1.0.10：这个位置原来放的是「裁剪」，用户要求换成「高亮」工具，
-        // 裁剪收进右边的 ⋯ 菜单（功能不丢，只是不占工具条）。
+        // 1.0.10：这个位置原来放的是「裁剪」，用户要求换成「高亮」工具。
         let highlight = toolbarButton(symbol: EditorTool.highlight.symbol,
                                       title: EditorTool.highlight.title) { [weak self] in
             self?.selectTool(.highlight)
         }
         toolButtons[.highlight] = highlight
         stack.addArrangedSubview(highlight)
+        stack.addArrangedSubview(divider(Self.toolbarDividerHeight))
 
-        stack.addArrangedSubview(toolbarButtonWithSender(symbol: "ellipsis", title: "更多（OCR / 贴图）") { [weak self] sender in
-            self?.showMorePopover(anchor: sender)
+        // 1.0.11 用户口径：**去掉裁剪**，原来塞在 ⋯ 里的三个动作（OCR / 解码 / 贴图）
+        // 全部摊到工具条上 —— ⋯ 菜单就此取消。
+        // 「复制到剪贴板」本来就在工具条上有按钮（📋），菜单里那条是重复的，一并去掉。
+        stack.addArrangedSubview(toolbarButton(symbol: "text.below.photo", title: "OCR 识别文字") { [weak self] in
+            self?.ocr()
+        })
+        stack.addArrangedSubview(toolbarButton(symbol: "qrcode.viewfinder", title: "解码 QR/条形码") { [weak self] in
+            self?.decodeQR()
+        })
+        stack.addArrangedSubview(toolbarButton(symbol: "pin", title: "贴图") { [weak self] in
+            self?.pin()
         })
         stack.addArrangedSubview(divider(Self.toolbarDividerHeight))
 
@@ -548,58 +554,6 @@ final class OverlayEditorController: NSObject {
         let above = toolbar.maxY + colorPanelGap
         if above + panelSize.height <= visible.maxY - 4 { return CGPoint(x: x, y: above) }
         return CGPoint(x: x, y: max(visible.minY + 4, below))
-    }
-
-
-    private func showMorePopover(anchor: NSView) {
-        if let popover = morePopover, popover.isShown {
-            popover.close()
-            morePopover = nil
-            return
-        }
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 2
-        stack.edgeInsets = NSEdgeInsets(top: 8, left: 8, bottom: 8, right: 8)
-
-        func row(_ symbol: String, _ title: String, _ action: @escaping () -> Void) {
-            let button = NSButton(title: "  " + title, target: nil, action: nil)
-            button.bezelStyle = .regularSquare
-            button.isBordered = false
-            button.alignment = .left
-            button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)?
-                .withSymbolConfiguration(.init(pointSize: 13, weight: .medium))
-            button.imagePosition = .imageLeading
-            button.onAction = action
-            button.frame = NSRect(x: 0, y: 0, width: 180, height: 30)
-            stack.addArrangedSubview(button)
-        }
-        row("text.below.photo", "OCR 识别文字") { [weak self] in self?.ocr(); self?.morePopover?.close() }
-        row("qrcode.viewfinder", "解码 QR/条形码") { [weak self] in self?.decodeQR(); self?.morePopover?.close() }
-        row("crop", "裁剪（拖出保留范围，⏎ 应用）") { [weak self] in
-            self?.selectTool(.crop)
-            self?.morePopover?.close()
-        }
-        row("pin", "贴图") { [weak self] in self?.pin(); self?.morePopover?.close() }
-        row("doc.on.doc", "复制到剪贴板") { [weak self] in self?.copyToClipboard(); self?.morePopover?.close() }
-
-        stack.layoutSubtreeIfNeeded()
-        let container = NSVisualEffectView(frame: NSRect(origin: .zero, size: stack.fittingSize))
-        container.material = .hudWindow
-        container.state = .active
-        container.wantsLayer = true
-        container.layer?.cornerRadius = 10
-        container.addSubview(stack)
-        stack.frame = container.bounds
-
-        let content = NSViewController()
-        content.view = container
-        let popover = NSPopover()
-        popover.behavior = .transient
-        popover.contentViewController = content
-        popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .maxY)
-        morePopover = popover
     }
 
     private func positionToolbar(_ panel: NSPanel) {

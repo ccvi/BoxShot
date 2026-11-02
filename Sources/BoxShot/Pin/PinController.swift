@@ -179,6 +179,10 @@ final class PinManager {
         var x: Double
         var y: Double
         var scale: Double
+        /// 2 = `scale` 是"相对 1:1 的倍数"（当前口径）。
+        /// 旧记录没有这个字段（解码成 nil），那时的 scale 是从 0.5 起算的，
+        /// 直接套用会让恢复出来的贴图小一半 —— 见 restoreHistory。
+        var v: Int?
     }
 
     static var pinsDirectory: URL {
@@ -200,7 +204,10 @@ final class PinManager {
                 self?.pins.removeAll { $0 === pin }
                 self?.persistIndex()
             }
-            pin.restore(frameOrigin: CGPoint(x: record.x, y: record.y), scale: record.scale)
+            // 旧记录（无 v）按 1:1 恢复：它们的 scale 是 0.5 起算的旧口径，
+            // 套用会小一半。绝大多数用户从没缩放过，1:1 就是他们看到的样子。
+            let scale = record.v == nil ? 1.0 : record.scale
+            pin.restore(frameOrigin: CGPoint(x: record.x, y: record.y), scale: scale)
             pins.append(pin)
         }
     }
@@ -241,7 +248,11 @@ final class PinWindow: NSPanel {
 
     init?(image: CGImage, opacity: Double, shadow: Bool) {
         self.image = image
-        self.scale = 1.0 / Self.baseDisplayScale
+        // 🔴 `scale` 是"相对 1:1 显示的倍数"（applyScale 里 baseW × scale），
+        // 所以初始值必须是 **1.0**。以前写成 1/baseDisplayScale（= 0.5），
+        // 于是窗口一被 applyScale 重排（首次缩放 / 从历史恢复）就变成**一半大**
+        // —— 用户看到的是"贴图恢复后变小了一圈"。
+        self.scale = 1.0
         super.init(contentRect: NSRect(x: 0, y: 0,
                                        width: CGFloat(image.width) / Self.baseDisplayScale,
                                        height: CGFloat(image.height) / Self.baseDisplayScale),
@@ -362,7 +373,7 @@ final class PinWindow: NSPanel {
         }
         return PinManager.PinRecord(file: archivedFile!,
                                     x: frame.origin.x, y: frame.origin.y,
-                                    scale: Double(scale))
+                                    scale: Double(scale), v: 2)
     }
 
     // 贴图不是标准可激活窗口；双击/滚轮交互全在内容视图里
@@ -376,6 +387,8 @@ final class PinContentView: NSView {
     private let image: CGImage
     private unowned let window_: PinWindow
     private var dragStartOrigin: NSPoint?
+    /// 按下时的鼠标屏幕坐标（拖拽用屏幕坐标差，见 mouseDragged）
+    private var dragStartMouse: NSPoint?
 
     init(image: CGImage, window: PinWindow) {
         self.image = image
@@ -389,10 +402,21 @@ final class PinContentView: NSView {
 
     override var isFlipped: Bool { true }
 
+    /// 非 key 窗口里默认**第一下点击会被吞掉**（acceptsFirstMouse 默认 false）：
+    /// 贴图点下去没反应、要拖两下才动，一半原因是这个。
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
     override func draw(_ dirtyRect: NSRect) {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
         let rect = bounds
         ctx.saveGState()
+        // 🔴 本视图 isFlipped = true（左上原点、y 向下），在这个坐标系里直接
+        // `ctx.draw(cgImage)` 画出来是**上下颠倒**的 —— 用户看到的就是"贴图是倒的"。
+        // 和截图浮层一样要走标准配方：先翻回 y 向上的标准空间再画。
+        // 注意顺序：这一步必须在镜像（flippedH / flippedV）之前，
+        // 否则"垂直翻转"的含义会跟着反。
+        ctx.translateBy(x: 0, y: rect.height)
+        ctx.scaleBy(x: 1, y: -1)
         if window_.flippedH {
             ctx.translateBy(x: rect.width, y: 0)
             ctx.scaleBy(x: -1, y: 1)
@@ -410,12 +434,20 @@ final class PinContentView: NSView {
     // 拖拽移动
     override func mouseDown(with event: NSEvent) {
         dragStartOrigin = window_.frame.origin
+        dragStartMouse = NSEvent.mouseLocation
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard let origin = dragStartOrigin else { return }
-        let dx = event.deltaX, dy = event.deltaY
-        window_.moveTo(CGPoint(x: origin.x + dx, y: origin.y - dy))
+        // 🔴 用**屏幕坐标差**，不要用 `event.deltaX/deltaY`：
+        //   · delta 是增量，可 origin 是 mouseDown 时记的、之后没更新 →
+        //     写成 `origin + delta` 每帧都把窗口摆回"起点 + 一点点"，看着就是**拖不动**；
+        //   · 更坑的是**合成事件（CGEvent）里 delta 恒为 0**，这条路根本验不出来。
+        // 屏幕坐标差对两者都成立，也不受"窗口自己在动"的影响
+        // （locationInWindow 会随窗口移动而变，越拖越飘）。
+        guard let origin = dragStartOrigin, let start = dragStartMouse else { return }
+        let now = NSEvent.mouseLocation
+        window_.moveTo(CGPoint(x: origin.x + (now.x - start.x),
+                               y: origin.y + (now.y - start.y)))
     }
 
     override func mouseUp(with event: NSEvent) {

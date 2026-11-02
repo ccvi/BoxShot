@@ -131,6 +131,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.runWindowTestDiagnostics()
             }
         }
+        // 诊断入口：--menutest 打印菜单栏每个项目的启用状态。
+        // 菜单项 target 写错只会"变灰"，不报错也不崩 —— 只有把它打出来才看得见。
+        let menuTrigger = "/tmp/boxshot-menutest.trigger"
+        if CommandLine.arguments.contains("--menutest")
+            || FileManager.default.fileExists(atPath: menuTrigger) {
+            try? FileManager.default.removeItem(atPath: menuTrigger)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                guard let self else { return }
+                let report = self.statusItem.menuStateReport()
+                NSLog("[BoxShot][menu] %@", report)
+                try? report.write(to: URL(fileURLWithPath: "/tmp/boxshot-menutest.log"),
+                                  atomically: true, encoding: .utf8)
+            }
+        }
+        // 诊断入口：--pintest 钉一张「上红下蓝」的合成图，量两件事：
+        //   ① 图像朝向（红条到底在窗口上方还是下方 —— "贴图是倒的"）
+        //   ② 能不能拖动（合成一次 HID 拖拽，比对窗口 origin 有没有真的动）
+        // 这两条都只有端到端跑一遍才看得清：一个在绘制坐标系，一个在事件层。
+        let pinTrigger = "/tmp/boxshot-pintest.trigger"
+        if CommandLine.arguments.contains("--pintest")
+            || FileManager.default.fileExists(atPath: pinTrigger) {
+            try? FileManager.default.removeItem(atPath: pinTrigger)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                self?.runPinDiagnostics()
+            }
+        }
         // 诊断入口：--show-settings 直接弹设置窗口，用来核对各页控件是否
         // 排对了、值是否真的跟着设置走（改完设置页最好截一张看一眼）。
         // 触发文件里可以写一个页号（0 通用 / 1 截图 / 2 贴图 / 3 OCR / 4 录制 /
@@ -544,6 +570,80 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// tall = true 时用一个几乎顶满整屏高的框，专门验证工具条"上下都没位置 →
     /// 压进框内底部居中"这条分支（正常尺寸的框永远走不到它）。
+    // ── 贴图诊断：朝向 + 能不能拖 ──────────────────────────────
+
+    private func runPinDiagnostics() {
+        let logURL = URL(fileURLWithPath: "/tmp/boxshot-pintest.log")
+        try? "".write(to: logURL, atomically: true, encoding: .utf8)
+        func log(_ text: String) {
+            NSLog("[BoxShot][pintest] %@", text)
+            guard let handle = try? FileHandle(forWritingTo: logURL) else { return }
+            handle.seekToEndOfFile()
+            handle.write("\(text)\n".data(using: .utf8)!)
+            try? handle.close()
+        }
+
+        // 「上红下蓝」的合成图。CGContext 的缓冲第 0 行是**图像顶部**，
+        // 但绘制坐标系是左下原点 —— 所以"图像顶部"要画在 y = h - 60 那一带。
+        let w = 400, h = 200
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                                    | CGBitmapInfo.byteOrder32Little.rawValue) else { return }
+        ctx.setFillColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+        ctx.setFillColor(CGColor(srgbRed: 0.9, green: 0.1, blue: 0.1, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: h - 60, width: w, height: 60))
+        ctx.setFillColor(CGColor(srgbRed: 0.1, green: 0.2, blue: 0.9, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: w, height: 60))
+        guard let image = ctx.makeImage() else { return }
+        // 上一次运行留下的贴图会被 restoreHistory 恢复出来，直接取第一个
+        // floating 窗口会拿到**旧的**那张（尺寸还可能不对）。先记一份快照，
+        // 之后按差集找本次新钉的那张。
+        let before = Set(NSApp.windows.filter { $0.level == .floating }.map { ObjectIdentifier($0) })
+        let restored = NSApp.windows.filter { $0.level == .floating }.map { "\($0.frame)" }
+        model.pinImage(image)
+        log("已钉图 400×200（图像顶部红、底部蓝）")
+        log("恢复出来的旧贴图 \(restored.count) 张：\(restored.joined(separator: " / "))")
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
+            guard let pin = NSApp.windows.first(where: {
+                      $0.level == .floating && !before.contains(ObjectIdentifier($0))
+                  }),
+                  let screen = NSScreen.main else {
+                log("❌ 没找到本次新钉的贴图窗口")
+                return
+            }
+            let before = pin.frame
+            log("贴图窗口 frame=\(before)（期望 200×100）")
+
+            let center = CGPoint(x: before.midX, y: screen.frame.height - before.midY)
+            let src = CGEventSource(stateID: .hidSystemState)
+            func post(_ type: CGEventType, _ p: CGPoint) {
+                CGEvent(mouseEventSource: src, mouseType: type,
+                        mouseCursorPosition: p, mouseButton: .left)?.post(tap: .cghidEventTap)
+            }
+            post(.mouseMoved, center)
+            post(.leftMouseDown, center)
+            for step in 1...10 {
+                let p = CGPoint(x: center.x, y: center.y - CGFloat(step) * 8)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.03 * Double(step)) {
+                    post(.leftMouseDragged, p)
+                }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                post(.leftMouseUp, CGPoint(x: center.x, y: center.y - 80))
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    let after = pin.frame
+                    let dy = after.origin.y - before.origin.y
+                    log("拖动后 frame=\(after) · Δy=\(Int(dy))")
+                    log(abs(dy) > 20 ? "✅ 贴图能拖动（Δy=\(Int(dy))）"
+                                     : "❌ 贴图拖不动（Δy=\(Int(dy))）")
+                }
+            }
+        }
+    }
+
     private func showDiagnosticOverlay(tall: Bool = false, colors: Bool = false) {
         let w = 800, h = 500
         let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,

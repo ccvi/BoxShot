@@ -49,7 +49,13 @@ final class StatusItemController: NSObject {
                   selector: Selector? = nil, symbol: String? = nil) -> NSMenuItem {
             let item = NSMenuItem(title: title, action: selector ?? #selector(runAction(_:)), keyEquivalent: key)
             if let action { item.representedObject = action.rawValue }
-            item.target = selector == nil ? self : nil
+            // 🔴 这里以前写的是 `selector == nil ? self : nil` —— 正好写反了：
+            // 走 runAction 的（截图那批）指到 self 没问题，而带自定义 selector 的
+            // 四个人（截图历史 / 从 Finder 贴图 / 隐藏·显示所有贴图 / 关闭所有贴图）
+            // target 成了 nil → 走响应链 → 链上根本没有 StatusItemController →
+            // 菜单项全变**灰色不可点**。症状就是"截图历史按不了""贴图的按钮也按不了"，
+            // 而上面那几个截图菜单项好好的 —— 太容易被当成两件不同的事了。
+            item.target = self
             if let symbol {
                 item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
                     .withSymbolConfiguration(.init(pointSize: 12, weight: .regular))
@@ -117,8 +123,19 @@ final class StatusItemController: NSObject {
         model.showShotHistory()
     }
 
-    func showSettings(tab: Int = 0) {
-        if settingsWindow == nil {
+    /// 诊断用：把每个菜单项的 isEnabled 打出来。
+    /// 🔴 菜单项的 target / action 写错**不会有任何报错**，只会静静地变灰 ——
+    /// "截图历史按不了""贴图那几个按钮按不了"就是这么来的，光看代码很难发现。
+    /// 菜单只在弹出时校验，所以这里手动 `menu.update()` 一次。
+    func menuStateReport() -> String {
+        guard let menu = statusItem?.menu else { return "没有菜单" }
+        menu.update()
+        return menu.items.filter { !$0.isSeparatorItem }
+            .map { "\($0.title)=\($0.isEnabled ? "✅" : "❌灰")" }
+            .joined(separator: " · ")
+    }
+
+    func showSettings(tab: Int = 0) {        if settingsWindow == nil {
             settingsWindow = SettingsWindowController(model: model, initialTab: tab)
         }
         settingsWindow?.show()
