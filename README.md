@@ -599,6 +599,8 @@ Resources/
 | `/tmp/boxshot-scrolltest.trigger` | 同上，标记文件触发 |
 | `--recordtest` | 不开界面，直接跑 3 秒真实录制（320×240 / MP4 / 无声），过程逐行写 `/tmp/boxshot-recordtest.log`，结束后自行退出。用于判断「点了录制没反应」是引擎起不来还是界面没接上 |
 | `/tmp/boxshot-recordtest.trigger` | 同上，但靠**标记文件**触发：`touch` 之后正常启动应用即可。某些环境下 `open -a App --args …` 不会把参数传进 `CommandLine.arguments`（实测 LaunchServices 按原 argv 起进程），只能走这条 |
+| `--recordoptionstest` | 把录屏工具条的「选项弹层」离屏渲染成 `/tmp/boxshot-recordoptions.png` **并**开一个真窗口。核对布局用（顶部留白、四项设置、取景框"当前 X pt"）。注意：`cacheDisplay` 离屏渲染画不全 AppKit 控件（只有分段控件的 cell 上色），看布局要以真窗口 + `screencapture -x` 为准 |
+| `/tmp/boxshot-recordoptions.trigger` | 同上，标记文件触发 |
 | `--esctest` | 开遮罩 → **HID 层真按键** Esc → 看遮罩收没收。日志 `/tmp/boxshot-esctest.log`，会先打印 `keyWindow` 类名和 `AXIsProcessTrusted()`；AX 未授权时 `CGEvent.post` 等于发空气，会退到 `postEvent` 再试一次并注明"只有 postEvent 生效" |
 | `/tmp/boxshot-esctest.trigger` | 同上，标记文件触发 |
 | `--escwait` | 开遮罩后**什么都不投**，纯等 15 秒外部真按键（人手按 / 带授权的 `osascript`），逐条记录收到的 `keyDown`。用来区分「代码没接住」和「按键根本没进来」 |

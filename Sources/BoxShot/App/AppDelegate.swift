@@ -220,6 +220,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.statusItem.showSettings(tab: tab)
             }
         }
+        // 诊断入口：--recordoptionstest 把录制选项弹层离屏渲染成 PNG（/tmp/boxshot-recordoptions.png），
+        // 用来核对布局（顶部留白、四项设置是否都齐、取景框那行"当前 X pt"）。
+        // 直接渲染视图、不走窗口，绕开"shell 起的进程窗口 screencapture 拍不到"的限制。
+        let recordOptionsTrigger = "/tmp/boxshot-recordoptions.trigger"
+        if CommandLine.arguments.contains("--recordoptionstest")
+            || FileManager.default.fileExists(atPath: recordOptionsTrigger) {
+            try? FileManager.default.removeItem(atPath: recordOptionsTrigger)
+            NSLog("[BoxShot][recordoptionstest] 进入诊断，开始离屏渲染")
+            let view = RecordOptionsView(model: self.model)
+            view.layoutSubtreeIfNeeded()
+            let bounds = view.bounds
+            guard let rep = view.bitmapImageRepForCachingDisplay(in: bounds) else {
+                NSLog("[BoxShot][recordoptionstest] 无法离屏渲染")
+                return
+            }
+            view.cacheDisplay(in: bounds, to: rep)
+            if let png = rep.representation(using: .png, properties: [:]) {
+                try? png.write(to: URL(fileURLWithPath: "/tmp/boxshot-recordoptions.png"))
+                NSLog("[BoxShot][recordoptionstest] 已渲染 PNG，尺寸 \(bounds.width)×\(bounds.height)")
+            }
+            // 离屏 cacheDisplay 画不全 AppKit 控件（只有分段控件的 cell 会上色），
+            // 所以同时开一个真窗口，配合 screencapture -x 看真实效果。
+            let win = NSWindow(contentRect: NSRect(x: 0, y: 0,
+                                                   width: bounds.width + 40,
+                                                   height: bounds.height + 40),
+                                styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            win.title = "录制选项（诊断）"
+            win.contentView = view
+            win.level = .floating
+            win.center()
+            win.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
         // 诊断入口：--recordtest 不开界面、直接跑一遍录制引擎（3 秒）。
         // 结果写 /tmp/boxshot-recordtest.log —— 「点了录制没反应」这类问题
         // 只有把引擎单独拎出来跑一次，才知道是引擎起不来还是界面没接上。

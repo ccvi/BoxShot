@@ -10,7 +10,7 @@ import AppKit
 // 摄像头取景框是独立的圆形 / 圆角矩形小窗（CameraBubble），贴着选区右下角，
 // 所见即所得地进录像；右键在圆形 ⇄ 圆角矩形之间切换，✕ 或工具条按钮关闭。
 //
-// 选项弹层：格式 MOV/MP4、质量 高/中/低、显示光标（写回偏好设置）。
+// 选项弹层：帧率、格式 MOV/MP4、质量、取景框大小（写回偏好设置）。
 // ============================================================
 
 @MainActor
@@ -473,12 +473,15 @@ final class RecordToolbarController: NSObject {
             return
         }
         guard let model else { return }
+        let optionsView = RecordOptionsView(model: model)
         let content = NSViewController()
-        content.view = RecordOptionsView(model: model)
+        content.view = optionsView
 
         let popover = NSPopover()
         popover.behavior = .transient
         popover.contentViewController = content
+        // 用内容视图的自适配尺寸，弹层不会被压成默认大小
+        popover.contentSize = optionsView.bounds.size
         popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .maxY)
         self.popover = popover
     }
@@ -511,6 +514,12 @@ final class DashedFrameView: NSView {
 }
 
 // ── 选项弹层内容 ─────────────────────────────────────────────
+//
+// 1.0.12：弹层 = 录制设置速调，四项：帧率 / 格式 / 质量 / 取景框大小（按用户样张）。
+// 帧率、格式、质量用下拉（NSPopUpButton），取景框大小用分段 + 行尾「当前 X pt」。
+// 顶部 / 底部 / 左右留白用 edgeInsets 控制 —— 旧版手动算 y 坐标，首行顶到上沿，
+// 视觉上"顶部没空间"；想加一项还得重排全部坐标。全换 NSStackView 自动排。
+// 显示光标开关只留在设置窗口的「录制」页，弹层按样张只放这四项。
 
 final class RecordOptionsView: NSView {
 
@@ -518,59 +527,114 @@ final class RecordOptionsView: NSView {
 
     init(model: AppModel) {
         self.model = model
-        // GIF 选项已随 GIF 功能一并移除（1.0.12）
-        super.init(frame: NSRect(x: 0, y: 0, width: 240, height: 118))
+        super.init(frame: .zero)
 
         let prefs = model.prefs.value
 
-        let formatLabel = label("格式")
-        let format = NSSegmentedControl(labels: ["MOV", "MP4"],
-                                        trackingMode: .selectOne,
-                                        target: self, action: #selector(formatChanged(_:)))
-        format.selectedSegment = prefs.recordFormat == .mov ? 0 : 1
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .left
+        stack.spacing = 12
+        // 🔴 四边留白：弹层内容不再贴边（用户报的"顶部没空间"就是旧版没留白）
+        stack.edgeInsets = NSEdgeInsets(top: 14, left: 16, bottom: 14, right: 16)
 
-        let qualityLabel = label("质量")
-        let quality = NSSegmentedControl(labels: ["高", "中等", "低"], trackingMode: .selectOne, target: self, action: #selector(qualityChanged(_:)))
-        quality.selectedSegment = prefs.recordQuality == .high ? 0 : (prefs.recordQuality == .medium ? 1 : 2)
-
-        let cursor = NSButton(checkboxWithTitle: "显示光标", target: self, action: #selector(cursorChanged(_:)))
-        cursor.state = prefs.recordShowCursor ? .on : .off
-
-        let rows: [(NSView, NSView)] = [
-            (formatLabel, format), (qualityLabel, quality), (NSView(), cursor),
-        ]
-        var y: CGFloat = 96
-        for (left, right) in rows {
-            left.frame = NSRect(x: 16, y: y, width: 52, height: 22)
-            right.frame = NSRect(x: 76, y: y - 2, width: 150, height: 26)
-            addSubview(left)
-            addSubview(right)
-            y -= 38
+        // 帧率（下拉，8 档）
+        let fps = NSPopUpButton()
+        fps.addItems(withTitles: recordFPSOptions.map { "\($0)" })
+        if let idx = recordFPSOptions.firstIndex(of: prefs.recordFPS) {
+            fps.selectItem(at: idx)
         }
+        fps.target = self
+        fps.action = #selector(fpsChanged(_:))
+        stack.addArrangedSubview(row("帧率", fps, width: 90))
+
+        // 格式（下拉 MOV / MP4）
+        let format = NSPopUpButton()
+        format.addItems(withTitles: RecordFileFormat.allCases.map { $0.title })
+        format.selectItem(at: prefs.recordFormat == .mov ? 0 : 1)
+        format.target = self
+        format.action = #selector(formatChanged(_:))
+        stack.addArrangedSubview(row("格式", format, width: 90))
+
+        // 质量（下拉 高 / 中等 / 低）
+        let quality = NSPopUpButton()
+        quality.addItems(withTitles: RecordQuality.allCases.map { $0.title })
+        if let idx = RecordQuality.allCases.firstIndex(of: prefs.recordQuality) {
+            quality.selectItem(at: idx)
+        }
+        quality.target = self
+        quality.action = #selector(qualityChanged(_:))
+        stack.addArrangedSubview(row("质量", quality, width: 90))
+
+        // 取景框大小（分段 大 / 中 / 小，摄像头取景框边长）+ 行尾「当前 X pt」
+        let size = NSSegmentedControl(labels: CameraBubbleSize.allCases.map { $0.title },
+                                      trackingMode: .selectOne,
+                                      target: self, action: #selector(sizeChanged(_:)))
+        if let idx = CameraBubbleSize.allCases.firstIndex(of: prefs.recordCameraSize) {
+            size.selectedSegment = idx
+        }
+        let pt = NSTextField(labelWithString: "当前 \(Int(prefs.recordCameraSize.side)) pt")
+        pt.font = NSFont.systemFont(ofSize: 11)
+        pt.textColor = .secondaryLabelColor
+        pt.setContentCompressionResistancePriority(.required, for: .horizontal)
+        stack.addArrangedSubview(row("取景框大小", size, width: 120, trailing: pt))
+
+        addSubview(stack)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.trailingAnchor.constraint(greaterThanOrEqualTo: trailingAnchor),
+            stack.topAnchor.constraint(equalTo: topAnchor),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+        layoutSubtreeIfNeeded()
+        frame = NSRect(x: 0, y: 0, width: stack.fittingSize.width, height: stack.fittingSize.height)
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
-    private func label(_ text: String) -> NSTextField {
-        let label = NSTextField(labelWithString: text)
+    /// 一行：定宽标签（右对齐，宽度统一）+ 定宽控件（左对齐）+ 可选行尾说明。
+    /// 标签列固定 68pt，各行的控件才会落在同一 x，不会参差。
+    private func row(_ title: String, _ control: NSView, width: CGFloat, trailing: NSView? = nil) -> NSView {
+        let h = NSStackView()
+        h.orientation = .horizontal
+        h.alignment = .centerY
+        h.spacing = 8
+        let label = NSTextField(labelWithString: title)
         label.font = NSFont.systemFont(ofSize: 13)
         label.alignment = .right
-        return label
+        label.setContentHuggingPriority(.required, for: .horizontal)
+        label.setContentCompressionResistancePriority(.required, for: .horizontal)
+        label.widthAnchor.constraint(equalToConstant: 68).isActive = true
+        h.addArrangedSubview(label)
+        control.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        control.widthAnchor.constraint(equalToConstant: width).isActive = true
+        h.addArrangedSubview(control)
+        if let trailing {
+            h.addArrangedSubview(trailing)
+        }
+        return h
     }
 
-    @objc private func formatChanged(_ sender: NSSegmentedControl) {
-        model?.prefs.value.recordFormat = sender.selectedSegment == 0 ? .mov : .mp4
+    @objc private func fpsChanged(_ sender: NSPopUpButton) {
+        guard let title = sender.titleOfSelectedItem, let value = Int(title) else { return }
+        model?.prefs.value.recordFPS = value
     }
 
-    @objc private func qualityChanged(_ sender: NSSegmentedControl) {
-        switch sender.selectedSegment {
-        case 0: model?.prefs.value.recordQuality = .high
-        case 1: model?.prefs.value.recordQuality = .medium
-        default: model?.prefs.value.recordQuality = .low
+    @objc private func formatChanged(_ sender: NSPopUpButton) {
+        model?.prefs.value.recordFormat = sender.indexOfSelectedItem == 0 ? .mov : .mp4
+    }
+
+    @objc private func qualityChanged(_ sender: NSPopUpButton) {
+        let all = RecordQuality.allCases
+        if all.indices.contains(sender.indexOfSelectedItem) {
+            model?.prefs.value.recordQuality = all[sender.indexOfSelectedItem]
         }
     }
 
-    @objc private func cursorChanged(_ sender: NSButton) {
-        model?.prefs.value.recordShowCursor = sender.state == .on
+    @objc private func sizeChanged(_ sender: NSSegmentedControl) {
+        let all = CameraBubbleSize.allCases
+        guard all.indices.contains(sender.selectedSegment) else { return }
+        model?.prefs.value.recordCameraSize = all[sender.selectedSegment]
     }
 }
