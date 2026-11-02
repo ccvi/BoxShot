@@ -32,11 +32,19 @@ final class CameraBubbleController {
     private var session: AVCaptureSession?
     private(set) var shape: BubbleShape = .circle
     private var lastAnchor: CGRect = .zero
-    /// 取景框大小档位（设置 → 录制 → 取景框大小）
-    private let size: CameraBubbleSize
+    /// 取景框大小档位（设置 → 录制 → 取景框大小；弹层里切换要实时生效，所以是 var）
+    private(set) var size: CameraBubbleSize
 
     init(size: CameraBubbleSize) {
         self.size = size
+    }
+
+    /// 弹层 / 设置里切换档位时实时生效：只改窗口大小和位置，摄像头会话不动
+    /// （重建会话会黑一下，没必要）。
+    func resize(to newSize: CameraBubbleSize) {
+        guard newSize != size else { return }
+        size = newSize
+        if let panel { position(panel, anchor: lastAnchor) }
     }
 
     var isVisible: Bool { panel != nil }
@@ -95,7 +103,7 @@ final class CameraBubbleController {
 
     // ── 位置 ────────────────────────────────────────────────
 
-    /// 取景框边长 = 设置里的档位（大 170 / 中 150 / 小 140 pt）。
+    /// 取景框边长 = 设置里的档位（大 200 / 中 180 / 小 150 pt）。
     ///
     /// 只在选区**短边的一半**放不下时才收一收：170pt 的圆压在 300×200 的选区上
     /// 会把被录的内容盖掉大半，那时按 45% 短边收（最小 96pt）。正常大小的选区
@@ -216,6 +224,8 @@ final class CameraPreviewView: NSView {
     override func layout() {
         super.layout()
         previewLayer.frame = bounds
+        // resize() 只改窗口大小，圆角要跟着新边长算，否则圆形放大后会缺一角
+        layer?.cornerRadius = (shape == .circle) ? bounds.width / 2 : 18
         let side: CGFloat = 22
         closeButton.frame = NSRect(x: bounds.maxX - side - 4, y: bounds.maxY - side - 4,
                                    width: side, height: side)

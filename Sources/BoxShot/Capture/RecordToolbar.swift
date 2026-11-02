@@ -10,7 +10,7 @@ import AppKit
 // 摄像头取景框是独立的圆形 / 圆角矩形小窗（CameraBubble），贴着选区右下角，
 // 所见即所得地进录像；右键在圆形 ⇄ 圆角矩形之间切换，✕ 或工具条按钮关闭。
 //
-// 选项弹层：帧率、格式 MOV/MP4、质量、取景框大小（写回偏好设置）。
+// 选项弹层：帧率、格式 MOV/MP4、质量、取景框大小（切换实时生效）、显示光标。
 // ============================================================
 
 @MainActor
@@ -474,6 +474,10 @@ final class RecordToolbarController: NSObject {
         }
         guard let model else { return }
         let optionsView = RecordOptionsView(model: model)
+        // 取景框大小在弹层里切换要立刻反映到已打开的取景框上
+        optionsView.onCameraSizeChange = { [weak self] newSize in
+            self?.cameraBubble?.resize(to: newSize)
+        }
         let content = NSViewController()
         content.view = optionsView
 
@@ -515,15 +519,19 @@ final class DashedFrameView: NSView {
 
 // ── 选项弹层内容 ─────────────────────────────────────────────
 //
-// 1.0.12：弹层 = 录制设置速调，四项：帧率 / 格式 / 质量 / 取景框大小（按用户样张）。
+// 1.0.12：弹层 = 录制设置速调，五项：帧率 / 格式 / 质量 / 取景框大小 / 显示光标。
 // 帧率、格式、质量用下拉（NSPopUpButton），取景框大小用分段 + 行尾「当前 X pt」。
 // 顶部 / 底部 / 左右留白用 edgeInsets 控制 —— 旧版手动算 y 坐标，首行顶到上沿，
 // 视觉上"顶部没空间"；想加一项还得重排全部坐标。全换 NSStackView 自动排。
-// 显示光标开关只留在设置窗口的「录制」页，弹层按样张只放这四项。
+// 取景框大小切换走 onCameraSizeChange 回调，已打开的取景框实时跟着变。
 
 final class RecordOptionsView: NSView {
 
     private weak var model: AppModel?
+    /// 取景框大小在弹层里切换时实时改已打开的取景框（工具条负责接线到 cameraBubble）
+    var onCameraSizeChange: ((CameraBubbleSize) -> Void)?
+    /// 「当前 X pt」备注，切换档位时跟着刷新
+    private var ptLabel: NSTextField?
 
     init(model: AppModel) {
         self.model = model
@@ -577,25 +585,40 @@ final class RecordOptionsView: NSView {
         pt.font = NSFont.systemFont(ofSize: 11)
         pt.textColor = .secondaryLabelColor
         pt.setContentCompressionResistancePriority(.required, for: .horizontal)
+        ptLabel = pt
         stack.addArrangedSubview(row("取景框大小", size, width: 120, trailing: pt))
+
+        // 显示光标（用户要求放回弹层；空标签占位让它和上面几行的控件同列）
+        let cursor = NSButton(checkboxWithTitle: "显示光标", target: self, action: #selector(cursorChanged(_:)))
+        cursor.state = prefs.recordShowCursor ? .on : .off
+        stack.addArrangedSubview(row("", cursor))
 
         addSubview(stack)
         stack.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
-            stack.trailingAnchor.constraint(greaterThanOrEqualTo: trailingAnchor),
+            // 水平居中而不是钉死左边：弹层实际宽度要给"装进窗口后才量得准"的下拉
+            // 留余量（+28pt），钉左边会变成左 16 右 44 的不对称留白
+            stack.centerXAnchor.constraint(equalTo: centerXAnchor),
+            stack.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
             stack.topAnchor.constraint(equalTo: topAnchor),
             stack.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
         layoutSubtreeIfNeeded()
-        frame = NSRect(x: 0, y: 0, width: stack.fittingSize.width, height: stack.fittingSize.height)
+        // 🔴 NSPopUpButton 的自然宽度要等进了窗口、字体真正解析后才准，
+        // 初始化时量的偏窄 —— 按那个值定 contentSize 会把行尾「当前 X pt」挤掉。
+        // 这里统一加 28pt 余量，宁宽勿截。
+        frame = NSRect(x: 0, y: 0,
+                       width: stack.fittingSize.width + 28,
+                       height: stack.fittingSize.height)
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
-    /// 一行：定宽标签（右对齐，宽度统一）+ 定宽控件（左对齐）+ 可选行尾说明。
+    /// 一行：定宽标签（右对齐，宽度统一）+ 控件（左对齐）+ 可选行尾说明。
     /// 标签列固定 68pt，各行的控件才会落在同一 x，不会参差。
-    private func row(_ title: String, _ control: NSView, width: CGFloat, trailing: NSView? = nil) -> NSView {
+    /// `width` 传 nil = 控件用自然宽度（勾选框这类不该定宽的）。
+    private func row(_ title: String, _ control: NSView, width: CGFloat? = nil, trailing: NSView? = nil) -> NSView {
         let h = NSStackView()
         h.orientation = .horizontal
         h.alignment = .centerY
@@ -607,8 +630,10 @@ final class RecordOptionsView: NSView {
         label.setContentCompressionResistancePriority(.required, for: .horizontal)
         label.widthAnchor.constraint(equalToConstant: 68).isActive = true
         h.addArrangedSubview(label)
-        control.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        control.widthAnchor.constraint(equalToConstant: width).isActive = true
+        if let width {
+            control.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            control.widthAnchor.constraint(equalToConstant: width).isActive = true
+        }
         h.addArrangedSubview(control)
         if let trailing {
             h.addArrangedSubview(trailing)
@@ -635,6 +660,13 @@ final class RecordOptionsView: NSView {
     @objc private func sizeChanged(_ sender: NSSegmentedControl) {
         let all = CameraBubbleSize.allCases
         guard all.indices.contains(sender.selectedSegment) else { return }
-        model?.prefs.value.recordCameraSize = all[sender.selectedSegment]
+        let newSize = all[sender.selectedSegment]
+        model?.prefs.value.recordCameraSize = newSize
+        ptLabel?.stringValue = "当前 \(Int(newSize.side)) pt"
+        onCameraSizeChange?(newSize)
+    }
+
+    @objc private func cursorChanged(_ sender: NSButton) {
+        model?.prefs.value.recordShowCursor = sender.state == .on
     }
 }
