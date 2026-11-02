@@ -461,20 +461,43 @@ final class OverlayEditorController: NSObject {
 
     private func positionToolbar(_ panel: NSPanel) {
         guard let screen = imagePanel?.screen ?? NSScreen.main else { return }
-        let visible = screen.visibleFrame
-        let width = panel.frame.width
-        let centerX = selectionFrame.midX - width / 2
+        panel.setFrameOrigin(Self.toolbarOrigin(selection: selectionFrame,
+                                               toolbarSize: panel.frame.size,
+                                               visible: screen.visibleFrame))
+    }
 
-        // 优先放框下方，贴到屏幕底边不够时放上方
-        let belowY = selectionFrame.minY - toolbarHeight - 8
-        let y: CGFloat
-        if belowY >= visible.minY + 4 {
-            y = belowY
-        } else {
-            y = selectionFrame.maxY + barHeight + 8
+    /// 工具条与截图框之间的间距（1.0.10 用户口径：10pt）
+    static let toolbarGap: CGFloat = 10
+
+    /// 工具条落位（AppKit 坐标，点）。三步口径，**顺序不能换**：
+    ///   1. **框下方**（默认）：工具条底边比框底边低 10pt；
+    ///   2. 下方顶到可见区底边放不下 → **框上方**：工具条底边比框顶边高 10pt；
+    ///   3. 上下都不够（框几乎占满整屏高）→ **框内底部居中**，底边距框底 10pt。
+    /// 横向一律按框中线居中，再夹进可见区。
+    ///
+    /// 抽成静态纯函数是为了 `--selftest` 能喂数字验。这段几何有三个分支，
+    /// 只靠真机肉眼试的话，第 3 条几乎不出现（要框高到顶满整屏），
+    /// 而它恰恰是最容易写错、也最容易在用户那边突然冒出来的。
+    static func toolbarOrigin(selection: CGRect,
+                              toolbarSize: CGSize,
+                              visible: CGRect) -> CGPoint {
+        let x = min(max(selection.midX - toolbarSize.width / 2, visible.minX + 4),
+                    visible.maxX - toolbarSize.width - 4)
+
+        let below = selection.minY - toolbarGap - toolbarSize.height
+        if below >= visible.minY + 4 { return CGPoint(x: x, y: below) }
+
+        // 旧写法这里是 `selection.maxY + barHeight + 8`——barHeight（30）是图内那条
+        // 刻度带的高度，跟工具条没关系，于是"放上方"时凭空多出 30pt 的空隙。
+        let above = selection.maxY + toolbarGap
+        if above + toolbarSize.height <= visible.maxY - 4 { return CGPoint(x: x, y: above) }
+
+        var inside = selection.minY + toolbarGap
+        if inside > selection.maxY - toolbarSize.height - toolbarGap {
+            // 框本身比工具条还矮：竖直居中，贴底就整个跑出去了
+            inside = selection.midY - toolbarSize.height / 2
         }
-        let clampedX = min(max(centerX, visible.minX + 4), visible.maxX - width - 4)
-        panel.setFrameOrigin(NSPoint(x: clampedX, y: y))
+        return CGPoint(x: x, y: min(inside, visible.maxY - toolbarSize.height - 4))
     }
 
     private func toolbarButton(symbol: String, title: String, action: @escaping () -> Void) -> NSButton {

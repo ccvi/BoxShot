@@ -44,9 +44,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // 诊断入口：--show-overlay 用合成渐变图呼出原位浮层（不走截图权限），
         // 配合 screencapture -R 核对浮层是否真的把图画出来了。
-        if CommandLine.arguments.contains("--show-overlay") {
+        let overlayTall = CommandLine.arguments.contains("--show-overlay-tall")
+            || FileManager.default.fileExists(atPath: "/tmp/boxshot-showoverlay-tall.trigger")
+        if CommandLine.arguments.contains("--show-overlay") || overlayTall {
+            try? FileManager.default.removeItem(atPath: "/tmp/boxshot-showoverlay-tall.trigger")
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-                self?.showDiagnosticOverlay()
+                self?.showDiagnosticOverlay(tall: overlayTall)
             }
         }
         // 诊断入口：--show-history 直接打开截图历史面板（库为空时先塞三张合成图），
@@ -501,7 +504,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.showShotHistory()
     }
 
-    private func showDiagnosticOverlay() {
+    /// tall = true 时用一个几乎顶满整屏高的框，专门验证工具条"上下都没位置 →
+    /// 压进框内底部居中"这条分支（正常尺寸的框永远走不到它）。
+    private func showDiagnosticOverlay(tall: Bool = false) {
         let w = 800, h = 500
         let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
                             space: CGColorSpaceCreateDeviceRGB(),
@@ -516,7 +521,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let image = ctx.makeImage() else { return }
         // 2x 屏下 pointSize = 像素/2，框必须配 (400,250) 才能让图正好铺满
         let scale = NSScreen.screens.first?.backingScaleFactor ?? 2
-        let frame = CGRect(x: 200, y: 500, width: CGFloat(w) / scale, height: CGFloat(h) / scale)
+        let frame = tall
+            ? CGRect(x: 60, y: 40, width: 520, height: 1020)
+            : CGRect(x: 200, y: 500, width: CGFloat(w) / scale, height: CGFloat(h) / scale)
         model.openOverlayEditor(image: image, frame: frame)
         // 预置几条标注，核对浮层上的形状渲染（回归 1.0.1 "画了没显示"反馈）
         if let overlay = model.overlayEditor {

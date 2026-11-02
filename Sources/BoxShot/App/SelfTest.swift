@@ -271,6 +271,41 @@ enum SelfTest {
                   p4.x + size.width <= visible.maxX - 3 && p4.x >= visible.minX + 3)
         }
 
+        // ── 标注工具条落位（1.0.10 用户口径：下 → 上 → 框内底部，间距 10pt）──
+        do {
+            let visible = CGRect(x: 0, y: 0, width: 1710, height: 1077)
+            let size = CGSize(width: 900, height: 64)
+            let gap = OverlayEditorController.toolbarGap
+            check("工具条间距 10pt", gap == 10)
+
+            // ① 默认：框下方，底边距框底 10pt
+            let roomy = CGRect(x: 100, y: 400, width: 800, height: 400)
+            let p1 = OverlayEditorController.toolbarOrigin(selection: roomy, toolbarSize: size, visible: visible)
+            check("有位置：工具条在框下方", p1.y + size.height <= roomy.minY)
+            check("框下间距正好 10pt", roomy.minY - (p1.y + size.height) == gap)
+
+            // ② 下方贴到可见区底边 → 换上方，底边距框顶 10pt
+            let low = CGRect(x: 100, y: 50, width: 800, height: 400)
+            let p2 = OverlayEditorController.toolbarOrigin(selection: low, toolbarSize: size, visible: visible)
+            check("下方没位置：工具条到框上方", p2.y >= low.maxY)
+            check("框上间距正好 10pt", p2.y - low.maxY == gap)
+
+            // ③ 上下都没位置 → 压进框内底部居中
+            let tall = CGRect(x: 100, y: 30, width: 800, height: 1020)
+            let p3 = OverlayEditorController.toolbarOrigin(selection: tall, toolbarSize: size, visible: visible)
+            check("上下都没位置：工具条落在框内底部",
+                  p3.y > tall.minY && p3.y + size.height < tall.maxY)
+            check("框内底部间距也是 10pt", p3.y - tall.minY == gap)
+
+            // ④ 横向按框中线居中，且不越出可见区
+            let narrow = CGRect(x: 1600, y: 400, width: 100, height: 300)
+            let p4 = OverlayEditorController.toolbarOrigin(selection: narrow, toolbarSize: size, visible: visible)
+            check("工具条不越出屏幕右边", p4.x + size.width <= visible.maxX)
+            let centered = CGRect(x: 200, y: 400, width: 800, height: 400)
+            let p5 = OverlayEditorController.toolbarOrigin(selection: centered, toolbarSize: size, visible: visible)
+            check("工具条按框中线居中", abs((p5.x + size.width / 2) - centered.midX) < 0.5)
+        }
+
         // ── 取景框档位 ──
         do {
             // 用户口径（1.0.9 修订）：绝对值 大 170 / 中 150 / 小 140
