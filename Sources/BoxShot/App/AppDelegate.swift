@@ -1,5 +1,6 @@
 import AppKit
 import AVFoundation
+import CoreImage
 import Foundation
 
 // ============================================================
@@ -156,6 +157,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
                 self?.runPinDiagnostics()
             }
+        }
+        // 诊断入口：--qrflow 完整走一遍扫码链路（生成码 → 浮层 → 解码 → 打窗口层级）
+        let qrFlowTrigger = "/tmp/boxshot-qrflow.trigger"
+        if CommandLine.arguments.contains("--qrflow")
+            || FileManager.default.fileExists(atPath: qrFlowTrigger) {
+            try? FileManager.default.removeItem(atPath: qrFlowTrigger)
+            runQRFlowDiagnostics()
+            return
+        }
+        // 诊断入口：--captest 真抓一次整屏落 PNG + 采样色值
+        let captureTrigger = "/tmp/boxshot-captest.trigger"
+        if CommandLine.arguments.contains("--captest")
+            || FileManager.default.fileExists(atPath: captureTrigger) {
+            try? FileManager.default.removeItem(atPath: captureTrigger)
+            runCaptureDiagnostics()
+            return
+        }
+        // 诊断入口：--qrtest 用应用自己的解码器跑触发文件里那张图
+        let qrTrigger = "/tmp/boxshot-qrtest.trigger"
+        if CommandLine.arguments.contains("--qrtest")
+            || FileManager.default.fileExists(atPath: qrTrigger) {
+            runQRDiagnostics()
+            return
         }
         // 诊断入口：--loupetest 离屏渲染一张放大镜 PNG（不用截图权限）
         let loupeTrigger = "/tmp/boxshot-loupetest.trigger"
@@ -583,6 +607,155 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 诊断入口：`--loupetest` 把放大镜**离屏渲染**成 PNG（/tmp/boxshot-loupe.png）。
     /// 放大镜里三行信息、色块、网格对位这些 12pt 级排版，光读代码判断不了；
     /// 离屏画一遍既不用截图权限，也不用真去拖一个选区。
+    /// 诊断入口：`--qrflow` 走一遍完整的扫码链路，人不用在场：
+    /// 用 CoreImage 现生成一张真二维码 → 钉成原位浮层（和截图后一模一样）
+    /// → 调 `runQR` → 把结果窗口的层级 / 是否被浮层盖住打进日志，然后留 8 秒给人截图看。
+    private func runQRFlowDiagnostics() {
+        let logURL = URL(fileURLWithPath: "/tmp/boxshot-qrflow.log")
+        try? "".write(to: logURL, atomically: true, encoding: .utf8)
+        func log(_ text: String) {
+            NSLog("[BoxShot][qrflow] %@", text)
+            guard let handle = try? FileHandle(forWritingTo: logURL) else { return }
+            handle.seekToEndOfFile()
+            handle.write("\(text)\n".data(using: .utf8)!)
+            try? handle.close()
+        }
+
+        // 现生成一张二维码（黑码白底，8 倍放大 —— Vision 认这个）
+        guard let filter = CIFilter(name: "CIQRCodeGenerator") else { log("❌ 没有 CIQRCodeGenerator"); exit(1) }
+        filter.setValue("https://www.ifmac.cn/".data(using: .utf8), forKey: "inputMessage")
+        filter.setValue("M", forKey: "inputCorrectionLevel")
+        guard let code = filter.outputImage?.transformed(by: CGAffineTransform(scaleX: 8, y: 8)) else {
+            log("❌ 生成二维码失败"); exit(1)
+        }
+        let padded = code.transformed(by: CGAffineTransform(translationX: 32, y: 32))
+        let canvas = CIImage(color: CIColor.white).cropped(to: CGRect(origin: .zero,
+                                                                     size: CGSize(width: padded.extent.width + 64,
+                                                                                  height: padded.extent.height + 64)))
+        let composed = padded.composited(over: canvas)
+        guard let cg = CIContext().createCGImage(composed, from: composed.extent) else {
+            log("❌ 生成位图失败"); exit(1)
+        }
+        log("二维码 \(cg.width)×\(cg.height)")
+
+        // 钉成浮层：位置固定在屏幕中上部，尺寸按图算（按 2x 逻辑宽）
+        let screen = ScreenCapture.activeScreen()
+        let width = CGFloat(cg.width) / 2
+        let height = CGFloat(cg.height) / 2
+        let frame = CGRect(x: screen.frame.midX - width / 2,
+                           y: screen.frame.maxY - height - 120,
+                           width: width, height: height)
+        model.openOverlayEditor(image: cg, frame: frame)
+        log("浮层已在 \(frame) 打开")
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            log("开始解码…")
+            self.model.runQR(image: cg) { payloads in
+                log(payloads.isEmpty ? "❌ 没解出来" : "✅ 解出：\(payloads)")
+                // 结果窗是在 completion **之后**才 show 的，这里得等一拍再数窗口
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                    for (index, window) in NSApp.windows.enumerated() where window.isVisible {
+                        log("窗口#\(index) level=\(window.level.rawValue) " +
+                            "\(type(of: window)) frame=\(window.frame) " +
+                            "key=\(window.isKeyWindow)")
+                    }
+                }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 8) { exit(0) }
+        }
+    }
+
+    /// 诊断入口：`--captest` 真抓一次整屏，落成 `/tmp/boxshot-capture.png` 并打日志。
+    /// 放大镜里的像素、截图的内容都来自这一次 `captureDisplay`：
+    /// 如果它是白的，镜里就是白的、截出来的图也扫不出码 —— 先把这一层钉死再往上查。
+    private func runCaptureDiagnostics() {
+        Task { @MainActor in
+            let logURL = URL(fileURLWithPath: "/tmp/boxshot-captest.log")
+            try? "".write(to: logURL, atomically: true, encoding: .utf8)
+            func log(_ text: String) {
+                NSLog("[BoxShot][captest] %@", text)
+                guard let handle = try? FileHandle(forWritingTo: logURL) else { return }
+                handle.seekToEndOfFile()
+                handle.write("\(text)\n".data(using: .utf8)!)
+                try? handle.close()
+            }
+
+            let screen = ScreenCapture.activeScreen()
+            let displayID = ScreenCapture.display(for: screen)
+            log("屏幕 frame=\(screen.frame) backing=\(screen.backingScaleFactor) " +
+                "CGDisplayBounds=\(ScreenCapture.displayBoundsGlobal(displayID))")
+
+            let started = Date()
+            let image = try? await ScreenCapture.captureDisplay(displayID)
+            let ms = Date().timeIntervalSince(started) * 1000
+            guard let image else {
+                log("❌ 抓屏失败（\(Int(ms))ms）")
+                exit(1)
+            }
+            log("抓屏成功 \(Int(ms))ms \(image.width)×\(image.height) " +
+                "bpp=\(image.bitsPerPixel) row=\(image.bytesPerRow)")
+
+            let scale = CGFloat(image.width) / max(1, screen.frame.width)
+            log("pixelScale（宽比）= \(scale)")
+
+            // 几个固定采样点：视图坐标（左上原点）→ 像素
+            let points: [(String, CGPoint)] = [
+                ("左上 100,100", CGPoint(x: 100, y: 100)),
+                ("中心", CGPoint(x: screen.frame.width / 2, y: screen.frame.height / 2)),
+                ("右上", CGPoint(x: screen.frame.width - 100, y: 100)),
+                ("左下", CGPoint(x: 100, y: screen.frame.height - 100)),
+            ]
+            var samples: [String] = []
+            for (name, p) in points {
+                let px = CGPoint(x: (p.x * scale).rounded(.down), y: (p.y * scale).rounded(.down))
+                let color = Loupe.sampleColor(in: image, pixel: px)
+                samples.append("\(name)=\(Loupe.hexPairs(color))")
+            }
+            log("采样 \(samples.joined(separator: " "))")
+
+            let rep = NSBitmapImageRep(cgImage: image)
+            if let data = rep.representation(using: .png, properties: [:]) {
+                try? data.write(to: URL(fileURLWithPath: "/tmp/boxshot-capture.png"),
+                                options: .atomic)
+                log("已落 /tmp/boxshot-capture.png")
+            }
+            exit(0)
+        }
+    }
+
+    /// 诊断入口：`--qrtest` 用**应用自己的解码器**跑一张图（路径写在触发文件里）。
+    /// 标准 Vision 能解、应用里解不出来，那问题一定在喂进去的那张图上。
+    private func runQRDiagnostics() {
+        let path = (try? String(contentsOfFile: "/tmp/boxshot-qrtest.trigger", encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let logURL = URL(fileURLWithPath: "/tmp/boxshot-qrtest.log")
+        try? "".write(to: logURL, atomically: true, encoding: .utf8)
+        func log(_ text: String) {
+            NSLog("[BoxShot][qrtest] %@", text)
+            guard let handle = try? FileHandle(forWritingTo: logURL) else { return }
+            handle.seekToEndOfFile()
+            handle.write("\(text)\n".data(using: .utf8)!)
+            try? handle.close()
+        }
+        guard !path.isEmpty,
+              let image = NSImage(contentsOfFile: path)?
+                .cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            log("❌ 读不到图：\(path)")
+            exit(1)
+        }
+        log("读入 \(path) \(image.width)×\(image.height) bpp=\(image.bitsPerPixel)")
+        Task { @MainActor in
+            do {
+                let payloads = try await OCREngine.decodeBarcodes(in: image)
+                log(payloads.isEmpty ? "❌ 解不出来（0 条）"
+                                     : "✅ 解出 \(payloads.count) 条：\(payloads)")
+            } catch {
+                log("❌ 抛错 \(error)")
+            }
+            exit(0)
+        }
+    }
+
     private func runLoupeDiagnostics() {
         let size = Loupe.size
         let canvas = CGRect(x: 0, y: 0, width: size.width + 80, height: size.height + 80)

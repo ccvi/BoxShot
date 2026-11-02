@@ -789,7 +789,17 @@ final class OverlayEditorController: NSObject {
 
     func decodeQR() {
         guard let image = renderedImage() else { return }
-        model?.runQR(image: image)
+        // 先给一句"在识别"：整屏图上 Vision 要几百毫秒，中间没有一点反馈，
+        // 用户会认定按钮是坏的（"扫码功能扫不了"里有这一半）。
+        contentView?.flashStatus("正在识别二维码…")
+        model?.runQR(image: image) { [weak self] payloads in
+            guard let self else { return }
+            if let first = payloads.first {
+                self.contentView?.flashStatus("已复制：\(first)")
+            } else {
+                self.contentView?.flashStatus("没有识别到 QR / 条形码")
+            }
+        }
     }
 
     // ── 键盘 / 框外点击 ──────────────────────────────────────

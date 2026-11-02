@@ -342,16 +342,26 @@ final class AppModel: ObservableObject {
         controller.show(kind: .text(text), copied: true)
     }
 
-    func runQR(image: CGImage) {
+    /// 解码。`completion` 回传结果，让浮层能就地闪一句「已复制 / 没认出来」——
+    /// 用户点完按钮必须**当场**看见反馈，不能只靠一个可能被盖住的窗口。
+    func runQR(image: CGImage, completion: (([String]) -> Void)? = nil) {
         Task { @MainActor in
             do {
                 let payloads = try await OCREngine.decodeBarcodes(in: image)
                 guard let first = payloads.first else {
-                    presentError("没有识别到 QR / 条形码")
+                    completion?([])
+                    // 🔴 这里原来是 `presentError`（NSAlert.runModal）：浮层还在屏幕上，
+                    // 模态框既可能被挡、又把交互卡住，观感就是"点了没反应"。
+                    // 改成开结果窗（已提到浮层之上）说清楚"没认出来"。
+                    let empty = resultWindow ?? ResultWindowController()
+                    resultWindow = empty
+                    empty.show(kind: .text("没有识别到 QR / 条形码\n\n可以试着把码截大一点，\n或者确认码没有被遮挡。"),
+                               copied: false)
                     return
                 }
                 Support.copyTextToClipboard(payloads.joined(separator: "\n"))
                 playFeedbackSound()
+                completion?(payloads)
                 if prefs.value.ocrAutoOpenLink,
                    first.lowercased().hasPrefix("http://") || first.lowercased().hasPrefix("https://"),
                    let url = URL(string: first) {

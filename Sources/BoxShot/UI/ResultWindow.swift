@@ -14,6 +14,12 @@ final class ResultWindowController: NSWindowController {
                               backing: .buffered, defer: false)
         window.title = "识别结果"
         window.isReleasedWhenClosed = false
+        // 🔴 结果窗必须**高过截图浮层的所有面板**，否则用户点完「解码」什么都看不到：
+        //   · 图像面板是 `.floating`(3)，结果窗用默认 `.normal`(0) 时会被它整个盖住；
+        //   · 标注工具条是 `.statusBar`(25)，只提到 4 的话工具条又会横在结果窗上面。
+        // 抬到 statusBar 之上一档。它只在用户主动触发识别后才出现、读完就关，
+        // 一直浮在最上层是可以接受的代价。
+        window.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 1)
         super.init(window: window)
     }
 

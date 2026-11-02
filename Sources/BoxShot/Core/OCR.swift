@@ -1,4 +1,5 @@
 import Foundation
+import CoreImage
 import Vision
 
 // ============================================================
@@ -163,7 +164,35 @@ enum OCREngine {
 
     // ── QR / 条形码 ──
 
+    /// 解 QR / 条形码。
+    ///
+    /// 🔴 一次原图不够。Vision 的条形码检测有两个已知的薄弱面：
+    ///   ① **模块太小**（截图里码只有一两百像素）→ 检测器在候选阶段就漏掉；
+    ///   ② **圆点 / 圆角定位图案**的 QR（Edge、Chrome 的「分享 → 二维码」就是这种，
+    ///      它不是标准方块模块）→ 二值化后连通域对不上。
+    /// 所以先试原图，解不出来再按「放大 → 灰度拉对比 → 形态学膨胀」逐级回退。
+    /// 膨胀那一步是圆点 QR 的关键：把圆点撑成方块，连通域才对得上。
     static func decodeBarcodes(in image: CGImage) async throws -> [String] {
+        do {
+            if let payloads = try await detect(in: image), !payloads.isEmpty {
+                return payloads
+            }
+        } catch {
+            // 某一次检测抛错（比如当前系统不支持列表里的某个码制）不该直接判死：
+            // 记一笔继续回退，全都不行才认输
+            NSLog("[BoxShot] 条形码检测第 1 次抛错：%@", "\(error)")
+        }
+        for (index, prepared) in fallbackImages(from: image).enumerated() {
+            if let payloads = try? await detect(in: prepared), !payloads.isEmpty {
+                NSLog("[BoxShot] 条形码回退 #%d 解出来了", index + 1)
+                return payloads
+            }
+        }
+        return []
+    }
+
+    /// 单次检测。出错就抛，由调用方决定要不要继续回退。
+    private static func detect(in image: CGImage) async throws -> [String]? {
         try await withCheckedThrowingContinuation { continuation in
             let once = OnceContinuation(continuation)
             let request = VNDetectBarcodesRequest { request, error in
@@ -171,7 +200,8 @@ enum OCREngine {
                     once.resume(throwing: error)
                     return
                 }
-                let payloads = (request.results as? [VNBarcodeObservation])?.compactMap { $0.payloadStringValue } ?? []
+                let payloads = (request.results as? [VNBarcodeObservation])?
+                    .compactMap { $0.payloadStringValue } ?? []
                 once.resume(returning: payloads)
             }
             // 全格式覆盖：QR / EAN / Code128 / PDF417 / Aztec 等
@@ -187,5 +217,39 @@ enum OCREngine {
                 }
             }
         }
+    }
+
+    /// CIContext 建一次就够（每次新建要几十毫秒，回退链里会建好几次）
+    private static let ciContext = CIContext()
+
+    /// 回退用的几张预处理图。顺序就是试的顺序：便宜的、命中率高的在前。
+    private static func fallbackImages(from image: CGImage) -> [CGImage] {
+        let base = CIImage(cgImage: image)
+        let maxSide = max(image.width, image.height)
+        var out: [CGImage] = []
+
+        // ① 放大 2 倍：模块太小时靠它。整屏图已经 3000+ 就别再翻了（6840 宽的图又慢又没用）
+        if maxSide <= 2600, let big = render(base, scale: 2) {
+            out.append(big)
+        }
+        // ② 灰度 + 拉对比：JPEG 压过的码边缘发虚、对比度被吃掉一截
+        let grayscale = base.applyingFilter("CIColorControls", parameters: [
+            kCIInputSaturationKey: 0,
+            kCIInputContrastKey: 1.8,
+        ])
+        if let gray = render(grayscale, scale: 1) { out.append(gray) }
+        // ③ 形态学最大值（膨胀）：圆点撑成方块，圆点风格 QR 基本靠这一步
+        for radius in [1.5, 3.0] {
+            let grown = grayscale.applyingFilter("CIMorphologyMaximum",
+                                                 parameters: ["inputRadius": radius])
+            if let grew = render(grown, scale: 1) { out.append(grew) }
+        }
+        return out
+    }
+
+    private static func render(_ image: CIImage, scale: CGFloat) -> CGImage? {
+        let scaled = scale == 1 ? image
+                                : image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        return ciContext.createCGImage(scaled, from: scaled.extent)
     }
 }
