@@ -454,6 +454,11 @@ struct EditorView: View {
             guard let a = shape.points.first, let b = shape.points.last else { return }
             context.stroke(Path(CGRect(from: a, to: b)), with: .color(color), lineWidth: width)
 
+        case .highlight:
+            // 半透明整块染色（截图浮层那边用 multiply，SwiftUI 这边只能给 opacity）
+            guard let a = shape.points.first, let b = shape.points.last else { return }
+            context.fill(Path(CGRect(from: a, to: b)), with: .color(color.opacity(0.38)))
+
         case .ellipse:
             guard let a = shape.points.first, let b = shape.points.last else { return }
             context.stroke(Path(ellipseIn: CGRect(from: a, to: b)), with: .color(color), lineWidth: width)

@@ -18,6 +18,7 @@ enum EditorTool: String, CaseIterable, Identifiable {
     case pen        // 随手涂鸦
     case marker     // 马可笔（半透明粗笔）
     case rect
+    case highlight  // 高亮：半透明色块（拖一个矩形，整块染色），和马克笔的"笔画"不同
     case ellipse
     case line
     case arrow
@@ -36,6 +37,7 @@ enum EditorTool: String, CaseIterable, Identifiable {
         case .pen:       return "pencil.tip"
         case .marker:    return "highlighter"
         case .rect:      return "rectangle"
+        case .highlight: return "rectangle.fill"
         case .ellipse:   return "circle"
         case .line:      return "line.diagonal"
         case .arrow:     return "arrow.up.right"
@@ -54,6 +56,7 @@ enum EditorTool: String, CaseIterable, Identifiable {
         case .pen:       return "画笔"
         case .marker:    return "马可笔"
         case .rect:      return "矩形"
+        case .highlight: return "高亮（半透明色块）"
         case .ellipse:   return "椭圆"
         case .line:      return "直线"
         case .arrow:     return "箭头"
@@ -102,7 +105,7 @@ struct AnnotationShape: Equatable {
             return false
         case .crop:
             return false
-        case .rect, .ellipse, .mosaic, .blur, .measure:
+        case .rect, .highlight, .ellipse, .mosaic, .blur, .measure:
             guard let a = points.first, let b = points.last else { return false }
             return rect(from: a, to: b).insetBy(dx: -hitPadding, dy: -hitPadding).contains(p)
         case .line, .arrow, .pen, .marker:
@@ -134,7 +137,7 @@ struct AnnotationShape: Equatable {
             return nil
         case .crop:
             return nil
-        case .rect, .ellipse, .mosaic, .blur, .measure:
+        case .rect, .highlight, .ellipse, .mosaic, .blur, .measure:
             guard let a = points.first, let b = points.last else { return nil }
             return rect(from: a, to: b).insetBy(dx: -hitPadding / 2, dy: -hitPadding / 2)
         case .line, .arrow, .pen, .marker:
@@ -322,6 +325,16 @@ enum EditorRenderer {
             ctx.setStrokeColor(color.cgColor)
             ctx.setLineWidth(width)
             ctx.stroke(rect(from: a, to: b))
+
+        case .highlight:
+            // 半透明 + multiply：像荧光笔涂一整块，底下的字还看得见（纯 alpha 会发灰发白）
+            guard let a = shape.points.first, let b = shape.points.last else { return }
+            ctx.saveGState()
+            ctx.setFillColor(color.cgColor)
+            ctx.setAlpha(0.38)
+            ctx.setBlendMode(.multiply)
+            ctx.fill(rect(from: a, to: b))
+            ctx.restoreGState()
 
         case .ellipse:
             guard let a = shape.points.first, let b = shape.points.last else { return }

@@ -306,6 +306,50 @@ enum SelfTest {
             check("工具条按框中线居中", abs((p5.x + size.width / 2) - centered.midX) < 0.5)
         }
 
+        // ── 颜色面板落位（1.0.10：贴在工具条下面，6 个颜色）──
+        do {
+            let visible = CGRect(x: 0, y: 0, width: 1710, height: 1077)
+            let panelSize = CGSize(width: 200, height: 48)
+            check("调色板正好 6 个颜色", OverlayEditorController.colorPalette.count == 6)
+
+            let toolbar = CGRect(x: 300, y: 500, width: 700, height: 64)
+            let p1 = OverlayEditorController.colorPanelOrigin(toolbar: toolbar,
+                                                              panelSize: panelSize, visible: visible)
+            check("颜色面板在工具条下面",
+                  p1.y + panelSize.height <= toolbar.minY && p1.y + panelSize.height == toolbar.minY - OverlayEditorController.colorPanelGap)
+            check("颜色面板与工具条左对齐", p1.x == toolbar.minX)
+
+            // 工具条贴着可见区底边 → 面板翻到工具条上方
+            let lowToolbar = CGRect(x: 300, y: 10, width: 700, height: 64)
+            let p2 = OverlayEditorController.colorPanelOrigin(toolbar: lowToolbar,
+                                                              panelSize: panelSize, visible: visible)
+            check("下面没位置：颜色面板到工具条上方", p2.y >= lowToolbar.maxY)
+
+            // 工具条贴右边缘 → 面板不越界
+            let rightToolbar = CGRect(x: 1600, y: 500, width: 100, height: 64)
+            let p3 = OverlayEditorController.colorPanelOrigin(toolbar: rightToolbar,
+                                                              panelSize: panelSize, visible: visible)
+            check("颜色面板不越出屏幕右边", p3.x + panelSize.width <= visible.maxX)
+        }
+
+        // ── 高亮工具（1.0.10 取代工具条上的裁剪位）──
+        do {
+            check("高亮是拖拽工具", EditorTool.highlight.isDragTool)
+            let white = solidImage(width: 40, height: 40, color: CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
+            let hl = AnnotationShape(tool: .highlight,
+                                     points: [CGPoint(x: 5, y: 5), CGPoint(x: 35, y: 35)],
+                                     color: .red, lineWidth: 0)
+            let out = EditorRenderer.render(base: white, shapes: [hl], effects: EffectImages(base: white))
+            let px = out.flatMap { EditorDocument(image: $0).pixelColor(at: CGPoint(x: 20, y: 20)) }
+            check("高亮块真的把区域染了色",
+                  px != nil && px!.green < 0.9 && px!.blue < 0.9)
+            let outside = out.flatMap { EditorDocument(image: $0).pixelColor(at: CGPoint(x: 2, y: 2)) }
+            check("高亮块不越出拖出来的矩形",
+                  outside != nil && outside!.green > 0.95)
+            check("高亮点得中（命中测试）",
+                  hl.hitTest(CGPoint(x: 20, y: 20)) && !hl.hitTest(CGPoint(x: 60, y: 60)))
+        }
+
         // ── 取景框档位 ──
         do {
             // 用户口径（1.0.9 修订）：绝对值 大 170 / 中 150 / 小 140

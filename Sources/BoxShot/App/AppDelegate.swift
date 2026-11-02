@@ -46,10 +46,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 配合 screencapture -R 核对浮层是否真的把图画出来了。
         let overlayTall = CommandLine.arguments.contains("--show-overlay-tall")
             || FileManager.default.fileExists(atPath: "/tmp/boxshot-showoverlay-tall.trigger")
-        if CommandLine.arguments.contains("--show-overlay") || overlayTall {
+        // --show-overlay-color：顺手把颜色面板也打开，用来核对它是不是贴在工具条下面
+        let overlayColor = CommandLine.arguments.contains("--show-overlay-color")
+            || FileManager.default.fileExists(atPath: "/tmp/boxshot-showoverlay-color.trigger")
+        if CommandLine.arguments.contains("--show-overlay") || overlayTall || overlayColor {
             try? FileManager.default.removeItem(atPath: "/tmp/boxshot-showoverlay-tall.trigger")
+            try? FileManager.default.removeItem(atPath: "/tmp/boxshot-showoverlay-color.trigger")
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-                self?.showDiagnosticOverlay(tall: overlayTall)
+                self?.showDiagnosticOverlay(tall: overlayTall, colors: overlayColor)
             }
         }
         // 诊断入口：--show-history 直接打开截图历史面板（库为空时先塞三张合成图），
@@ -396,9 +400,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     if let editor = self.model.overlayEditor {
                         let f = editor.selectionFrame
                         log("浮层 frame=\(f)")
+                        log("面板 frame=\(editor.panelFrameForDiagnostics) 屏幕=\(screenFrame)")
                         let fullScreen = abs(f.width - screenFrame.width) < 2 && abs(f.height - screenFrame.height) < 2
                         log(fullScreen ? "❌ 框是整屏 —— 点到的是自家遮罩，不是目标窗口"
                                        : "✅ 窗口截图：拿到了一个具体窗口的框")
+                        // 第二阶段：拖右下角手柄往里收 120pt，验"窗口截图也能改大小"。
+                        // AppKit(左下原点) → 全局(左上原点)：y = 屏高 − 框底边
+                        let x0 = f.width - 3
+                        let y0 = screenFrame.height - f.minY - 3
+                        let x1 = x0 - 120
+                        let y1 = y0 - 120
+                        log("拖右下角手柄 \(Int(x0)),\(Int(y0)) → \(Int(x1)),\(Int(y1))")
+                        post(.mouseMoved, CGPoint(x: x0, y: y0))
+                        post(.leftMouseDown, CGPoint(x: x0, y: y0))
+                        var step = 0
+                        let timer = Timer(timeInterval: 0.05, repeats: true) { t in
+                            step += 1
+                            let k = CGFloat(step) / 8
+                            post(.leftMouseDragged, CGPoint(x: x0 + (x1 - x0) * k,
+                                                            y: y0 + (y1 - y0) * k))
+                            guard step >= 8 else { return }
+                            t.invalidate()
+                            post(.leftMouseUp, CGPoint(x: x1, y: y1))
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+                                if let e2 = self.model.overlayEditor {
+                                    let f2 = e2.selectionFrame
+                                    log("拖完之后 frame=\(f2)")
+                                    log(f2.width < f.width - 40
+                                        ? "✅ 窗口截图的框也能改大小"
+                                        : "❌ 拖手柄没改到尺寸")
+                                } else {
+                                    log("❌ 拖完浮层没了")
+                                }
+                                exit(0)
+                            }
+                        }
+                        RunLoop.main.add(timer, forMode: .common)
+                        return
                     } else {
                         log("❌ 没有浮层编辑器（点选窗口没走通）")
                     }
@@ -506,7 +544,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// tall = true 时用一个几乎顶满整屏高的框，专门验证工具条"上下都没位置 →
     /// 压进框内底部居中"这条分支（正常尺寸的框永远走不到它）。
-    private func showDiagnosticOverlay(tall: Bool = false) {
+    private func showDiagnosticOverlay(tall: Bool = false, colors: Bool = false) {
         let w = 800, h = 500
         let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
                             space: CGColorSpaceCreateDeviceRGB(),
@@ -525,6 +563,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ? CGRect(x: 60, y: 40, width: 520, height: 1020)
             : CGRect(x: 200, y: 500, width: CGFloat(w) / scale, height: CGFloat(h) / scale)
         model.openOverlayEditor(image: image, frame: frame)
+        if colors {
+            let logURL = URL(fileURLWithPath: "/tmp/boxshot-overlaycolor.log")
+            try? "".write(to: logURL, atomically: true, encoding: .utf8)
+            func clog(_ text: String) {
+                NSLog("[BoxShot][overlaycolor] %@", text)
+                guard let handle = try? FileHandle(forWritingTo: logURL) else { return }
+                handle.seekToEndOfFile()
+                handle.write("\(text)\n".data(using: .utf8)!)
+                try? handle.close()
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                guard let editor = self.model.overlayEditor else { return }
+                editor.showColorPanelForDiagnostics()
+                let panel = editor.colorPanelFrameForDiagnostics
+                clog("颜色面板 frame=\(panel) · AX=\(AXIsProcessTrusted())")
+                clog("当前颜色=\(editor.docColorForDiagnostics) · 面板是key=\(editor.colorPanelIsKeyForDiagnostics)")
+                clog("面板内 (74,24) 命中=\(editor.colorPanelHitTestForDiagnostics(CGPoint(x: 74, y: 24)))")
+                // 🔴 比较必须拿"点击前"的快照：直接和 editor.docColorForDiagnostics 比，
+                // 两边都是现读的同一个值，永远相等 → 每次都会误报"没换色"。
+                let before = editor.docColorForDiagnostics
+
+                // 合成一次点击：第 6 个色块（黑，最不容易和默认色撞）。
+                // 坐标是 AppKit 左下原点 → 全局左上原点。
+                // 面板内边距 10、色块 21 宽、间距 6：第 n 个色块中心 = minX+10+(21+6)*n+10.5
+                let cx = panel.minX + 10 + (21 + 6) * 5 + 10.5
+                let cy = panel.midY
+                let screenH = ScreenCapture.activeScreen().frame.height
+                let src = CGEventSource(stateID: .hidSystemState)
+                func post(_ type: CGEventType, _ p: CGPoint) {
+                    CGEvent(mouseEventSource: src, mouseType: type,
+                            mouseCursorPosition: p, mouseButton: .left)?.post(tap: .cghidEventTap)
+                }
+                let g = CGPoint(x: cx, y: screenH - cy)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    post(.mouseMoved, g)
+                    post(.leftMouseDown, g)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                        post(.leftMouseUp, g)
+                    }
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) {
+                    let now = self.model.overlayEditor?.docColorForDiagnostics ?? "nil"
+                    clog("点击 \(Int(g.x)),\(Int(g.y)) 之后颜色=\(now)")
+                    clog(now == before ? "⚠️ 点色块没换色" : "✅ 点色块换了颜色：\(before) → \(now)")
+                }
+            }
+        }
         // 预置几条标注，核对浮层上的形状渲染（回归 1.0.1 "画了没显示"反馈）
         if let overlay = model.overlayEditor {
             let doc = overlay.docForDiagnostics

@@ -519,7 +519,22 @@ extension AppModel: RegionSelectionDelegate {
                 let image = try await ScreenCapture.captureWindow(window)
                 // 窗口截图同样原位钉住（框 = 窗口框）
                 let frame = ScreenCapture.appKitFrame(fromGlobalTopLeft: window.frame)
-                self.routeCapturedImage(image, overlayFrame: frame)
+
+                // 🔴 窗口截图以前**不带整屏原图**，两个毛病一起冒：
+                //   1. canResize = false → 截图框拖不动（用户："也可以调整大小"）；
+                //   2. 浮层窗口 = 窗口框 + 上下留白，框一高就顶出屏幕，AppKit 的
+                //      constrainFrameRect 会把整个窗口往下推，图跟着错位
+                //      （用户："自动捕捉大窗口时，截图框不要移动"）。
+                // 现在给它一份 FullDisplay：裁切基准 = 窗口图 + 窗口框（扩不出去，
+                // 因为 commitResize 会 intersection 到这个框），浮层铺满整块屏幕。
+                let displayFrame = ScreenCapture.appKitFrame(
+                    fromGlobalTopLeft: ScreenCapture.displayBoundsGlobal(displayID))
+                let scale = CGFloat(image.width) / max(1, frame.width)
+                let full = OverlayEditorController.FullDisplay(image: image,
+                                                               frameAppKit: frame,
+                                                               pixelScale: scale,
+                                                               panelFrameAppKit: displayFrame)
+                self.routeCapturedImage(image, overlayFrame: frame, fullDisplay: full)
             } catch {
                 self.presentError("窗口截图失败：\(error.localizedDescription)")
             }

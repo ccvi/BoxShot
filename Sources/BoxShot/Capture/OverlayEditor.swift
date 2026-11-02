@@ -22,8 +22,14 @@ final class OverlayEditorController: NSObject {
     /// 不需要重新截屏（重新截会把我们自己的浮层拍进去，内容也可能已经变了）。
     struct FullDisplay {
         var image: CGImage
+        /// 这张原图覆盖的屏幕矩形（AppKit 坐标）。窗口截图时是**窗口框**，
+        /// 区域截图时是整块屏。
         var frameAppKit: CGRect
         var pixelScale: CGFloat
+        /// 浮层窗口要铺多大。默认跟 `frameAppKit` 一样（区域截图 = 整块屏）；
+        /// 窗口截图要传**整块屏**：浮层只比窗口大一圈时，框一高就顶出屏幕，
+        /// AppKit 会把窗口整体往下推（constrainFrameRect），图就跟着错位了。
+        var panelFrameAppKit: CGRect? = nil
     }
 
     private let doc: EditorDocument
@@ -41,7 +47,7 @@ final class OverlayEditorController: NSObject {
     private var swatchButtons: [String: NSButton] = [:]
     private var widthButtons: [CGFloat: NSButton] = [:]
     private var colorAnchorButton: NSButton?
-    private var colorPopover: NSPopover?
+    private var colorPanel: NSPanel?
     private var morePopover: NSPopover?
     private var monitors: [Any] = []
     /// 本次截图是否已落盘（保存过 / 自动保存过就不再重复写）
@@ -100,6 +106,29 @@ final class OverlayEditorController: NSObject {
     /// 诊断专用：读浮层的文档（自检预置形状用）
     var docForDiagnostics: EditorDocument { doc }
 
+    /// 诊断用：浮层窗口的实际 frame（核对有没有被 AppKit 的 constrainFrameRect 推走）
+    var panelFrameForDiagnostics: CGRect { imagePanel?.frame ?? .zero }
+    /// 诊断用：颜色面板的 frame / 当前颜色（验"点一下色块真的换色了"）
+    var colorPanelFrameForDiagnostics: CGRect { colorPanel?.frame ?? .zero }
+    var docColorForDiagnostics: String { doc.color.hexString }
+    /// 诊断用：颜色面板是不是 key、某个点命中的是哪个视图
+    var colorPanelIsKeyForDiagnostics: Bool { colorPanel?.isKeyWindow ?? false }
+    /// 诊断用：工具条 frame / 当前工具（验"合成点击到底能不能进 .statusBar 面板"）
+    var toolbarFrameForDiagnostics: CGRect { toolbarPanel?.frame ?? .zero }
+    var docToolForDiagnostics: String { doc.tool.rawValue }
+    func colorPanelHitTestForDiagnostics(_ p: CGPoint) -> String {
+        guard let v = colorPanel?.contentView?.hitTest(p) else { return "nil" }
+        return String(describing: type(of: v))
+    }
+    /// 诊断用：直接触发第 n 个色块的动作（排除"闭包没接上"这一种可能）
+    func colorPanelPerformClickForDiagnostics(index: Int) -> Bool {
+        guard let panel = colorPanel, let stack = panel.contentView?.subviews.first as? NSStackView else { return false }
+        let buttons = stack.arrangedSubviews.compactMap { $0 as? NSButton }
+        guard index < buttons.count else { return false }
+        buttons[index].performClick(nil)
+        return true
+    }
+
     init(model: AppModel, image: CGImage, selectionFrameAppKit frame: CGRect,
          fullDisplay: FullDisplay? = nil, shapes: [AnnotationShape] = []) {
         self.model = model
@@ -123,7 +152,7 @@ final class OverlayEditorController: NSObject {
         let panelFrame: CGRect
         let imageRectInView: CGRect
         if let full = fullDisplay {
-            panelFrame = full.frameAppKit
+            panelFrame = full.panelFrameAppKit ?? full.frameAppKit
             // 视图是 flipped（左上原点），AppKit 是左下原点
             imageRectInView = CGRect(x: selectionFrame.minX - panelFrame.minX,
                                      y: panelFrame.maxY - selectionFrame.maxY,
@@ -245,9 +274,9 @@ final class OverlayEditorController: NSObject {
         autosaveIfNeeded()
         monitors.forEach { NSEvent.removeMonitor($0) }
         monitors.removeAll()
-        colorPopover?.close()
+        colorPanel?.orderOut(nil)
+        colorPanel = nil
         morePopover?.close()
-        colorPopover = nil
         morePopover = nil
         imagePanel?.orderOut(nil)
         toolbarPanel?.orderOut(nil)
@@ -303,11 +332,14 @@ final class OverlayEditorController: NSObject {
             self?.doc.redo(); self?.refresh()
         })
 
-        let crop = toolbarButton(symbol: EditorTool.crop.symbol, title: EditorTool.crop.title) { [weak self] in
-            self?.selectTool(.crop)
+        // 1.0.10：这个位置原来放的是「裁剪」，用户要求换成「高亮」工具，
+        // 裁剪收进右边的 ⋯ 菜单（功能不丢，只是不占工具条）。
+        let highlight = toolbarButton(symbol: EditorTool.highlight.symbol,
+                                      title: EditorTool.highlight.title) { [weak self] in
+            self?.selectTool(.highlight)
         }
-        toolButtons[.crop] = crop
-        stack.addArrangedSubview(crop)
+        toolButtons[.highlight] = highlight
+        stack.addArrangedSubview(highlight)
 
         stack.addArrangedSubview(toolbarButtonWithSender(symbol: "ellipsis", title: "更多（OCR / 贴图）") { [weak self] sender in
             self?.showMorePopover(anchor: sender)
@@ -352,7 +384,7 @@ final class OverlayEditorController: NSObject {
 
     /// 工具条左边那个"当前颜色"圆点，点开是配色/粗细面板
     private func colorDotAnchorButton() -> NSButton {
-        let button = NSButton(title: "", target: nil, action: nil)
+        let button = FirstMouseButton(title: "", target: nil, action: nil)
         button.bezelStyle = .regularSquare
         button.isBordered = false
         button.wantsLayer = true
@@ -361,8 +393,16 @@ final class OverlayEditorController: NSObject {
         button.layer?.borderColor = NSColor.white.withAlphaComponent(0.75).cgColor
         button.toolTip = "颜色与粗细"
         button.setButtonType(.momentaryChange)
-        button.onAction = { [weak self] in self?.showColorPopover(anchor: button) }
+        button.onAction = { [weak self] in self?.toggleColorPanel() }
         button.frame = NSRect(x: 0, y: 0, width: 30, height: 30)
+        // 🔴 和色块同一个坑：NSStackView 只看 intrinsicContentSize，
+        // 这个按钮只有 layer 底色，没约束就被压成 0 宽 —— 工具条上
+        // 那颗"当前颜色"圆点一直是**看不见**的（用户只能靠猜去点）。
+        button.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            button.widthAnchor.constraint(equalToConstant: 30),
+            button.heightAnchor.constraint(equalToConstant: 30),
+        ])
         colorAnchorButton = button
         updateColorAnchor()
         return button
@@ -372,17 +412,34 @@ final class OverlayEditorController: NSObject {
         colorAnchorButton?.layer?.backgroundColor = doc.color.cgColor
     }
 
-    private func showColorPopover(anchor: NSView) {
-        if let popover = colorPopover, popover.isShown {
-            popover.close()
-            colorPopover = nil
+    // ── 颜色面板：固定在工具条下面 ──────────────────────────
+
+    /// 1.0.10 用户口径：颜色面板显示在**工具条下面**，6 个颜色。
+    /// 以前是 NSPopover，弹在颜色圆点旁边、压住截图内容，位置还跟着圆点跑；
+    /// 现在是一块独立的浮层，贴在工具条下方（下面放不下就贴上方），
+    /// 顺带把 3 档粗细也收在一起。
+    /// 诊断用：直接把颜色面板打开（--show-overlay-color 拿它截图核对）
+    func showColorPanelForDiagnostics() { toggleColorPanel() }
+
+    private func toggleColorPanel() {
+        if let panel = colorPanel, panel.isVisible {
+            panel.orderOut(nil)
+            toolbarPanel?.makeKey()
             return
         }
+        let panel = colorPanel ?? buildColorPanel()
+        colorPanel = panel
+        positionColorPanel(panel)
+        panel.makeKeyAndOrderFront(nil)
+        refresh()
+    }
+
+    private func buildColorPanel() -> NSPanel {
         let stack = NSStackView()
         stack.orientation = .horizontal
         stack.spacing = 6
-        stack.edgeInsets = NSEdgeInsets(top: 10, left: 12, bottom: 10, right: 12)
-        for color in [RGBColor.red, .blue, .yellow, .green, .white, .black] {
+        stack.edgeInsets = NSEdgeInsets(top: 8, left: 10, bottom: 8, right: 10)
+        for color in Self.colorPalette {
             let dot = colorDotButton(color)
             swatchButtons[color.hexString] = dot
             stack.addArrangedSubview(dot)
@@ -394,7 +451,9 @@ final class OverlayEditorController: NSObject {
             stack.addArrangedSubview(button)
         }
         stack.layoutSubtreeIfNeeded()
-        let container = NSVisualEffectView(frame: NSRect(origin: .zero, size: stack.fittingSize))
+        let size = stack.fittingSize
+
+        let container = NSVisualEffectView(frame: NSRect(origin: .zero, size: size))
         container.material = .hudWindow
         container.state = .active
         container.wantsLayer = true
@@ -402,15 +461,47 @@ final class OverlayEditorController: NSObject {
         container.addSubview(stack)
         stack.frame = container.bounds
 
-        let content = NSViewController()
-        content.view = container
-        let popover = NSPopover()
-        popover.behavior = .transient
-        popover.contentViewController = content
-        popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .maxY)
-        colorPopover = popover
-        refresh()
+        // 用 KeyablePanel：非 key 窗口里的按钮"第一下"会被吞掉，点颜色要点两次。
+        // 键盘不会因此跑掉 —— keyDown 的白名单里把它算作"浮层自己"。
+        let panel = KeyablePanel(contentRect: NSRect(origin: .zero, size: size),
+                                 styleMask: [.borderless, .nonactivatingPanel],
+                                 backing: .buffered, defer: false)
+        panel.level = .statusBar
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.isReleasedWhenClosed = false
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.contentView = container
+        return panel
     }
+
+    private func positionColorPanel(_ panel: NSPanel) {
+        guard let screen = imagePanel?.screen ?? NSScreen.main else { return }
+        panel.setFrameOrigin(Self.colorPanelOrigin(toolbar: toolbarPanel?.frame ?? .zero,
+                                                   panelSize: panel.frame.size,
+                                                   visible: screen.visibleFrame))
+    }
+
+    /// 调色板：6 个颜色（1.0.10 用户口径「颜色 6 个颜色」）。
+    /// 抽成常量是为了自检能盯着数量 —— 以前是散在这里的数组字面量，
+    /// 加一个减一个没人会发现。
+    static let colorPalette: [RGBColor] = [.red, .blue, .yellow, .green, .white, .black]
+
+    /// 颜色面板与工具条的间距
+    static let colorPanelGap: CGFloat = 8
+
+    /// 颜色面板落位（AppKit 坐标，点）：**贴工具条下面**（用户口径），
+    /// 下面顶到可见区底边就翻到工具条上方；横向与工具条左对齐，再夹进可见区。
+    static func colorPanelOrigin(toolbar: CGRect, panelSize: CGSize, visible: CGRect) -> CGPoint {
+        let x = min(max(toolbar.minX, visible.minX + 4), visible.maxX - panelSize.width - 4)
+        let below = toolbar.minY - colorPanelGap - panelSize.height
+        if below >= visible.minY + 4 { return CGPoint(x: x, y: below) }
+        let above = toolbar.maxY + colorPanelGap
+        if above + panelSize.height <= visible.maxY - 4 { return CGPoint(x: x, y: above) }
+        return CGPoint(x: x, y: max(visible.minY + 4, below))
+    }
+
 
     private func showMorePopover(anchor: NSView) {
         if let popover = morePopover, popover.isShown {
@@ -438,6 +529,10 @@ final class OverlayEditorController: NSObject {
         }
         row("text.below.photo", "OCR 识别文字") { [weak self] in self?.ocr(); self?.morePopover?.close() }
         row("qrcode.viewfinder", "解码 QR/条形码") { [weak self] in self?.decodeQR(); self?.morePopover?.close() }
+        row("crop", "裁剪（拖出保留范围，⏎ 应用）") { [weak self] in
+            self?.selectTool(.crop)
+            self?.morePopover?.close()
+        }
         row("pin", "贴图") { [weak self] in self?.pin(); self?.morePopover?.close() }
         row("doc.on.doc", "复制到剪贴板") { [weak self] in self?.copyToClipboard(); self?.morePopover?.close() }
 
@@ -506,7 +601,7 @@ final class OverlayEditorController: NSObject {
 
     private func toolbarButtonWithSender(symbol: String, title: String,
                                          action: @escaping (NSButton) -> Void) -> NSButton {
-        let button = NSButton(title: "", target: nil, action: nil)
+        let button = FirstMouseButton(title: "", target: nil, action: nil)
         button.bezelStyle = .regularSquare
         button.isBordered = false
         button.wantsLayer = true
@@ -525,6 +620,12 @@ final class OverlayEditorController: NSObject {
         let view = NSView(frame: NSRect(x: 0, y: 0, width: 1, height: 32))
         view.wantsLayer = true
         view.layer?.backgroundColor = NSColor.separatorColor.cgColor
+        // 同上：裸 NSView 没有 intrinsicContentSize，在 NSStackView 里会被压成 0 宽
+        view.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            view.widthAnchor.constraint(equalToConstant: 1),
+            view.heightAnchor.constraint(equalToConstant: 32),
+        ])
         return view
     }
 
@@ -564,7 +665,7 @@ final class OverlayEditorController: NSObject {
     // ── 颜色 / 粗细控件 ─────────────────────────────────────
 
     private func colorDotButton(_ color: RGBColor) -> NSButton {
-        let button = NSButton(title: "", target: nil, action: nil)
+        let button = FirstMouseButton(title: "", target: nil, action: nil)
         button.bezelStyle = .regularSquare
         button.isBordered = false
         button.wantsLayer = true
@@ -577,11 +678,19 @@ final class OverlayEditorController: NSObject {
             self?.refresh()
         }
         button.frame = NSRect(x: 0, y: 0, width: 21, height: 32)
+        // 🔴 这几条约束不能省：NSStackView 按 intrinsicContentSize 排，
+        // 而这个按钮 title 为空、只有 layer 底色 → intrinsic 是 0×0，
+        // 整排色块会被压成 0 宽（表现为"颜色面板是空的"）。
+        button.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            button.widthAnchor.constraint(equalToConstant: 21),
+            button.heightAnchor.constraint(equalToConstant: 32),
+        ])
         return button
     }
 
     private func lineWidthButton(_ width: CGFloat) -> NSButton {
-        let button = NSButton(title: "", target: nil, action: nil)
+        let button = FirstMouseButton(title: "", target: nil, action: nil)
         button.bezelStyle = .regularSquare
         button.isBordered = false
         button.wantsLayer = true
@@ -606,6 +715,11 @@ final class OverlayEditorController: NSObject {
             self?.refresh()
         }
         button.frame = NSRect(x: 0, y: 0, width: 27, height: 32)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            button.widthAnchor.constraint(equalToConstant: 27),
+            button.heightAnchor.constraint(equalToConstant: 32),
+        ])
         return button
     }
 
@@ -679,7 +793,9 @@ final class OverlayEditorController: NSObject {
         // Esc / ⌘Z / ⌘S / ⌘C 只在浮层是焦点时生效
         monitors.append(NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, self.imagePanel != nil else { return event }
-            guard event.window === self.imagePanel || event.window === self.toolbarPanel else { return event }
+            guard event.window === self.imagePanel
+                || event.window === self.toolbarPanel
+                || event.window === self.colorPanel else { return event }
             // 文字输入中不抢键盘
             if self.contentView?.isEditingText == true { return event }
             let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
@@ -1256,6 +1372,13 @@ final class OverlayEditorView: NSView {
                                    fontSize: 30 * pixelScale))
         needsDisplay = true
     }
+}
+
+/// 非 key 窗口里的 NSButton 默认 **第一下点击会被吞掉**（acceptsFirstMouse = false）：
+/// 面板一旦失去焦点（点了工具条、点了截图），再点颜色就要连点两次才有反应，
+/// 表现就是"颜色面板点了没反应"。这个子类一律接受首击。
+final class FirstMouseButton: NSButton {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
 private extension NSButton {
