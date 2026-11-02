@@ -91,14 +91,13 @@ final class CameraBubbleController {
 
     // ── 位置 ────────────────────────────────────────────────
 
-    /// 基础边长 = 选区短边的 1/4（夹在 96…200pt），再按设置里的档位放大。
+    /// 取景框边长 = 设置里的档位（大 170 / 中 150 / 小 140 pt）。
     ///
-    /// 刻意用"相对档位"而不是三组绝对值：选区本身可能只有 300pt 宽，
-    /// 固定 200pt 的圆会挡掉半个画面。档位只负责在小/中/大之间挪 10%，
-    /// 基准仍然跟着选区走。用户口径：现在的观感 = 小。
+    /// 只在选区**短边的一半**放不下时才收一收：170pt 的圆压在 300×200 的选区上
+    /// 会把被录的内容盖掉大半，那时按 45% 短边收（最小 96pt）。正常大小的选区
+    /// 完全按设置的数值来 —— 用户要的是"我设 170 就是 170"。
     private func fittedSide(for anchor: CGRect) -> CGFloat {
-        let base = min(200, max(96, min(anchor.width, anchor.height) / 4))
-        return base * size.scale
+        min(size.side, max(96, min(anchor.width, anchor.height) * 0.45))
     }
 
     private func position(_ panel: NSPanel, anchor: CGRect) {

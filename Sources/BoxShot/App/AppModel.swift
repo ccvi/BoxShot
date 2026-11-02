@@ -227,16 +227,22 @@ final class AppModel: ObservableObject {
     }
 
     /// 截好的图按 pending 设定分流：直接复制 / OCR / QR / 原位浮层
+    ///
+    /// 🔴 这里**不播提示音**（1.0.9 用户口径）。"截图完成"指的是这件事有了结果：
+    /// OCR 出字、识别码出内容、复制进剪贴板、保存成文件。只是把画面抓下来、
+    /// 弹出个空浮层不算完成 —— 以前一抓就响，等于每张图都先响一次，
+    /// 后面复制/保存又响一次，用户听到的是一串莫名其妙的叮叮声。
     private func routeCapturedImage(_ image: CGImage, overlayFrame frame: CGRect? = nil,
                                     fullDisplay: OverlayEditorController.FullDisplay? = nil) {
-        playFeedbackSound()
         // 历史先记：不管后面是弹浮层还是直接复制，这张图都得留痕
         ShotHistoryStore.shared.record(image, limit: prefs.value.maxShotHistory)
         switch pendingPipeline {
         case .editor:
             // "截图后弹出标注浮层"关掉时 = 直接复制到剪贴板，不弹任何界面
+            // （这也是"完成"的一种，所以要响）
             if pendingCopyDirectly || !prefs.value.openEditorAfterShot {
                 Support.copyImageToClipboard(image)
+                playFeedbackSound()
             } else if let frame {
                 openOverlayEditor(image: image, frame: frame, fullDisplay: fullDisplay)
             } else {

@@ -49,9 +49,10 @@ enum RecordFileFormat: String, Codable, CaseIterable, Identifiable {
 
 /// 录制时右下角摄像头取景框的大小。
 ///
-/// 三档是"相对倍数"而不是三组绝对值：取景框本身的基准边长要跟着选区大小走
-/// （选区只有 300pt 宽时固定 200pt 的圆会挡掉半个画面），所以只能定相对档位。
-/// 用户口径：现在的观感算「小」，「中」比「小」大 10%，「大」比「中」大 10%。
+/// 用户口径（1.0.9 修订）：直接给边长点数 —— 大 170 / 中 150 / 小 140。
+/// 早前是按选区短边算倍数，用户要的是"我说多大就多大"，所以改成绝对值；
+/// 只在选区本身太小时才收一收（见 `CameraBubbleController.fittedSide`），
+/// 否则取景框会把被录的内容整块盖住。
 enum CameraBubbleSize: String, Codable, CaseIterable, Identifiable {
     case large
     case medium
@@ -65,12 +66,12 @@ enum CameraBubbleSize: String, Codable, CaseIterable, Identifiable {
         case .small:  return "小"
         }
     }
-    /// 相对「小」的倍数
-    var scale: CGFloat {
+    /// 取景框（圆形直径 / 圆角矩形宽度）的边长，单位 pt
+    var side: CGFloat {
         switch self {
-        case .small:  return 1.0
-        case .medium: return 1.1
-        case .large:  return 1.21      // 1.1 × 1.1：大一档再大 10%
+        case .large:  return 170
+        case .medium: return 150
+        case .small:  return 140
         }
     }
 }

@@ -273,10 +273,12 @@ enum SelfTest {
 
         // ── 取景框档位 ──
         do {
-            // 用户口径：现在（小）是基准，中比小大 10%，大比中大 10%
-            check("取景框小 = 基准", abs(CameraBubbleSize.small.scale - 1.0) < 0.0001)
-            check("取景框中比小大 10%", abs(CameraBubbleSize.medium.scale / CameraBubbleSize.small.scale - 1.1) < 0.0001)
-            check("取景框大比中大 10%", abs(CameraBubbleSize.large.scale / CameraBubbleSize.medium.scale - 1.1) < 0.0001)
+            // 用户口径（1.0.9 修订）：绝对值 大 170 / 中 150 / 小 140
+            check("取景框大 = 170pt", CameraBubbleSize.large.side == 170)
+            check("取景框中 = 150pt", CameraBubbleSize.medium.side == 150)
+            check("取景框小 = 140pt", CameraBubbleSize.small.side == 140)
+            check("取景框三档递增", CameraBubbleSize.small.side < CameraBubbleSize.medium.side
+                  && CameraBubbleSize.medium.side < CameraBubbleSize.large.side)
             check("取景框三档标题是 大/中/小",
                   CameraBubbleSize.large.title == "大"
                   && CameraBubbleSize.medium.title == "中"
