@@ -169,11 +169,33 @@ final class AppModel: ObservableObject {
         selector.begin(highlightWindows: windowPickMode || prefs.value.windowHighlight,
                        crosshair: windowPickMode ? false : prefs.value.showCrosshair,
                        // 窗口模式是"点窗口"，放大镜会正好盖住要点的标题栏，不给
-                       loupe: windowPickMode ? nil : Loupe.Config(prefs.value))
+                       loupe: windowPickMode ? nil : Loupe.Config(prefs.value),
+                       // 但窗口模式**要底图**：瞬态弹窗（Edge 的「扫描 QR 码」这类）
+                       // 会在遮罩弹出的一瞬间自己关掉，那时 SCK 已经查不到它了，
+                       // 只能靠这张"点选那一刻"的整屏图按窗口框裁一块顶上。
+                       needBackdrop: windowPickMode)
     }
 
     /// 诊断用：选区遮罩是不是还开着（--esctest 拿它判断 Esc 到底生效没有）
     var isRegionSelectorActive: Bool { regionSelector?.isActive ?? false }
+
+    /// 诊断用：拿当前遮罩的底图按全局矩形裁一块（--wintest 验坐标换算）
+    func diagnosticBackdropCrop(globalRect: CGRect) -> CGImage? {
+        regionSelector?.cropBackdrop(globalRect: globalRect)
+    }
+
+    /// 诊断用：伪造一次"点选了这个窗口"，把**窗口已关闭的兜底路径**真跑一遍。
+    /// 传一个不存在的 windowID，SCK 必然查不到 → 只能走底图裁剪。
+    @discardableResult
+    func diagnosticSimulateWindowConfirm(windowID: CGWindowID, frame: CGRect) -> Bool {
+        guard let selector = regionSelector else { return false }
+        let display = selector.currentDisplayID
+        selector.finishForDiagnostics()
+        let fake = ScreenWindowInfo(windowID: windowID, frame: frame,
+                                    ownerName: "诊断", title: "已关闭的假窗口")
+        regionSelector(selector, didConfirmWindow: fake, displayID: display)
+        return true
+    }
 
     /// 收掉可能还留在屏上的选区遮罩（重复触发截图/录制时用）
     private func discardActiveSelector() {
@@ -528,29 +550,43 @@ extension AppModel: RegionSelectionDelegate {
 
     func regionSelector(_ selector: RegionSelector, didConfirmWindow window: ScreenWindowInfo, displayID: CGDirectDisplayID) {
         Task { @MainActor in
+            var image: CGImage?
             do {
-                let image = try await ScreenCapture.captureWindow(window)
-                // 窗口截图同样原位钉住（框 = 窗口框）
-                let frame = ScreenCapture.appKitFrame(fromGlobalTopLeft: window.frame)
-
-                // 🔴 窗口截图以前**不带整屏原图**，两个毛病一起冒：
-                //   1. canResize = false → 截图框拖不动（用户："也可以调整大小"）；
-                //   2. 浮层窗口 = 窗口框 + 上下留白，框一高就顶出屏幕，AppKit 的
-                //      constrainFrameRect 会把整个窗口往下推，图跟着错位
-                //      （用户："自动捕捉大窗口时，截图框不要移动"）。
-                // 现在给它一份 FullDisplay：裁切基准 = 窗口图 + 窗口框（扩不出去，
-                // 因为 commitResize 会 intersection 到这个框），浮层铺满整块屏幕。
-                let displayFrame = ScreenCapture.appKitFrame(
-                    fromGlobalTopLeft: ScreenCapture.displayBoundsGlobal(displayID))
-                let scale = CGFloat(image.width) / max(1, frame.width)
-                let full = OverlayEditorController.FullDisplay(image: image,
-                                                               frameAppKit: frame,
-                                                               pixelScale: scale,
-                                                               panelFrameAppKit: displayFrame)
-                self.routeCapturedImage(image, overlayFrame: frame, fullDisplay: full)
+                image = try await ScreenCapture.captureWindow(window)
             } catch {
-                self.presentError("窗口截图失败：\(error.localizedDescription)")
+                // 🔴 窗口可能在遮罩弹出的一瞬间自己关掉：Edge「扫描 QR 码」这种瞬态面板
+                // 在应用失焦时会自行消失（我们一 NSApp.activate 它就没了），
+                // 之后按 windowID 去 SCK 查必然找不到 → 「目标窗口已关闭或不可截取」。
+                // 遮罩出现**之前**我们抓过一张整屏底图，那一刻窗口还在，按它的框裁一块，
+                // 用户拿到的正是点选时看到的画面 —— 比弹个错误有用得多。
+                if let fallback = selector.cropBackdrop(globalRect: window.frame) {
+                    NSLog("[BoxShot] 窗口 %u（%@）已不可截取，改用底图裁剪 %dx%d",
+                          window.windowID, window.ownerName, fallback.width, fallback.height)
+                    image = fallback
+                } else {
+                    self.presentError("窗口截图失败：\(error.localizedDescription)")
+                }
             }
+            guard let image else { return }
+
+            // 窗口截图同样原位钉住（框 = 窗口框）
+            let frame = ScreenCapture.appKitFrame(fromGlobalTopLeft: window.frame)
+
+            // 🔴 窗口截图以前**不带整屏原图**，两个毛病一起冒：
+            //   1. canResize = false → 截图框拖不动（用户："也可以调整大小"）；
+            //   2. 浮层窗口 = 窗口框 + 上下留白，框一高就顶出屏幕，AppKit 的
+            //      constrainFrameRect 会把整个窗口往下推，图跟着错位
+            //      （用户："自动捕捉大窗口时，截图框不要移动"）。
+            // 现在给它一份 FullDisplay：裁切基准 = 窗口图 + 窗口框（扩不出去，
+            // 因为 commitResize 会 intersection 到这个框），浮层铺满整块屏幕。
+            let displayFrame = ScreenCapture.appKitFrame(
+                fromGlobalTopLeft: ScreenCapture.displayBoundsGlobal(displayID))
+            let scale = CGFloat(image.width) / max(1, frame.width)
+            let full = OverlayEditorController.FullDisplay(image: image,
+                                                           frameAppKit: frame,
+                                                           pixelScale: scale,
+                                                           panelFrameAppKit: displayFrame)
+            self.routeCapturedImage(image, overlayFrame: frame, fullDisplay: full)
         }
         releaseSelector(selector)
     }

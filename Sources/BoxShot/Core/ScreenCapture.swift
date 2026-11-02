@@ -147,8 +147,17 @@ enum ScreenCapture {
 
     /// 截取单个窗口（点选窗口模式）
     static func captureWindow(_ window: ScreenWindowInfo) async throws -> CGImage {
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-        guard let scWindow = content.windows.first(where: { $0.windowID == window.windowID }) else {
+        var content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        var scWindow = content.windows.first(where: { $0.windowID == window.windowID })
+        if scWindow == nil {
+            // 我们的全屏遮罩一出场，目标窗口可能刚好被判成"不在屏上"（被遮住的瞬态面板），
+            // 放宽到全部窗口再查一次 —— windowID 对得上就能截。
+            content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+            scWindow = content.windows.first(where: { $0.windowID == window.windowID })
+        }
+        guard let scWindow else {
+            NSLog("[BoxShot] captureWindow 找不到 windowID=%u（owner=%@）",
+                  window.windowID, window.ownerName)
             throw CaptureError.windowNotFound
         }
         let filter = SCContentFilter(desktopIndependentWindow: scWindow)

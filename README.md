@@ -311,6 +311,29 @@ let ownWindows = content.windows.filter {
 - 🔴 **时间轴补偿必须用 PTS 算，不能用墙钟**：SCStream 的 PTS 来自主机时钟，两者刻度不同，混用会得出离谱的偏移量。
 - 暂停期间音频也要丢，恢复后的音频缓冲用 `CMSampleBufferCreateCopyWithNewTiming` 重编时间戳；视频侧只要有过暂停就走 `CVPixelBuffer` 合成路径（零拷贝直通无法改时间戳），所以 `CIContext` 现在一律创建，不再只在开摄像头时才建。
 
+## 窗口截图：窗口在遮罩弹出的一瞬间自己没了
+
+用户报「窗口截图失败：目标窗口已关闭或不可截取」。查下来不是名单对不上（`--wintest` 把
+`CGWindowList` 和 `SCShareableContent` 的 windowID 逐个比过，差集为 0），而是**时序**：
+
+Edge 的「扫描 QR 码」这类面板是**瞬态弹窗**，应用一失焦就自己关掉。我们的全屏遮罩为了让键盘
+（Esc / 回车 / 方向键）生效必须 `NSApp.activate(ignoringOtherApps:)` —— 一激活，那个窗口就没了；
+等到按 `windowID` 去 `SCShareableContent` 查，自然查不到。
+
+三层处理，从"尽量拿到最好的"到"至少别给个死胡同"：
+
+1. `captureWindow` 先按 `onScreenWindowsOnly: true` 查；查不到**放宽到 `false` 再查一次**
+   （遮罩把它们盖住时可能被判成"不在屏上"）。
+2. 还查不到，就用**遮罩出现之前抓的那张整屏底图**按窗口框裁一块顶上
+   （`RegionSelector.cropBackdrop(globalRect:)`）。那张图拍的时候窗口还在，裁出来正是用户
+   点选那一刻看到的画面 —— 这比一个错误弹窗有用得多。为此窗口点选模式现在也要抓底图
+   （`begin(needBackdrop: true)`），代价是一次 ~130ms 的整屏截图。
+3. 两条路都没有才报错。
+
+🔴 坐标换算别想当然：窗口框是**全局左上原点**，底图是**显示器像素**。要先用
+`displayBoundsGlobal(displayID).origin` 减掉显示器原点，再乘 `pixelScale`。`--wintest` 会把
+裁剪结果落成 `/tmp/boxshot-backdrop-crop.png`，拿 `screencapture -R 同一个框` 一对比就知道对不对。
+
 ## 扫码：解不出不是码的问题，是喂进去那张图的问题
 
 「Edge / Chrome 分享 → 二维码」生成的是**圆点模块 + 圆角定位图案**，不是标准方块 QR。Vision 的
@@ -550,6 +573,7 @@ Resources/
 | `--recordcamera` | 上屏取景框 → 全屏录 4 秒 → 从成片里抽 2.0s 处一帧存 `/tmp/boxshot-recordcamera-frame.jpg`。日志里带 `排除 N 个 · 保留 M 个` 的排除报告，验「录出来的视频有没有摄像头画面」只能靠它 |
 | `/tmp/boxshot-recordcamera.trigger` | 同上，标记文件触发 |
 | `--pintest` | 钉一张「上红下蓝」的 400×200 合成图 → 记窗口 frame → 投一次 80pt 的 HID 拖拽 → 比对 Δy。日志 `/tmp/boxshot-pintest.log`，同时验证"朝向对不对"（截图看红条在上面）和"能不能拖" |
+| `--wintest` | 窗口截图的名单对账：开遮罩 → 列 `CGWindowList` 与 `SCShareableContent`（含 `onScreenWindowsOnly` 两种）→ 打差集 → 落一张底图裁剪样张 → 再**伪造一次「窗口已关闭」**把兜底路径跑通 |
 | `--qrtest` | 用**应用自己的解码器**跑一张图（路径写在 `/tmp/boxshot-qrtest.trigger` 里），日志 `/tmp/boxshot-qrtest.log`。标准 Vision 能解、应用里解不出，那问题一定在喂进去的那张图上 |
 | `--qrflow` | 完整走一遍扫码链路：CoreImage 现生成一张二维码 → 钉成原位浮层 → 调 `runQR` → 打印每个窗口的 `level` 与 frame（验「结果窗有没有被浮层盖住」），窗口留 8 秒给人截图 |
 | `--captest` | 真抓一次整屏，落 `/tmp/boxshot-capture.png` 并采样几个点色值。放大镜里的像素和截图内容都出自这一次 `captureDisplay`，它是白的则上面全白 |

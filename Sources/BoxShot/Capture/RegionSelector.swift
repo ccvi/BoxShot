@@ -38,6 +38,10 @@ final class RegionSelector: NSObject {
     /// 按键事件还是本应用收到的，本地监听能先一步接住。
     private var escMonitor: Any?
     private(set) var isActive = false
+    /// 诊断用（--wintest 伪造窗口确认时要带 displayID）
+    var currentDisplayID: CGDirectDisplayID { displayID }
+    /// 诊断用：等价于"用户确认后收起遮罩"（finish 是 fileprivate）
+    func finishForDiagnostics() { finish() }
 
     /// 放大镜设置快照（nil / enabled=false 就不抓底图、也不画）
     private var loupeConfig: Loupe.Config?
@@ -48,7 +52,10 @@ final class RegionSelector: NSObject {
     /// 🔴 顺序：**先抓底图，再上遮罩**。
     /// 反过来（先 show 再抓）抓到的是"已经被自己压暗 28%"的画面，放大镜里的
     /// 色值会整体偏暗、拿去做设计全是错的。代价是遮罩晚 ~100ms 出现。
-    func begin(highlightWindows: Bool, crosshair: Bool, loupe: Loupe.Config?) {
+    /// - Parameter needBackdrop: 即使不开放大镜也要抓底图（窗口点选模式要它兜底，
+    ///   见 `cropBackdrop`）
+    func begin(highlightWindows: Bool, crosshair: Bool, loupe: Loupe.Config?,
+               needBackdrop: Bool = false) {
         guard !isActive else { return }
         guard window == nil else { return }
 
@@ -60,10 +67,11 @@ final class RegionSelector: NSObject {
 
         Task { @MainActor in
             var image: CGImage?
-            if loupe?.enabled == true {
+            if loupe?.enabled == true || needBackdrop {
                 let started = Date()
                 image = try? await ScreenCapture.captureDisplay(self.displayID)
-                NSLog("[BoxShot] 放大镜底图 %.0fms %@",
+                // 这张图两个用途：放大镜取像素 / 窗口截图的兜底裁剪
+                NSLog("[BoxShot] 选区底图 %.0fms %@",
                       Date().timeIntervalSince(started) * 1000,
                       image == nil ? "失败" : "\(image!.width)×\(image!.height)")
             }
@@ -177,6 +185,26 @@ final class RegionSelector: NSObject {
             _ = view
             _ = panel
         }
+    }
+
+    /// 按"全局左上原点"的矩形，从**遮罩出现之前**抓的那张整屏底图里裁一块。
+    ///
+    /// 用在窗口截图的兜底：Edge「扫描 QR 码」这类瞬态弹窗在应用失焦时会自己关掉，
+    /// 我们的全屏遮罩一 `NSApp.activate` 它可能就没了 —— 这时按 windowID 去
+    /// `SCShareableContent` 查是查不到的（报「目标窗口已关闭或不可截取」）。
+    /// 底图是遮罩出现前抓的，那一刻窗口还在，裁出来正好是用户点选时看到的画面。
+    func cropBackdrop(globalRect: CGRect) -> CGImage? {
+        guard let image = sourceImage else { return nil }
+        let displayOrigin = ScreenCapture.displayBoundsGlobal(displayID).origin
+        let rect = CGRect(x: (globalRect.minX - displayOrigin.x) * pixelScale,
+                          y: (globalRect.minY - displayOrigin.y) * pixelScale,
+                          width: globalRect.width * pixelScale,
+                          height: globalRect.height * pixelScale).integral
+        let clamped = rect.intersection(CGRect(x: 0, y: 0,
+                                               width: CGFloat(image.width),
+                                               height: CGFloat(image.height)))
+        guard clamped.width >= 8, clamped.height >= 8 else { return nil }
+        return image.cropping(to: clamped)
     }
 
     // ── 遮罩视图 ─────────────────────────────────────────────

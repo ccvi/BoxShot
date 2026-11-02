@@ -2,6 +2,7 @@ import AppKit
 import AVFoundation
 import CoreImage
 import Foundation
+import ScreenCaptureKit
 
 // ============================================================
 // 应用装配
@@ -157,6 +158,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
                 self?.runPinDiagnostics()
             }
+        }
+        // 诊断入口：--wintest 对比 CGWindowList 与 SCShareableContent 的窗口名单
+        let winTestTrigger = "/tmp/boxshot-wintest.trigger"
+        if CommandLine.arguments.contains("--wintest")
+            || FileManager.default.fileExists(atPath: winTestTrigger) {
+            try? FileManager.default.removeItem(atPath: winTestTrigger)
+            runWindowDiagnostics()
+            return
         }
         // 诊断入口：--qrflow 完整走一遍扫码链路（生成码 → 浮层 → 解码 → 打窗口层级）
         let qrFlowTrigger = "/tmp/boxshot-qrflow.trigger"
@@ -607,6 +616,87 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 诊断入口：`--loupetest` 把放大镜**离屏渲染**成 PNG（/tmp/boxshot-loupe.png）。
     /// 放大镜里三行信息、色块、网格对位这些 12pt 级排版，光读代码判断不了；
     /// 离屏画一遍既不用截图权限，也不用真去拖一个选区。
+    /// 诊断入口：`--wintest` 「窗口截图」为什么报「目标窗口已关闭或不可截取」。
+    ///
+    /// 两步枚举用的不是同一套 API：
+    ///   · 列表来自 `CGWindowListCopyWindowInfo(.optionOnScreenOnly)`（点选时看到的那个框）
+    ///   · 真正截图靠 `SCShareableContent`（按 windowID 再查一次）
+    /// 两边对不上就抛 windowNotFound。所以先把两边的 windowID 各列一遍，差集就是答案。
+    /// 会先把截图遮罩打开再比 —— 遮罩是 level=.screenSaver 的全屏窗口，
+    /// 正是"目标窗口被我们盖住"的现场。
+    private func runWindowDiagnostics() {
+        let logURL = URL(fileURLWithPath: "/tmp/boxshot-wintest.log")
+        try? "".write(to: logURL, atomically: true, encoding: .utf8)
+        func log(_ text: String) {
+            NSLog("[BoxShot][wintest] %@", text)
+            guard let handle = try? FileHandle(forWritingTo: logURL) else { return }
+            handle.seekToEndOfFile()
+            handle.write("\(text)\n".data(using: .utf8)!)
+            try? handle.close()
+        }
+
+        // 先开遮罩：窗口点选模式的现场
+        model.perform(.windowShot)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            Task { @MainActor in
+                let list = ScreenCapture.onScreenWindows()
+                log("CGWindowList 列出 \(list.count) 个可点窗口")
+                for item in list.prefix(12) {
+                    log("  CG id=\(item.windowID) \(item.ownerName) 「\(item.title ?? "")」 \(item.frame)")
+                }
+
+                // 顺手验一下底图裁剪的坐标换算：拿第一个窗口的框去裁，
+                // 落成 PNG 后拿 `screencapture -R 同一个框` 对一眼就知道对不对。
+                if let first = list.first,
+                   let crop = self.model.diagnosticBackdropCrop(globalRect: first.frame) {
+                    let rep = NSBitmapImageRep(cgImage: crop)
+                    if let data = rep.representation(using: .png, properties: [:]) {
+                        try? data.write(to: URL(fileURLWithPath: "/tmp/boxshot-backdrop-crop.png"),
+                                        options: .atomic)
+                        log("底图裁剪 id=\(first.windowID) frame=\(first.frame) → \(crop.width)×\(crop.height)")
+                    }
+                } else {
+                    log("❌ 底图裁剪拿不到（needBackdrop 没生效？）")
+                }
+
+                // 再伪造一次"点了这个窗口"，但给个不存在的 windowID：
+                // 必然走"窗口已关闭"的兜底，验底图裁剪能不能顶上。
+                if let first = list.first {
+                    let ok = self.model.diagnosticSimulateWindowConfirm(windowID: 999_999,
+                                                                       frame: first.frame)
+                    log(ok ? "已伪造窗口确认（id=999999），兜底路径应当已跑" : "❌ 没有活跃的遮罩")
+                }
+
+                do {
+                    let onScreen = try await SCShareableContent
+                        .excludingDesktopWindows(false, onScreenWindowsOnly: true)
+                    let all = try await SCShareableContent
+                        .excludingDesktopWindows(false, onScreenWindowsOnly: false)
+                    let onScreenIDs = Set(onScreen.windows.map(\.windowID))
+                    let allIDs = Set(all.windows.map(\.windowID))
+                    log("SCK onScreenWindowsOnly=true → \(onScreen.windows.count) 个窗口")
+                    log("SCK onScreenWindowsOnly=false → \(all.windows.count) 个窗口")
+
+                    let missingOnScreen = list.filter { !onScreenIDs.contains($0.windowID) }
+                    let missingAll = list.filter { !allIDs.contains($0.windowID) }
+                    log("❗️按 onScreenOnly=true 查不到的有 \(missingOnScreen.count) 个")
+                    for item in missingOnScreen {
+                        log("   ✗ id=\(item.windowID) \(item.ownerName) 「\(item.title ?? "")」")
+                    }
+                    log("❗️按 onScreenOnly=false 仍查不到的有 \(missingAll.count) 个")
+                    for item in missingAll {
+                        log("   ✗ id=\(item.windowID) \(item.ownerName) 「\(item.title ?? "")」")
+                    }
+                } catch {
+                    log("❌ SCShareableContent 抛错：\(error)")
+                }
+                // 伪造确认会开一个 Task 去抓图（SCK 要几十毫秒），
+                // 这里多等几秒再退，否则兜底那条日志还没打出来进程就没了
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3) { exit(0) }
+            }
+        }
+    }
+
     /// 诊断入口：`--qrflow` 走一遍完整的扫码链路，人不用在场：
     /// 用 CoreImage 现生成一张真二维码 → 钉成原位浮层（和截图后一模一样）
     /// → 调 `runQR` → 把结果窗口的层级 / 是否被浮层盖住打进日志，然后留 8 秒给人截图看。
