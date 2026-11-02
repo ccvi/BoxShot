@@ -49,7 +49,12 @@ final class PinManager {
     @discardableResult
     func pinText(_ text: String, opacity: Double, shadow: Bool) -> Bool {
         guard let image = Self.renderTextToImage(text) else { return false }
-        return pinImage(image, opacity: opacity, shadow: shadow)
+        // 同时留下原文字：内容视图会换成可选中的 NSTextView，位图只用于复制/落盘
+        guard let pin = PinWindow(image: image, opacity: opacity, shadow: shadow, text: text) else {
+            return false
+        }
+        place(pin)
+        return true
     }
 
     @discardableResult
@@ -183,6 +188,8 @@ final class PinManager {
         /// 旧记录没有这个字段（解码成 nil），那时的 scale 是从 0.5 起算的，
         /// 直接套用会让恢复出来的贴图小一半 —— 见 restoreHistory。
         var v: Int?
+        /// 文本贴图的原文（nil = 普通图片贴图）。老记录没有这个键，解码成 nil。
+        var text: String?
     }
 
     static var pinsDirectory: URL {
@@ -199,7 +206,7 @@ final class PinManager {
         for record in records.suffix(limit) {
             let url = Self.pinsDirectory.appendingPathComponent(record.file)
             guard let image = NSImage(contentsOf: url)?.cgImage(forProposedRect: nil, context: nil, hints: nil),
-                  let pin = PinWindow(image: image, opacity: 1.0, shadow: true) else { continue }
+                  let pin = PinWindow(image: image, opacity: 1.0, shadow: true, text: record.text) else { continue }
             pin.onClose = { [weak self, weak pin] in
                 self?.pins.removeAll { $0 === pin }
                 self?.persistIndex()
@@ -236,6 +243,10 @@ final class PinWindow: NSPanel {
     var onStateChanged: (() -> Void)?
 
     private let image: CGImage
+    /// 内容视图要拿原图（复制图片 / 计算尺寸），开个只读口子
+    var pinnedImage: CGImage { image }
+    /// 文本贴图的原文。非 nil 时内容视图换成可选中的 NSTextView（用户要求"贴图上的文字可以选择"）
+    let text: String?
     private var scale: CGFloat
     var flippedH = false
     var flippedV = false
@@ -246,8 +257,9 @@ final class PinWindow: NSPanel {
         NSScreen.main?.backingScaleFactor ?? 2
     }
 
-    init?(image: CGImage, opacity: Double, shadow: Bool) {
+    init?(image: CGImage, opacity: Double, shadow: Bool, text: String? = nil) {
         self.image = image
+        self.text = text
         // 🔴 `scale` 是"相对 1:1 显示的倍数"（applyScale 里 baseW × scale），
         // 所以初始值必须是 **1.0**。以前写成 1/baseDisplayScale（= 0.5），
         // 于是窗口一被 applyScale 重排（首次缩放 / 从历史恢复）就变成**一半大**
@@ -268,9 +280,31 @@ final class PinWindow: NSPanel {
         hasShadow = shadow
         isMovable = true
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        appearance = NSAppearance(named: .vibrantDark)
-        contentView = PinContentView(image: image, window: self)
+        // 🔴 文本贴图**不能**套 vibrantDark：`textBackgroundColor` / `textColor` 会跟着
+        // 解析成黑底白字，而落盘/复制用的位图是在应用当前外观下渲染的（浅色模式就是白底黑字）
+        // —— 两张一对不上，用户看到的就是"眼睛读的和复制出来的不是同一个东西"。
+        appearance = text == nil ? NSAppearance(named: .vibrantDark) : nil
+        // 文本贴图用可选中的文本视图，图片贴图照旧走 draw 路径
+        if let text {
+            contentView = PinTextContentView(text: text, window: self)
+        } else {
+            contentView = PinContentView(image: image, window: self)
+        }
         alphaValue = opacity
+    }
+
+    // ── 置顶 ──
+
+    /// 贴图默认就在 `.floating`（浮在普通窗口之上）。这个按钮是"取消/恢复"它：
+    /// 想让贴图沉到当前应用后面看东西时点一下，再点回来。
+    var isOnTop: Bool { level == .floating }
+
+    func toggleOnTop() {
+        level = isOnTop ? .normal : .floating
+        // level 变了窗口可能要重排，再 orderFront 一次才真的换层
+        orderFrontRegardless()
+        (contentView as? PinSurfaceView)?.refreshOnTopButton()
+        onStateChanged?()
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -373,29 +407,33 @@ final class PinWindow: NSPanel {
         }
         return PinManager.PinRecord(file: archivedFile!,
                                     x: frame.origin.x, y: frame.origin.y,
-                                    scale: Double(scale), v: 2)
+                                    scale: Double(scale), v: 2, text: text)
     }
 
-    // 贴图不是标准可激活窗口；双击/滚轮交互全在内容视图里
-    override var canBecomeKey: Bool { false }
+    // 贴图不是标准可激活窗口；但文本贴图必须能成为 key window，
+    // 否则 NSTextView 拿不到 first responder —— 选得出来却 ⌘C 复制不了。
+    override var canBecomeKey: Bool { text != nil }
 }
 
-// ── 贴图内容视图：拖拽 / 缩放 / 双击 / 右键 ──
+// ── 贴图内容视图：拖拽 / 缩放 / 双击 / 右键 / 悬停置顶按钮 ──
 
-final class PinContentView: NSView {
+/// 两张内容视图（图片 / 文本）的公共部分：拖拽、滚轮缩放、双击、右键菜单、
+/// 以及**鼠标悬停才露出来的置顶按钮**。悬停才显示是有意的：平时贴图要干净，
+/// 按钮常驻会切掉画面右上角一块。
+class PinSurfaceView: NSView {
 
-    private let image: CGImage
-    private unowned let window_: PinWindow
+    unowned let window_: PinWindow
+    private var onTopButton: NSButton?
+    private var hoverArea: NSTrackingArea?
+
     private var dragStartOrigin: NSPoint?
     /// 按下时的鼠标屏幕坐标（拖拽用屏幕坐标差，见 mouseDragged）
     private var dragStartMouse: NSPoint?
 
-    init(image: CGImage, window: PinWindow) {
-        self.image = image
+    init(window: PinWindow) {
         self.window_ = window
-        super.init(frame: NSRect(origin: .zero,
-                                 size: NSSize(width: CGFloat(image.width) / (NSScreen.main?.backingScaleFactor ?? 2),
-                                              height: CGFloat(image.height) / (NSScreen.main?.backingScaleFactor ?? 2))))
+        super.init(frame: .zero)
+        buildOnTopButton()
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -405,6 +443,160 @@ final class PinContentView: NSView {
     /// 非 key 窗口里默认**第一下点击会被吞掉**（acceptsFirstMouse 默认 false）：
     /// 贴图点下去没反应、要拖两下才动，一半原因是这个。
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    // ── 置顶按钮 ──
+
+    private func buildOnTopButton() {
+        let symbol = NSImage(systemSymbolName: "pin.fill", accessibilityDescription: "置顶")
+        let button = FirstMouseButton(image: symbol ?? NSImage(),
+                                      target: self,
+                                      action: #selector(toggleOnTop))
+        button.isBordered = false
+        button.bezelStyle = .regularSquare
+        button.imagePosition = .imageOnly
+        button.isHidden = true
+        button.wantsLayer = true
+        button.layer?.cornerRadius = 11
+        button.layer?.masksToBounds = true
+        addSubview(button)
+        onTopButton = button
+        refreshOnTopButton()
+    }
+
+    override func layout() {
+        super.layout()
+        // 按钮钉在右上角（本视图 isFlipped，y 从上算）
+        let side: CGFloat = 22
+        onTopButton?.frame = NSRect(x: max(4, bounds.width - side - 6), y: 6,
+                                    width: side, height: side)
+    }
+
+    /// 置顶态：白底 + accent 实心图钉；普通态：半透明黑底 + 白色空心图钉
+    func refreshOnTopButton() {
+        guard let button = onTopButton else { return }
+        let onTop = window_.isOnTop
+        button.image = NSImage(systemSymbolName: onTop ? "pin.fill" : "pin",
+                               accessibilityDescription: "置顶")
+        button.contentTintColor = onTop ? .controlAccentColor : .white
+        button.layer?.backgroundColor = (onTop
+            ? NSColor.white.withAlphaComponent(0.92)
+            : NSColor.black.withAlphaComponent(0.5)).cgColor
+        button.toolTip = onTop ? "已置顶（点击取消）" : "置顶显示"
+    }
+
+    @objc private func toggleOnTop() { window_.toggleOnTop() }
+
+    // ── 悬停显示 / 隐藏按钮 ──
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let area = hoverArea { removeTrackingArea(area) }
+        let area = NSTrackingArea(rect: bounds,
+                                  options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                  owner: self, userInfo: nil)
+        addTrackingArea(area)
+        hoverArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) { onTopButton?.isHidden = false }
+    override func mouseExited(with event: NSEvent) { onTopButton?.isHidden = true }
+
+    // ── 拖拽 / 缩放 / 双击 ──
+
+    func beginWindowDrag() {
+        dragStartOrigin = window_.frame.origin
+        dragStartMouse = NSEvent.mouseLocation
+    }
+
+    func continueWindowDrag() {
+        guard let origin = dragStartOrigin, let start = dragStartMouse else { return }
+        let now = NSEvent.mouseLocation
+        window_.moveTo(CGPoint(x: origin.x + (now.x - start.x),
+                               y: origin.y + (now.y - start.y)))
+    }
+
+    /// 返回这一轮拖拽移动了多少点（mouseUp 用来判断"是拖动还是双击"）
+    @discardableResult
+    func endWindowDrag() -> CGFloat {
+        let moved = dragStartOrigin.map { start in
+            hypot(window_.frame.origin.x - start.x, window_.frame.origin.y - start.y)
+        } ?? 0
+        dragStartOrigin = nil
+        dragStartMouse = nil
+        return moved
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        beginWindowDrag()
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        // 🔴 用**屏幕坐标差**，不要用 `event.deltaX/deltaY`：
+        //   · delta 是增量，可 origin 是 mouseDown 时记的、之后没更新 →
+        //     写成 `origin + delta` 每帧都把窗口摆回"起点 + 一点点"，看着就是**拖不动**；
+        //   · 更坑的是**合成事件（CGEvent）里 delta 恒为 0**，这条路根本验不出来。
+        // 屏幕坐标差对两者都成立，也不受"窗口自己在动"的影响
+        // （locationInWindow 会随窗口移动而变，越拖越飘）。
+        continueWindowDrag()
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        let moved = endWindowDrag()
+        if moved < 3, event.clickCount == 2 {
+            window_.handleDoubleClick()
+        } else if moved >= 3 {
+            window_.onStateChanged?()
+        }
+    }
+
+    // 滚轮缩放（保持左上角不动；向上滚 = 放大）
+    override func scrollWheel(with event: NSEvent) {
+        let factor = pow(1.1, event.scrollingDeltaY / 4)
+        window_.zoom(by: factor)
+    }
+
+    // 右键菜单：置顶 / 翻转 / 复制 / 关闭
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let menu = NSMenu()
+        menu.addItem(withTitle: window_.isOnTop ? "取消置顶" : "置顶显示",
+                     action: #selector(menuToggleOnTop), keyEquivalent: "").target = self
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "水平翻转", action: #selector(flipH), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "垂直翻转", action: #selector(flipV), keyEquivalent: "").target = self
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "复制图片", action: #selector(copyImage), keyEquivalent: "").target = self
+        if let text = window_.text, !text.isEmpty {
+            menu.addItem(withTitle: "复制全部文字", action: #selector(copyAllText), keyEquivalent: "").target = self
+        }
+        menu.addItem(withTitle: "关闭贴图", action: #selector(closePin), keyEquivalent: "").target = self
+        return menu
+    }
+
+    @objc private func menuToggleOnTop() { window_.toggleOnTop() }
+    @objc private func flipH() { window_.toggleMirrorH() }
+    @objc private func flipV() { window_.toggleMirrorV() }
+    @objc private func copyImage() { Support.copyImageToClipboard(window_.pinnedImage) }
+    @objc private func copyAllText() {
+        if let text = window_.text { Support.copyTextToClipboard(text) }
+    }
+    @objc private func closePin() { window_.close() }
+}
+
+// ── 图片贴图 ──
+
+final class PinContentView: PinSurfaceView {
+
+    private let image: CGImage
+
+    init(image: CGImage, window: PinWindow) {
+        self.image = image
+        super.init(window: window)
+        frame = NSRect(origin: .zero,
+                       size: NSSize(width: CGFloat(image.width) / (NSScreen.main?.backingScaleFactor ?? 2),
+                                    height: CGFloat(image.height) / (NSScreen.main?.backingScaleFactor ?? 2)))
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
 
     override func draw(_ dirtyRect: NSRect) {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
@@ -430,57 +622,101 @@ final class PinContentView: NSView {
         ctx.draw(image, in: imageRect)
         ctx.restoreGState()
     }
+}
 
-    // 拖拽移动
+// ── 文本贴图：可选中的文字 ──
+
+/// 文本贴图的容器：画背景 + 装一个可选中的 NSTextView。
+/// 拖拽只认**四周的留白边**（12pt），文字区域留给选字 ——
+/// 想直接抓住文字拖窗口就按住 ⌘（见 PinSelectableTextView）。
+final class PinTextContentView: PinSurfaceView {
+
+    private let textView: PinSelectableTextView
+
+    /// 和 `PinManager.renderTextToImage` 的 `margin` 保持一致：
+    /// 位图和文本视图的边距必须一样，否则"选文字"和"复制出来的图"两种观感对不上。
+    private static let margin: CGFloat = 12
+
+    init(text: String, window: PinWindow) {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineSpacing = 3
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 14),
+            .foregroundColor: NSColor.textColor,
+            .paragraphStyle: paragraph,
+        ]
+        textView = PinSelectableTextView(frame: .zero)
+        super.init(window: window)
+        textView.window_ = window
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.isRichText = false
+        textView.drawsBackground = false
+        textView.textContainerInset = .zero
+        textView.textContainer?.lineFragmentPadding = 0
+        textView.textStorage?.setAttributedString(NSAttributedString(string: text, attributes: attributes))
+        textView.autoresizingMask = [.width, .height]
+        addSubview(textView)
+        // 置顶按钮要压在最上面：addSubview 顺序在基类构造里已经加过一次，
+        // 这里重新把它提上来（文本视图盖住整块，不提就会把按钮盖掉）
+        if let button = subviews.first(where: { $0 is NSButton }) {
+            addSubview(button, positioned: .above, relativeTo: textView)
+        }
+        frame = NSRect(origin: .zero,
+                       size: NSSize(width: CGFloat(window.pinnedImage.width) / (NSScreen.main?.backingScaleFactor ?? 2),
+                                    height: CGFloat(window.pinnedImage.height) / (NSScreen.main?.backingScaleFactor ?? 2)))
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    override func layout() {
+        super.layout()
+        textView.frame = bounds.insetBy(dx: Self.margin, dy: Self.margin)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        // 文本贴图的背景：跟 renderTextToImage 用的 textBackgroundColor 一致
+        NSColor.textBackgroundColor.setFill()
+        bounds.fill()
+    }
+}
+
+/// 可选中的文本视图。⌘ + 拖 = 移动整个贴图窗口；
+/// 不按 ⌘ 就是正常的选字（不调 super 的话连光标都放不进去）。
+final class PinSelectableTextView: NSTextView {
+
+    weak var window_: PinWindow?
+    private var dragStartOrigin: NSPoint?
+    private var dragStartMouse: NSPoint?
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
     override func mouseDown(with event: NSEvent) {
-        dragStartOrigin = window_.frame.origin
-        dragStartMouse = NSEvent.mouseLocation
+        if event.modifierFlags.contains(.command), let window_ {
+            dragStartOrigin = window_.frame.origin
+            dragStartMouse = NSEvent.mouseLocation
+            return
+        }
+        super.mouseDown(with: event)
     }
 
     override func mouseDragged(with event: NSEvent) {
-        // 🔴 用**屏幕坐标差**，不要用 `event.deltaX/deltaY`：
-        //   · delta 是增量，可 origin 是 mouseDown 时记的、之后没更新 →
-        //     写成 `origin + delta` 每帧都把窗口摆回"起点 + 一点点"，看着就是**拖不动**；
-        //   · 更坑的是**合成事件（CGEvent）里 delta 恒为 0**，这条路根本验不出来。
-        // 屏幕坐标差对两者都成立，也不受"窗口自己在动"的影响
-        // （locationInWindow 会随窗口移动而变，越拖越飘）。
-        guard let origin = dragStartOrigin, let start = dragStartMouse else { return }
-        let now = NSEvent.mouseLocation
-        window_.moveTo(CGPoint(x: origin.x + (now.x - start.x),
-                               y: origin.y + (now.y - start.y)))
+        if let origin = dragStartOrigin, let start = dragStartMouse, let window_ {
+            let now = NSEvent.mouseLocation
+            window_.moveTo(CGPoint(x: origin.x + (now.x - start.x),
+                                   y: origin.y + (now.y - start.y)))
+            return
+        }
+        super.mouseDragged(with: event)
     }
 
     override func mouseUp(with event: NSEvent) {
-        let moved = dragStartOrigin.map { start in
-            hypot(window_.frame.origin.x - start.x, window_.frame.origin.y - start.y)
-        } ?? 0
-        dragStartOrigin = nil
-        if moved < 3, event.clickCount == 2 {
-            window_.handleDoubleClick()
-        } else if moved >= 3 {
-            window_.onStateChanged?()
+        if dragStartOrigin != nil {
+            dragStartOrigin = nil
+            dragStartMouse = nil
+            window_?.onStateChanged?()
+            return
         }
+        super.mouseUp(with: event)
     }
-
-    // 滚轮缩放（保持左上角不动；向上滚 = 放大）
-    override func scrollWheel(with event: NSEvent) {
-        let factor = pow(1.1, event.scrollingDeltaY / 4)
-        window_.zoom(by: factor)
-    }
-
-    // 右键菜单：翻转 / 复制 / 关闭
-    override func menu(for event: NSEvent) -> NSMenu? {
-        let menu = NSMenu()
-        menu.addItem(withTitle: "水平翻转", action: #selector(flipH), keyEquivalent: "").target = self
-        menu.addItem(withTitle: "垂直翻转", action: #selector(flipV), keyEquivalent: "").target = self
-        menu.addItem(.separator())
-        menu.addItem(withTitle: "复制图片", action: #selector(copyImage), keyEquivalent: "").target = self
-        menu.addItem(withTitle: "关闭贴图", action: #selector(closePin), keyEquivalent: "").target = self
-        return menu
-    }
-
-    @objc private func flipH() { window_.toggleMirrorH() }
-    @objc private func flipV() { window_.toggleMirrorV() }
-    @objc private func copyImage() { Support.copyImageToClipboard(image) }
-    @objc private func closePin() { window_.close() }
 }

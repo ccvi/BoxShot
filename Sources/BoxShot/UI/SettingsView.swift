@@ -130,7 +130,10 @@ private struct ShotPane: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        // 截图页项目多（15 行），520 高度装不下 → ScrollView；
+        // 行距同时收到 12，让「示例」那一行不用滚就看得见
+        ScrollView {
+        VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text("保存格式").frame(width: 90, alignment: .trailing)
                 Picker("", selection: prefs.binding(\.shotFormat)) {
@@ -189,8 +192,85 @@ private struct ShotPane: View {
                     .disabled(prefs.value.maxShotHistory == 0)
                 Spacer()
             }
+
+            Divider().padding(.vertical, 2)
+
+            // ── 放大镜（选区取色）────────────────────────────
+            // 用户要求：放在「截图」设置里。十字线开关留在「通用」，别动它。
+            HStack {
+                Text("放大镜").frame(width: 90, alignment: .trailing)
+                Toggle("选区时在光标旁显示放大镜", isOn: prefs.binding(\.magnifierEnabled))
+            }
+            HStack {
+                Text("边线颜色").frame(width: 90, alignment: .trailing)
+                ColorPicker("", selection: magnifierColorBinding, supportsOpacity: false)
+                    .labelsHidden()
+                    .frame(width: 44)
+                    .disabled(!prefs.value.magnifierEnabled)
+                Text("网格、十字与镜身用这个色")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
+            HStack {
+                Text("捕捉原点").frame(width: 90, alignment: .trailing)
+                Picker("", selection: prefs.binding(\.magnifierOrigin)) {
+                    ForEach(LoupeOrigin.allCases) { item in
+                        Text(item.title).tag(item)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 120)
+                .disabled(!prefs.value.magnifierEnabled)
+                Text("放大镜里那两个坐标从哪个角开始数")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
+            HStack {
+                Text("颜色格式").frame(width: 90, alignment: .trailing)
+                Picker("", selection: prefs.binding(\.magnifierColorFormat)) {
+                    ForEach(ColorTextFormat.allCases) { item in
+                        Text(item.title).tag(item)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 100)
+                .disabled(!prefs.value.magnifierEnabled)
+                Toggle("HEX 带 #", isOn: prefs.binding(\.magnifierHashPrefix))
+                    .disabled(!prefs.value.magnifierEnabled
+                              || prefs.value.magnifierColorFormat != .hex)
+            }
+            HStack(spacing: 8) {
+                Text("示例").frame(width: 90, alignment: .trailing)
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(Color(nsColor: Loupe.sampleColor.nsColor))
+                    .frame(width: 26, height: 15)
+                    .overlay(RoundedRectangle(cornerRadius: 3)
+                        .strokeBorder(Color.black.opacity(0.2), lineWidth: 0.5))
+                Text(Loupe.display(Loupe.sampleColor,
+                                   format: prefs.value.magnifierColorFormat,
+                                   hashPrefix: prefs.value.magnifierHashPrefix))
+                    .font(.system(.footnote, design: .monospaced))
+                Text("·  按 C 复制：\(Loupe.copyable(Loupe.sampleColor, format: prefs.value.magnifierColorFormat, hashPrefix: prefs.value.magnifierHashPrefix))")
+                    .font(.footnote).foregroundStyle(.secondary)
+                Spacer()
+            }
         }
         .font(.body)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    /// ColorPicker 用的是 SwiftUI Color，设置里存的是 `#RRGGBB` 字符串
+    /// （跟标注工具的颜色同一套表示，落盘可读、跨版本稳）
+    private var magnifierColorBinding: Binding<Color> {
+        Binding(
+            get: { Color(nsColor: Loupe.color(fromHex: prefs.value.magnifierLineColor).nsColor) },
+            set: { newValue in
+                let ns = NSColor(newValue).usingColorSpace(.sRGB) ?? .systemBlue
+                let r = Int((ns.redComponent * 255).rounded())
+                let g = Int((ns.greenComponent * 255).rounded())
+                let b = Int((ns.blueComponent * 255).rounded())
+                prefs.value.magnifierLineColor = String(format: "#%02X%02X%02X", r, g, b)
+            }
+        )
     }
 
     private func chooseDirectory() {

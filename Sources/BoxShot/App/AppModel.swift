@@ -167,7 +167,9 @@ final class AppModel: ObservableObject {
         // 开了窗口高亮，否则点窗口根本没有高亮可点，等于这个动作不存在。
         // 窗口模式必须强制高亮，并且不要十字线（要的是"点窗口"，不是"拉框"）。
         selector.begin(highlightWindows: windowPickMode || prefs.value.windowHighlight,
-                       crosshair: windowPickMode ? false : prefs.value.showCrosshair)
+                       crosshair: windowPickMode ? false : prefs.value.showCrosshair,
+                       // 窗口模式是"点窗口"，放大镜会正好盖住要点的标题栏，不给
+                       loupe: windowPickMode ? nil : Loupe.Config(prefs.value))
     }
 
     /// 诊断用：选区遮罩是不是还开着（--esctest 拿它判断 Esc 到底生效没有）
@@ -425,7 +427,8 @@ final class AppModel: ObservableObject {
         let selector = RegionSelector()
         selector.delegate = self
         regionSelector = selector
-        selector.begin(highlightWindows: false, crosshair: true)
+        // 滚动截图/录制用不到取色，不抓底图（省一次整屏截图的 ~100ms）
+        selector.begin(highlightWindows: false, crosshair: true, loupe: nil)
     }
 
     // ── 录制 ────────────────────────────────────────────────
@@ -453,7 +456,7 @@ final class AppModel: ObservableObject {
             let selector = RegionSelector()
             selector.delegate = self
             regionSelector = selector
-            selector.begin(highlightWindows: false, crosshair: true)
+            selector.begin(highlightWindows: false, crosshair: true, loupe: nil)
         }
     }
 

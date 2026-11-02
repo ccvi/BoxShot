@@ -39,12 +39,50 @@ final class RegionSelector: NSObject {
     private var escMonitor: Any?
     private(set) var isActive = false
 
-    func begin(highlightWindows: Bool, crosshair: Bool) {
+    /// 放大镜设置快照（nil / enabled=false 就不抓底图、也不画）
+    private var loupeConfig: Loupe.Config?
+    /// 整屏原图（**没有遮罩**的那一份），放大镜从它里面取像素
+    private var sourceImage: CGImage?
+    private var pixelScale: CGFloat = 2
+
+    /// 🔴 顺序：**先抓底图，再上遮罩**。
+    /// 反过来（先 show 再抓）抓到的是"已经被自己压暗 28%"的画面，放大镜里的
+    /// 色值会整体偏暗、拿去做设计全是错的。代价是遮罩晚 ~100ms 出现。
+    func begin(highlightWindows: Bool, crosshair: Bool, loupe: Loupe.Config?) {
         guard !isActive else { return }
         guard window == nil else { return }
 
         let screen = ScreenCapture.activeScreen()
         displayID = ScreenCapture.display(for: screen)
+        loupeConfig = loupe
+        // 先占住 isActive：抓图期间再按一次热键不该叠出第二个遮罩
+        isActive = true
+
+        Task { @MainActor in
+            var image: CGImage?
+            if loupe?.enabled == true {
+                let started = Date()
+                image = try? await ScreenCapture.captureDisplay(self.displayID)
+                NSLog("[BoxShot] 放大镜底图 %.0fms %@",
+                      Date().timeIntervalSince(started) * 1000,
+                      image == nil ? "失败" : "\(image!.width)×\(image!.height)")
+            }
+            // 抓图期间用户按了 Esc / 换了动作 → 直接放弃这次展示
+            guard self.isActive, self.window == nil else { return }
+            self.present(screen: screen,
+                         highlightWindows: highlightWindows,
+                         crosshair: crosshair,
+                         image: image)
+        }
+    }
+
+    private func present(screen: NSScreen,
+                         highlightWindows: Bool,
+                         crosshair: Bool,
+                         image: CGImage?) {
+        sourceImage = image
+        pixelScale = image.map { CGFloat($0.width) / max(1, screen.frame.width) }
+            ?? ScreenCapture.scaleFactor(for: displayID)
 
         let panel = KeyableWindow(contentRect: screen.frame,
                              styleMask: [.borderless],
@@ -65,6 +103,9 @@ final class RegionSelector: NSObject {
         view.selector = self
         view.highlightWindows = highlightWindows
         view.showCrosshair = crosshair
+        view.loupeConfig = loupeConfig
+        view.sourceImage = sourceImage
+        view.pixelScale = pixelScale
         // 遮罩窗口铺满整块屏幕；视图 isFlipped（左上原点），和 CGWindowList /
         // SCStreamConfiguration 的"左上原点向下"坐标系一致。
         // globalOrigin 用 CGDisplayBounds（左上原点）而不是 screen.frame（左下原点）。
@@ -73,6 +114,13 @@ final class RegionSelector: NSObject {
         // 键盘（回车确认 / 方向键微调 / Esc）要靠 first responder 才收得到，
         // 别指望"窗口一变 key 就会自动指向内容视图"
         panel.makeFirstResponder(view)
+
+        // 光标位置先喂给放大镜：不喂的话用户不动鼠标就什么都看不到，
+        // 会以为「放大镜没做」。NSEvent.mouseLocation 是全局左下原点，
+        // 视图是"屏幕内左上原点"，所以 x 减屏左边、y 用屏顶减。
+        let mouse = NSEvent.mouseLocation
+        view.primeCursor(CGPoint(x: mouse.x - screen.frame.minX,
+                                 y: screen.frame.maxY - mouse.y))
 
         window = panel
         overlayView = view
@@ -138,6 +186,25 @@ final class RegionSelector: NSObject {
         var selector: RegionSelector?
         var highlightWindows = true
         var showCrosshair = true
+        /// 放大镜设置（nil = 不画）
+        var loupeConfig: Loupe.Config?
+        /// 整屏原图（无遮罩），放大镜取像素用
+        var sourceImage: CGImage?
+        /// 1 点对应多少源像素
+        var pixelScale: CGFloat = 2
+        /// 复制色值后的临时提示
+        private var copiedHint: String?
+        private var hintSeq = 0
+        /// 鼠标是否已经进过这块屏幕（没进过就别画放大镜，否则左上角先冒一个 0,0 的镜）
+        private var hasCursor = false
+
+        /// 刚上遮罩时把放大镜直接摆到当前光标处：用户不动鼠标也该看得见
+        /// （只认落在本屏内的点，鼠标在副屏时不画）
+        func primeCursor(_ point: CGPoint) {
+            guard bounds.contains(point) else { return }
+            cursorPoint = point
+            hasCursor = true
+        }
 
         /// 本窗口左上角在"全局（左上原点）坐标系"里的位置
         var globalOrigin: CGPoint = .zero
@@ -225,6 +292,8 @@ final class RegionSelector: NSObject {
 
         override func mouseDragged(with event: NSEvent) {
             let p = convert(event.locationInWindow, from: nil)
+            cursorPoint = p
+            hasCursor = true
 
             switch phase {
             case .resizing:
@@ -382,6 +451,7 @@ final class RegionSelector: NSObject {
         override func mouseMoved(with event: NSEvent) {
             let p = convert(event.locationInWindow, from: nil)
             cursorPoint = p
+            hasCursor = true
             // 有选区/正在拖拽时不抢高亮（避免视觉干扰）
             if highlightWindows, selection == nil, !isDragging {
                 let hit = topLevelWindow(at: toGlobal(p))
@@ -390,7 +460,8 @@ final class RegionSelector: NSObject {
                     needsDisplay = true
                 }
             }
-            if showCrosshair {
+            if showCrosshair || loupeConfig?.enabled == true {
+                // 放大镜必须跟着光标走：不重绘它就会钉在第一次出现的位置
                 needsDisplay = true
             }
         }
@@ -415,6 +486,20 @@ final class RegionSelector: NSObject {
                         selectorRef?.delegate?.regionSelector(selectorRef!, didConfirmWindow: win, displayID: displayID)
                     }
                 }
+            case 8: // C：把光标下的色值复制到剪贴板（用户样张要求）
+                // keyCode 8 就是 C（大小写同码位），加 Shift 也走这里
+                guard hasCursor, let source = sourceImage,
+                      let config = loupeConfig, config.enabled else {
+                    super.keyDown(with: event)
+                    return
+                }
+                let cursorPixel = CGPoint(x: (cursorPoint.x * pixelScale).rounded(.down),
+                                          y: (cursorPoint.y * pixelScale).rounded(.down))
+                let color = Loupe.sampleColor(in: source, pixel: cursorPixel)
+                let text = Loupe.copyable(color, format: config.format,
+                                          hashPrefix: config.hashPrefix)
+                Support.copyTextToClipboard(text)
+                showCopiedHint("已复制 \(text)")
             case 123, 124, 125, 126: // 方向键微调（Shift ×10）
                 guard let sel = selection else { return }
                 var rect = sel
@@ -446,7 +531,13 @@ final class RegionSelector: NSObject {
 
         override func draw(_ dirtyRect: NSRect) {
             guard let ctx = NSGraphicsContext.current?.cgContext else { return }
+            // 主体（暗幕 / 选区 / 标签 / 手柄）先画，放大镜和提示最后叠在最上层
+            drawContents(ctx)
+            drawLoupe(ctx)
+            drawCopiedHint(ctx)
+        }
 
+        private func drawContents(_ ctx: CGContext) {
             // 暗幕
             ctx.setFillColor(NSColor.black.withAlphaComponent(0.28).cgColor)
             ctx.fill(bounds)
@@ -501,6 +592,65 @@ final class RegionSelector: NSObject {
                 }
                 drawHint("Esc 或右键取消截图",
                          above: rect, ctx: ctx)
+            }
+        }
+
+        // ── 放大镜 ──────────────────────────────────────────
+
+        /// 画在光标旁。**注意它读的是 `sourceImage`（上遮罩之前抓的整屏原图）**，
+        /// 不是当前窗口的截图 —— 否则取到的像素已经被自己压暗 28%，色值全是错的。
+        private func drawLoupe(_ ctx: CGContext) {
+            guard hasCursor,
+                  let config = loupeConfig, config.enabled,
+                  let source = sourceImage else { return }
+            Loupe.draw(in: ctx,
+                       source: source,
+                       cursor: cursorPoint,
+                       bounds: bounds,
+                       displaySize: bounds.size,
+                       pixelScale: pixelScale,
+                       lineColor: config.lineColor,
+                       origin: config.origin,
+                       format: config.format,
+                       hashPrefix: config.hashPrefix)
+        }
+
+        /// 按 C 复制色值后的绿底小提示，贴在放大镜下面（放不下就翻上面）
+        private func drawCopiedHint(_ ctx: CGContext) {
+            guard let text = copiedHint else { return }
+            let attributes: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+                .foregroundColor: NSColor.white,
+            ]
+            let size = (text as NSString).size(withAttributes: attributes)
+            let loupeTopLeft = Loupe.origin(cursor: cursorPoint, size: Loupe.size, bounds: bounds)
+            var y = loupeTopLeft.y + Loupe.size.height + 6
+            if y + size.height + 10 > bounds.height {
+                y = loupeTopLeft.y - size.height - 14
+            }
+            var x = loupeTopLeft.x
+            x = min(max(4, x), max(4, bounds.width - size.width - 20))
+            let box = CGRect(x: x, y: y, width: size.width + 16, height: size.height + 8)
+            ctx.setFillColor(NSColor.systemGreen.withAlphaComponent(0.92).cgColor)
+            ctx.addPath(CGPath(roundedRect: box, cornerWidth: 6, cornerHeight: 6, transform: nil))
+            ctx.fillPath()
+            (text as NSString).draw(at: CGPoint(x: box.minX + 8, y: box.minY + 4),
+                                    withAttributes: attributes)
+        }
+
+        /// 提示 1.4 秒后自己消失。用序号而不是 Timer 句柄：连按几次 C 时
+        /// 前一个定时器到点不该把后一次的提示擦掉。
+        private func showCopiedHint(_ text: String) {
+            copiedHint = text
+            hintSeq += 1
+            let seq = hintSeq
+            needsDisplay = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self, self.hintSeq == seq else { return }
+                    self.copiedHint = nil
+                    self.needsDisplay = true
+                }
             }
         }
 

@@ -157,6 +157,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.runPinDiagnostics()
             }
         }
+        // 诊断入口：--loupetest 离屏渲染一张放大镜 PNG（不用截图权限）
+        let loupeTrigger = "/tmp/boxshot-loupetest.trigger"
+        if CommandLine.arguments.contains("--loupetest")
+            || FileManager.default.fileExists(atPath: loupeTrigger) {
+            try? FileManager.default.removeItem(atPath: loupeTrigger)
+            runLoupeDiagnostics()
+            return
+        }
         // 诊断入口：--show-settings 直接弹设置窗口，用来核对各页控件是否
         // 排对了、值是否真的跟着设置走（改完设置页最好截一张看一眼）。
         // 触发文件里可以写一个页号（0 通用 / 1 截图 / 2 贴图 / 3 OCR / 4 录制 /
@@ -572,6 +580,71 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 压进框内底部居中"这条分支（正常尺寸的框永远走不到它）。
     // ── 贴图诊断：朝向 + 能不能拖 ──────────────────────────────
 
+    /// 诊断入口：`--loupetest` 把放大镜**离屏渲染**成 PNG（/tmp/boxshot-loupe.png）。
+    /// 放大镜里三行信息、色块、网格对位这些 12pt 级排版，光读代码判断不了；
+    /// 离屏画一遍既不用截图权限，也不用真去拖一个选区。
+    private func runLoupeDiagnostics() {
+        let size = Loupe.size
+        let canvas = CGRect(x: 0, y: 0, width: size.width + 80, height: size.height + 80)
+
+        // 源图刻意做成"顶部一条红、底部一条蓝、中间浅灰"：
+        // 放大镜里红条在上就是对的，红条跑到底下就是翻面了 —— 这是唯一能
+        // 靠一张离线样张判死的方向性检查（对称图案看不出来）。
+        let srcW = 320, srcH = 240
+        guard let srcCtx = CGContext(data: nil, width: srcW, height: srcH,
+                                     bitsPerComponent: 8, bytesPerRow: 0,
+                                     space: CGColorSpaceCreateDeviceRGB(),
+                                     bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                                       | CGBitmapInfo.byteOrder32Little.rawValue) else { return }
+        srcCtx.setFillColor(CGColor(srgbRed: 0.94, green: 0.94, blue: 0.94, alpha: 1))
+        srcCtx.fill(CGRect(x: 0, y: 0, width: srcW, height: srcH))
+        // 绘制坐标系是左下原点 → y 接近 height 的那条才是**图像顶部**
+        srcCtx.setFillColor(CGColor(srgbRed: 0.85, green: 0.15, blue: 0.15, alpha: 1))
+        srcCtx.fill(CGRect(x: 0, y: srcH - 20, width: srcW, height: 20))
+        srcCtx.setFillColor(CGColor(srgbRed: 0.15, green: 0.25, blue: 0.85, alpha: 1))
+        srcCtx.fill(CGRect(x: 0, y: 0, width: srcW, height: 20))
+        guard let source = srcCtx.makeImage() else { return }
+
+        guard let ctx = CGContext(data: nil, width: Int(canvas.width), height: Int(canvas.height),
+                                  bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                                    | CGBitmapInfo.byteOrder32Little.rawValue) else { return }
+        ctx.setFillColor(CGColor(gray: 0.35, alpha: 1))
+        ctx.fill(canvas)
+        // 🔴 视图里是 y 向下的坐标系（isFlipped），这里要先把 CTM 翻过来，
+        // 否则离屏渲染出来的上下位置跟真实上屏时不一致，验了个假的。
+        ctx.translateBy(x: 0, y: canvas.height)
+        ctx.scaleBy(x: 1, y: -1)
+
+        // 🔴 文字是用 NSString.draw 画的，它只认 **NSGraphicsContext.current**。
+        // 只建 CGContext 不设 current，网格和色块都出来了、文字一个没有
+        // （第一版就是这样，白条空着）。flipped: true 是因为上面已经把 CTM 翻成 y 向下。
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: true)
+        Loupe.draw(in: ctx,
+                   source: source,
+                   // 光标压在"红条下沿"：镜里上半截红、下半截灰，一眼能判方向
+                   cursor: CGPoint(x: 160, y: 20),
+                   bounds: canvas,
+                   displaySize: CGSize(width: srcW, height: srcH),
+                   pixelScale: 1,
+                   lineColor: Loupe.color(fromHex: "#3B82F6"),
+                   origin: .topLeft,
+                   format: .hex,
+                   hashPrefix: true)
+        NSGraphicsContext.restoreGraphicsState()
+
+        guard let out = ctx.makeImage() else { return }
+        let rep = NSBitmapImageRep(cgImage: out)
+        if let data = rep.representation(using: .png, properties: [:]) {
+            try? data.write(to: URL(fileURLWithPath: "/tmp/boxshot-loupe.png"), options: .atomic)
+            NSLog("[BoxShot][loupetest] 已写到 /tmp/boxshot-loupe.png %.0f×%.0f",
+                  canvas.width, canvas.height)
+        }
+        exit(0)
+    }
+
     private func runPinDiagnostics() {
         let logURL = URL(fileURLWithPath: "/tmp/boxshot-pintest.log")
         try? "".write(to: logURL, atomically: true, encoding: .utf8)
@@ -642,7 +715,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
+
+        // 再钉一张**文本**贴图（不进管理器，所以不会污染 pins.json）：
+        // 文字是不是真画出来了、有没有偏/Arial 掉成方框，只有看一眼才知道。
+        // 置顶按钮要鼠标悬停才出现，程序侧只能验"按钮存在"（自检里有），这里验渲染。
+        let sample = "文本贴图：这段文字应当可以直接选中并复制。\n第二行用于核对行距与换行。"
+        if let textImage = PinManager.renderTextToImage(sample),
+           let textPin = PinWindow(image: textImage, opacity: 1.0, shadow: true, text: sample) {
+            textPin.setFrameOrigin(NSPoint(x: 400, y: 760))
+            textPin.showPin()
+            log("文本贴图放出来了 frame=\(textPin.frame) key=\(textPin.canBecomeKey) " +
+                "视图=\(type(of: textPin.contentView!))")
+            // 留住引用，避免 ARC 立刻收掉
+            textPinHolder = textPin
+        } else {
+            log("❌ 文本贴图建不出来")
+        }
     }
+
+    /// `--pintest` 放出来的那张文本贴图（只为诊断期间不被回收）
+    private var textPinHolder: PinWindow?
 
     private func showDiagnosticOverlay(tall: Bool = false, colors: Bool = false) {
         let w = 800, h = 500

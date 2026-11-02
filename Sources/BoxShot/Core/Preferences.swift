@@ -100,6 +100,40 @@ enum RecordQuality: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+/// 放大镜里「坐标」的零点放在哪个角（用户设置里的「捕捉原点在」）
+enum LoupeOrigin: String, Codable, CaseIterable, Identifiable {
+    case topLeft
+    case topRight
+    case bottomLeft
+    case bottomRight
+
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .topLeft:     return "左上角"
+        case .topRight:    return "右上角"
+        case .bottomLeft:  return "左下角"
+        case .bottomRight: return "右下角"
+        }
+    }
+}
+
+/// 放大镜里色值的写法
+enum ColorTextFormat: String, Codable, CaseIterable, Identifiable {
+    case hex
+    case rgb
+    case hsl
+
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .hex: return "HEX"
+        case .rgb: return "RGB"
+        case .hsl: return "HSL"
+        }
+    }
+}
+
 struct Preferences: Codable, Equatable {
     // ── 通用 ──
     var launchAtLogin: Bool = false
@@ -125,6 +159,18 @@ struct Preferences: Codable, Equatable {
     var downscaleRetina: Bool = false
     /// 截图历史保留张数（0 = 不记录）
     var maxShotHistory: Int = 20
+
+    // ── 放大镜（选区取色） ──
+    /// 选区时在光标旁显示放大镜（像素网格 + 坐标 + 色值）
+    var magnifierEnabled: Bool = true
+    /// 放大镜里十字线 / 边线的颜色（十六进制串，UI 用 ColorPicker 编辑）
+    var magnifierLineColor: String = "#3B82F6"
+    /// 「坐标」的零点在哪个角
+    var magnifierOrigin: LoupeOrigin = .bottomLeft
+    /// 色值写法
+    var magnifierColorFormat: ColorTextFormat = .hex
+    /// HEX 前面带 `#`
+    var magnifierHashPrefix: Bool = true
 
     // ── 贴图 ──
     var pinDoubleClick: PinDoubleClickAction = .close
@@ -183,6 +229,11 @@ struct Preferences: Codable, Equatable {
         autoSave = try c.decodeIfPresent(Bool.self, forKey: .autoSave) ?? f.autoSave
         downscaleRetina = try c.decodeIfPresent(Bool.self, forKey: .downscaleRetina) ?? f.downscaleRetina
         maxShotHistory = try c.decodeIfPresent(Int.self, forKey: .maxShotHistory) ?? f.maxShotHistory
+        magnifierEnabled = try c.decodeIfPresent(Bool.self, forKey: .magnifierEnabled) ?? f.magnifierEnabled
+        magnifierLineColor = try c.decodeIfPresent(String.self, forKey: .magnifierLineColor) ?? f.magnifierLineColor
+        magnifierOrigin = try c.decodeIfPresent(LoupeOrigin.self, forKey: .magnifierOrigin) ?? f.magnifierOrigin
+        magnifierColorFormat = try c.decodeIfPresent(ColorTextFormat.self, forKey: .magnifierColorFormat) ?? f.magnifierColorFormat
+        magnifierHashPrefix = try c.decodeIfPresent(Bool.self, forKey: .magnifierHashPrefix) ?? f.magnifierHashPrefix
         pinDoubleClick = try c.decodeIfPresent(PinDoubleClickAction.self, forKey: .pinDoubleClick) ?? f.pinDoubleClick
         pinOpacity = try c.decodeIfPresent(Double.self, forKey: .pinOpacity) ?? f.pinOpacity
         pinShadow = try c.decodeIfPresent(Bool.self, forKey: .pinShadow) ?? f.pinShadow
@@ -211,6 +262,7 @@ struct Preferences: Codable, Equatable {
         case launchAtLogin, hideDockIcon, playSound, feedbackSound, showCrosshair
         case shotFormat, jpgQuality, openEditorAfterShot, windowHighlight, saveDirectory, autoSave, downscaleRetina
         case maxShotHistory
+        case magnifierEnabled, magnifierLineColor, magnifierOrigin, magnifierColorFormat, magnifierHashPrefix
         case pinDoubleClick, pinOpacity, pinShadow, maxPinHistory
         case ocrKeepLineBreaks, ocrLineOverlap, ocrIncremental, ocrAutoOpenLink
         case measureShowTips

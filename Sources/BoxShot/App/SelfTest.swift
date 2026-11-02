@@ -594,6 +594,76 @@ enum SelfTest {
             check("文本渲染成位图", pinImage != nil && pinImage!.width > 20)
         }
 
+        // ── 放大镜：落位 / 坐标口径 / 裁剪 ──
+        // 全是纯函数，不用上屏就能验。放大镜最容易错的三处：
+        // 贴屏幕右边不翻（盖住光标）、坐标原点算反、裁块越界出空白格。
+        do {
+            let screen = CGRect(x: 0, y: 0, width: 1000, height: 800)
+            let size = Loupe.size
+            check("放大镜是 15×15 个源像素 + 74 高信息条",
+                  size.width == 150 && size.height == 224)
+
+            let rightDown = Loupe.origin(cursor: CGPoint(x: 100, y: 100), size: size, bounds: screen)
+            check("默认落在光标右下方", rightDown.x > 100 && rightDown.y > 100)
+
+            let nearRight = Loupe.origin(cursor: CGPoint(x: 980, y: 100), size: size, bounds: screen)
+            check("右边放不下就翻到左边（不盖住光标）",
+                  nearRight.x + size.width <= 980)
+
+            let nearBottom = Loupe.origin(cursor: CGPoint(x: 100, y: 790), size: size, bounds: screen)
+            check("下面放不下就翻到上面", nearBottom.y + size.height <= 790)
+
+            let corner = Loupe.origin(cursor: CGPoint(x: 999, y: 799), size: size, bounds: screen)
+            check("贴角时不越出屏幕",
+                  corner.x >= 0 && corner.y >= 0
+                  && corner.x + size.width <= screen.width
+                  && corner.y + size.height <= screen.height)
+        }
+        do {
+            let display = CGSize(width: 1000, height: 800)
+            let p = CGPoint(x: 10, y: 20)
+            check("左上角原点：坐标原样",
+                  Loupe.displayCoordinate(point: p, origin: .topLeft, displaySize: display) == p)
+            let topRight = Loupe.displayCoordinate(point: p, origin: .topRight, displaySize: display)
+            check("右上角原点：x 从右边数", topRight.x == 990 && topRight.y == 20)
+            let bottomLeft = Loupe.displayCoordinate(point: p, origin: .bottomLeft, displaySize: display)
+            check("左下角原点：y 从下边数", bottomLeft.x == 10 && bottomLeft.y == 780)
+            let bottomRight = Loupe.displayCoordinate(point: p, origin: .bottomRight, displaySize: display)
+            check("右下角原点：两个都反过来", bottomRight.x == 990 && bottomRight.y == 780)
+        }
+        do {
+            let image = CGSize(width: 100, height: 80)
+            // 半格 = 7.5，所以中心对齐时是 .5 —— 这是**对的**：
+            // 光标正好落在 15 格的正中那格，不偏不倚
+            let middle = Loupe.cropOrigin(cursorPixel: CGPoint(x: 50, y: 40),
+                                          cellCount: 15, imageSize: image)
+            check("裁剪块以光标像素为中心", middle.x == 42.5 && middle.y == 32.5)
+            let leftTop = Loupe.cropOrigin(cursorPixel: CGPoint(x: 0, y: 0),
+                                           cellCount: 15, imageSize: image)
+            check("贴左上角时裁块钳到 0", leftTop.x == 0 && leftTop.y == 0)
+            let rightBottom = Loupe.cropOrigin(cursorPixel: CGPoint(x: 99, y: 79),
+                                               cellCount: 15, imageSize: image)
+            check("贴右下角时裁块钳到图像内",
+                  rightBottom.x == 85 && rightBottom.y == 65)
+        }
+
+        // ── 放大镜的色值文本 ──
+        do {
+            let color = RGBColor.srgb(0xD1, 0x8C, 0x72)
+            check("镜内显示：两位一组、空格分开",
+                  Loupe.display(color, format: .hex, hashPrefix: true) == "#D1 8C 72")
+            check("复制出去：紧凑 HEX",
+                  Loupe.copyable(color, format: .hex, hashPrefix: true) == "#D18C72")
+            check("关掉前缀就不带 #",
+                  Loupe.copyable(color, format: .hex, hashPrefix: false) == "D18C72")
+            check("复制出去：RGB 写法",
+                  Loupe.copyable(color, format: .rgb, hashPrefix: true) == "rgb(209, 140, 114)")
+            check("HEX 存进设置再读回来不变",
+                  Loupe.hexPairs(Loupe.color(fromHex: "#D18C72")) == "D18C72")
+            check("坏 HEX 退回默认蓝",
+                  Loupe.hexPairs(Loupe.color(fromHex: "zzz")) == "3B82F6")
+        }
+
         // ── 贴图窗口：初始尺寸必须是 1:1 ──
         // `PinWindow.scale` 曾经初始化成 1/backingScale（0.5），而 applyScale 里
         // 是 baseW × scale —— 窗口一被重排（首次缩放 / 从历史恢复）就只剩一半大。
@@ -614,6 +684,37 @@ enum SelfTest {
                 pinWindow.close()
             } else {
                 check("贴图窗口能建出来", false)
+            }
+        }
+
+        // ── 贴图：文字可选中 + 置顶按钮 ──
+        do {
+            let text = "可选中的文字\n第二行"
+            if let image = PinManager.renderTextToImage(text),
+               let pin = PinWindow(image: image, opacity: 1, shadow: false, text: text) {
+                check("文本贴图挂的是可选中的文本视图",
+                      pin.contentView is PinTextContentView)
+                check("文本贴图能成为 key（否则 ⌘C 复制不了）", pin.canBecomeKey)
+                check("贴图默认就是置顶（.floating）", pin.isOnTop)
+                pin.toggleOnTop()
+                check("点一下取消置顶", !pin.isOnTop)
+                pin.toggleOnTop()
+                check("再点一下回到置顶", pin.isOnTop)
+                pin.close()
+            } else {
+                check("文本贴图窗口能建出来", false)
+            }
+
+            // 图片贴图不该抢 key（会打断用户正在打字的窗口）
+            let solid = solidImage(width: 40, height: 30,
+                                   color: CGColor(srgbRed: 1, green: 0, blue: 0, alpha: 1))
+            if let imagePin = PinWindow(image: solid, opacity: 1, shadow: false) {
+                check("图片贴图不抢 key window", !imagePin.canBecomeKey)
+                check("两种贴图都带置顶按钮",
+                      imagePin.contentView?.subviews.contains { $0 is NSButton } == true)
+                imagePin.close()
+            } else {
+                check("图片贴图窗口能建出来", false)
             }
         }
 
