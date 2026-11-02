@@ -37,7 +37,7 @@ enum EditorTool: String, CaseIterable, Identifiable {
         case .pen:       return "pencil.tip"
         case .marker:    return "highlighter"
         case .rect:      return "rectangle"
-        case .highlight: return "rectangle.fill"
+        case .highlight: return "sun.max"
         case .ellipse:   return "circle"
         case .line:      return "line.diagonal"
         case .arrow:     return "arrow.up.right"
@@ -56,7 +56,7 @@ enum EditorTool: String, CaseIterable, Identifiable {
         case .pen:       return "画笔"
         case .marker:    return "马可笔"
         case .rect:      return "矩形"
-        case .highlight: return "高亮（半透明色块）"
+        case .highlight: return "高亮（点亮这块，其余压暗）"
         case .ellipse:   return "椭圆"
         case .line:      return "直线"
         case .arrow:     return "箭头"
@@ -267,6 +267,11 @@ final class EffectImages {
 
 enum EditorRenderer {
 
+    /// 高亮（聚光点亮）压暗的强度：0.6 黑 → 白底变 102 灰。
+    /// 这个数是从用户给的样张里量出来的（框外 (102,102,102) / 框内纯白），
+    /// 不是随手定的；改大改小都会跟他的预期不一样。
+    static let highlightDimAlpha: CGFloat = 0.6
+
     /// 把底图 + 全部标注压成一张成品图（保存 / 复制 / 贴图都用它）
     static func render(base: CGImage, shapes: [AnnotationShape], effects: EffectImages) -> CGImage? {
         let width = base.width
@@ -337,13 +342,24 @@ enum EditorRenderer {
             ctx.stroke(rect(from: a, to: b))
 
         case .highlight:
-            // 半透明 + multiply：像荧光笔涂一整块，底下的字还看得见（纯 alpha 会发灰发白）
+            // 1.0.10 用户口径（他附的 longshot…111915.jpg）：高亮 = **聚光点亮**。
+            // 拖出来那块**一个像素都不动**（字还是纯黑、底色还是原样），
+            // 把图里其余部分压暗 60% —— 视觉上"只把这块点亮"。
+            //
+            // 以前实现成"半透明染色（multiply 0.38）"，那是荧光笔，不是他要的：
+            // 染色会把字冲淡，而他给的样张里被标记处的文字比周围更清楚。
+            // 所以这里不用 shape.color（聚光没有"颜色"这个概念），
+            // 恒定用黑色压暗；even-odd 两个矩形一次裁出"矩形外面"再填满整幅画布。
             guard let a = shape.points.first, let b = shape.points.last else { return }
+            let canvas = CGRect(x: 0, y: 0,
+                                width: CGFloat(effects.base.width),
+                                height: canvasHeight)
             ctx.saveGState()
-            ctx.setFillColor(color.cgColor)
-            ctx.setAlpha(0.38)
-            ctx.setBlendMode(.multiply)
-            ctx.fill(rect(from: a, to: b))
+            ctx.addRect(canvas)
+            ctx.addRect(rect(from: a, to: b))
+            ctx.clip(using: .evenOdd)
+            ctx.setFillColor(CGColor(gray: 0, alpha: Self.highlightDimAlpha))
+            ctx.fill(canvas)
             ctx.restoreGState()
 
         case .ellipse:

@@ -455,9 +455,15 @@ struct EditorView: View {
             context.stroke(Path(CGRect(from: a, to: b)), with: .color(color), lineWidth: width)
 
         case .highlight:
-            // 半透明整块染色（截图浮层那边用 multiply，SwiftUI 这边只能给 opacity）
+            // 聚光点亮，跟截图浮层那边的 CG 渲染同一口径：块内一个像素不动，块外压暗。
+            // 🔴 必须包一层 drawLayer：GraphicsContext 是值类型，直接在 context 上
+            // clip 会把**后面所有标注**一起裁掉（症状是"画了高亮，别的标注都不见了"）。
             guard let a = shape.points.first, let b = shape.points.last else { return }
-            context.fill(Path(CGRect(from: a, to: b)), with: .color(color.opacity(0.38)))
+            let canvas = Path(CGRect(origin: .zero, size: doc.imageSize))
+            context.drawLayer { layer in
+                layer.clip(to: Path(CGRect(from: a, to: b)), options: .inverse)
+                layer.fill(canvas, with: .color(.black.opacity(Double(EditorRenderer.highlightDimAlpha))))
+            }
 
         case .ellipse:
             guard let a = shape.points.first, let b = shape.points.last else { return }

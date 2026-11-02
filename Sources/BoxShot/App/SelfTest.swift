@@ -315,6 +315,10 @@ enum SelfTest {
                   OverlayEditorController.colorPalette.map { $0.hexString }
                     == ["#F8CE43", "#62C563", "#3887FB", "#EB4259", "#F3933D", "#BD3DDD"])
             check("色块是圆形（圆角取半径）", OverlayEditorController.swatchSide > 0)
+            // 用户口径「小 20%」：26 × 0.8 = 20.8。钉死数字，防止以后谁手滑又调回 26
+            check("色块直径是 20.8pt（26 的 80%）", abs(OverlayEditorController.swatchSide - 20.8) < 0.01)
+            check("分隔线跟着色块一起缩（不高于色块）",
+                  OverlayEditorController.colorPanelDividerHeight <= OverlayEditorController.swatchSide)
 
             let toolbar = CGRect(x: 300, y: 500, width: 700, height: 64)
             let p1 = OverlayEditorController.colorPanelOrigin(toolbar: toolbar,
@@ -339,19 +343,28 @@ enum SelfTest {
         // ── 高亮工具（1.0.10 取代工具条上的裁剪位）──
         do {
             check("高亮是拖拽工具", EditorTool.highlight.isDragTool)
+            // 用户口径（他附的样张）：高亮 = 聚光点亮 —— 块内原样不动，块外压暗。
+            // 所以这里断言的是"块内没被染色"和"块外变暗"，跟"染色"刚好相反。
             let white = solidImage(width: 40, height: 40, color: CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
             let hl = AnnotationShape(tool: .highlight,
                                      points: [CGPoint(x: 5, y: 5), CGPoint(x: 35, y: 35)],
                                      color: .red, lineWidth: 0)
             let out = EditorRenderer.render(base: white, shapes: [hl], effects: EffectImages(base: white))
-            let px = out.flatMap { EditorDocument(image: $0).pixelColor(at: CGPoint(x: 20, y: 20)) }
-            check("高亮块真的把区域染了色",
-                  px != nil && px!.green < 0.9 && px!.blue < 0.9)
+            let inside = out.flatMap { EditorDocument(image: $0).pixelColor(at: CGPoint(x: 20, y: 20)) }
+            check("高亮点亮的那块保持原样（不染色）",
+                  inside != nil && inside!.red > 0.95 && inside!.green > 0.95 && inside!.blue > 0.95)
             let outside = out.flatMap { EditorDocument(image: $0).pixelColor(at: CGPoint(x: 2, y: 2)) }
-            check("高亮块不越出拖出来的矩形",
-                  outside != nil && outside!.green > 0.95)
+            // 白底压 0.6 黑 ≈ 0.4，留点余量判 < 0.5
+            check("高亮块外被压暗（聚光）",
+                  outside != nil && outside!.red < 0.5 && outside!.green < 0.5 && outside!.blue < 0.5)
+            check("压暗强度是 0.6（跟样张量出来的 (102,102,102) 对得上）",
+                  abs(EditorRenderer.highlightDimAlpha - 0.6) < 0.001
+                    && abs(outside!.red - 0.4) < 0.02)
             check("高亮点得中（命中测试）",
                   hl.hitTest(CGPoint(x: 20, y: 20)) && !hl.hitTest(CGPoint(x: 60, y: 60)))
+            check("高亮用的不是「高亮/染色」那套图标与文案",
+                  EditorTool.highlight.title.contains("点亮")
+                    && !EditorTool.highlight.title.contains("半透明"))
         }
 
         // ── 取景框档位 ──

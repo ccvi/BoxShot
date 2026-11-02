@@ -483,8 +483,13 @@ final class OverlayEditorController: NSObject {
                                                    visible: screen.visibleFrame))
     }
 
-    /// 色块直径（pt）：圆形，圆角取一半
-    static let swatchSide: CGFloat = 26
+    /// 色块直径（pt）：圆形，圆角取一半。
+    /// 1.0.10 用户口径「颜色圆形调小一点，小 20%」：26 × 0.8 = 20.8。
+    /// 写成 26*0.8 而不是直接写 20.8，是为了以后"再小 10%"能一眼看出基数是谁。
+    static let swatchSide: CGFloat = 26 * 0.8
+
+    /// 颜色面板里那条分隔线的高度：跟着色块一起缩，否则会顶出一截
+    static let colorPanelDividerHeight: CGFloat = 20
 
     /// 调色板：6 个颜色（1.0.10 用户口径「颜色 6 个颜色」，顺序按他给的色卡）。
     /// 抽成常量是为了自检能盯着数量 —— 以前是散在这里的数组字面量，
@@ -620,14 +625,14 @@ final class OverlayEditorController: NSObject {
     }
 
     private func divider() -> NSView {
-        let view = NSView(frame: NSRect(x: 0, y: 0, width: 1, height: 26))
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: 1, height: Self.colorPanelDividerHeight))
         view.wantsLayer = true
         view.layer?.backgroundColor = NSColor.separatorColor.cgColor
         // 同上：裸 NSView 没有 intrinsicContentSize，在 NSStackView 里会被压成 0 宽
         view.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             view.widthAnchor.constraint(equalToConstant: 1),
-            view.heightAnchor.constraint(equalToConstant: 26),
+            view.heightAnchor.constraint(equalToConstant: Self.colorPanelDividerHeight),
         ])
         return view
     }

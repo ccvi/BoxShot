@@ -622,6 +622,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                        color: .black, lineWidth: 0, text: "形状渲染自检", fontSize: 48))
             doc.commit(AnnotationShape(tool: .mosaic, points: [CGPoint(x: 400, y: 40), CGPoint(x: 550, y: 120)],
                                        color: .black, lineWidth: 0))
+            // 高亮：诊断里必须有一条，否则"高亮看不见"这类反馈只能靠猜
+            doc.commit(AnnotationShape(tool: .highlight, points: [CGPoint(x: 150, y: 230), CGPoint(x: 520, y: 330)],
+                                       color: .yellow, lineWidth: 0))
             overlay.refresh()
         }
     }
