@@ -590,10 +590,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         guard let screen = NSScreen.main else { log("没有屏幕"); exit(0) }
-        let bubble = CameraBubbleController(size: .medium)
+        // 这里测的是「区域 / 全屏录制里的画中画」，所以用 recordCameraSize（小尺寸、贴右下角），
+        // 不是摄像头录制那套 600/550/500 —— 两套尺寸不能串用。
+        let pipeSize = model.prefs.value.recordCameraSize
+        let bubble = CameraBubbleController(size: pipeSize, placement: .bottomTrailing)
         cameraProbeBubble = bubble
         bubble.show(anchor: screen.visibleFrame)
-        log("取景框已上屏：windowNumber=\(bubble.windowNumber) 边长=\(CameraBubbleSize.medium.side)")
+        log("取景框已上屏：windowNumber=\(bubble.windowNumber) 档位=\(pipeSize.title) 边长=\(pipeSize.side)（画中画）")
 
         // 等摄像头会话真的出画（首次还要过权限）
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {

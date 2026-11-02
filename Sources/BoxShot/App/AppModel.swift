@@ -594,12 +594,16 @@ final class AppModel: ObservableObject {
         showRecordToolbar(displayID: displayID, region: local, autoCamera: true)
     }
 
-    /// 固定录制框：屏幕可用区里最大的 16:9（四周各留 6%），居中。
-    /// 做成纯函数让自检盯住"16:9 / 居中 / 不出界"这三件事。
+    /// 固定录制框：屏幕可用区的 75%，按 16:9 收，居中。
+    ///
+    /// 一开始给的是 88%（几乎铺满整屏），用户看图说「虚线的那个录制框能不能小一点」——
+    /// 收到 75%。再小就不行了：框的高必须 ≥ 600（大档取景框的直径），
+    /// 否则 `fittedSide` 会把用户设的 600 收下去（1710×1107 屏上 75% → 1282×721）。
+    /// 做成纯函数让自检盯住"16:9 / 居中 / 不出界 / 放得下 600"这几件事。
     static func fixedRecordFrame(on screen: NSScreen) -> CGRect {
         let visible = screen.visibleFrame
-        let maxW = visible.width * 0.88
-        let maxH = visible.height * 0.88
+        let maxW = visible.width * 0.75
+        let maxH = visible.height * 0.75
         var w = maxW
         var h = (w * 9 / 16).rounded()
         if h > maxH {

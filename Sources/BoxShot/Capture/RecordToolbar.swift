@@ -22,6 +22,8 @@ final class RecordToolbarController: NSObject {
     private weak var model: AppModel?
     private var displayID: CGDirectDisplayID = 0
     private var region: CGRect?          // nil = 全屏
+    /// 摄像头录制模式：固定录制框，没有"全屏 / 重选区域"两个按钮
+    private var isCameraMode = false
     private var framePanel: NSPanel?
     private var toolbarPanel: NSPanel?
     private var recorder: RecorderController?
@@ -54,6 +56,7 @@ final class RecordToolbarController: NSObject {
     func begin(displayID: CGDirectDisplayID, region: CGRect?, autoCamera: Bool = false) {
         self.displayID = displayID
         self.region = region
+        self.isCameraMode = autoCamera
         if let region {
             showFrame(region: region)
         }
@@ -117,8 +120,12 @@ final class RecordToolbarController: NSObject {
         }
 
         add("xmark", "关闭", tag: 1, tint: .systemRed)
-        add("rectangle.inset.filled", "全屏录制", tag: 2)
-        add("rectangle.dashed", "重选区域", tag: 3)
+        // 🔴 摄像头录制的框是固定的：全屏 / 重选区域两个按钮在这个模式下没有意义，
+        // 用户指着截图说"这两个按钮在这个录制模式下去掉"
+        if !isCameraMode {
+            add("rectangle.inset.filled", "全屏录制", tag: 2)
+            add("rectangle.dashed", "重选区域", tag: 3)
+        }
         stack.addArrangedSubview(makeDivider())
 
         let record = add("record.circle", "开始录制", tag: 4, tint: .systemRed)
@@ -217,7 +224,11 @@ final class RecordToolbarController: NSObject {
             refreshCameraButton()
             return
         }
-        let bubble = CameraBubbleController(size: model?.prefs.value.recordCameraSize ?? .medium)
+        let prefs = model?.prefs.value
+        let bubbleSize = isCameraMode ? (prefs?.cameraRecordSize ?? .large)
+                                      : (prefs?.recordCameraSize ?? .medium)
+        let bubble = CameraBubbleController(size: bubbleSize,
+                                            placement: isCameraMode ? .centered : .bottomTrailing)
         bubble.onClose = { [weak self] in
             self?.cameraBubble = nil
             self?.refreshCameraButton()
@@ -477,7 +488,7 @@ final class RecordToolbarController: NSObject {
             return
         }
         guard let model else { return }
-        let optionsView = RecordOptionsView(model: model)
+        let optionsView = RecordOptionsView(model: model, cameraMode: isCameraMode)
         // 取景框大小在弹层里切换要立刻反映到已打开的取景框上
         optionsView.onCameraSizeChange = { [weak self] newSize in
             self?.cameraBubble?.resize(to: newSize)
@@ -532,16 +543,21 @@ final class DashedFrameView: NSView {
 final class RecordOptionsView: NSView {
 
     private weak var model: AppModel?
+    /// 摄像头录制模式：取景框那行改的是另一套尺寸（600/550/500 而不是 200/180/150）
+    private let cameraMode: Bool
     /// 取景框大小在弹层里切换时实时改已打开的取景框（工具条负责接线到 cameraBubble）
     var onCameraSizeChange: ((CameraBubbleSize) -> Void)?
     /// 「当前 X pt」备注，切换档位时跟着刷新
     private var ptLabel: NSTextField?
 
-    init(model: AppModel) {
+    init(model: AppModel, cameraMode: Bool = false) {
         self.model = model
+        self.cameraMode = cameraMode
         super.init(frame: .zero)
 
         let prefs = model.prefs.value
+        let currentSize = cameraMode ? prefs.cameraRecordSize : prefs.recordCameraSize
+        let currentPoints = cameraMode ? currentSize.cameraSide : currentSize.side
 
         let stack = NSStackView()
         stack.orientation = .vertical
@@ -582,10 +598,10 @@ final class RecordOptionsView: NSView {
         let size = NSSegmentedControl(labels: CameraBubbleSize.allCases.map { $0.title },
                                       trackingMode: .selectOne,
                                       target: self, action: #selector(sizeChanged(_:)))
-        if let idx = CameraBubbleSize.allCases.firstIndex(of: prefs.recordCameraSize) {
+        if let idx = CameraBubbleSize.allCases.firstIndex(of: currentSize) {
             size.selectedSegment = idx
         }
-        let pt = NSTextField(labelWithString: "当前 \(Int(prefs.recordCameraSize.side)) pt")
+        let pt = NSTextField(labelWithString: "当前 \(Int(currentPoints)) pt")
         pt.font = NSFont.systemFont(ofSize: 11)
         pt.textColor = .secondaryLabelColor
         pt.setContentCompressionResistancePriority(.required, for: .horizontal)
@@ -665,8 +681,12 @@ final class RecordOptionsView: NSView {
         let all = CameraBubbleSize.allCases
         guard all.indices.contains(sender.selectedSegment) else { return }
         let newSize = all[sender.selectedSegment]
-        model?.prefs.value.recordCameraSize = newSize
-        ptLabel?.stringValue = "当前 \(Int(newSize.side)) pt"
+        if cameraMode {
+            model?.prefs.value.cameraRecordSize = newSize
+        } else {
+            model?.prefs.value.recordCameraSize = newSize
+        }
+        ptLabel?.stringValue = "当前 \(Int(cameraMode ? newSize.cameraSide : newSize.side)) pt"
         onCameraSizeChange?(newSize)
     }
 

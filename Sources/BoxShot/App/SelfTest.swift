@@ -531,44 +531,62 @@ enum SelfTest {
                   lineBoxes[1].bounds.height >= 0.04)
         }
 
-        // ── 摄像头取景框：600/550/500 + 居中（1.0.20 改版）──
+        // ── 取景框两套尺寸 + 两种落位（1.0.20 再改版）──
         do {
-            // 用户口径：大 600 / 中 550 / 小 500，取景框摆进录制框正中
-            check("取景框大 = 600pt", CameraBubbleSize.large.side == 600)
-            check("取景框中 = 550pt", CameraBubbleSize.medium.side == 550)
-            check("取景框小 = 500pt", CameraBubbleSize.small.side == 500)
-            check("取景框三档递减",
-                  CameraBubbleSize.large.side > CameraBubbleSize.medium.side
-                    && CameraBubbleSize.medium.side > CameraBubbleSize.small.side)
+            // 区域 / 全屏录制：还原成 200/180/150（贴右下角）
+            check("画中画大 = 200pt", CameraBubbleSize.large.side == 200)
+            check("画中画中 = 180pt", CameraBubbleSize.medium.side == 180)
+            check("画中画小 = 150pt", CameraBubbleSize.small.side == 150)
+            // 摄像头录制：600/550/500（居中）
+            check("摄像头大 = 600pt", CameraBubbleSize.large.cameraSide == 600)
+            check("摄像头中 = 550pt", CameraBubbleSize.medium.cameraSide == 550)
+            check("摄像头小 = 500pt", CameraBubbleSize.small.cameraSide == 500)
+            check("两套尺寸不相等（别又合并成一套）",
+                  CameraBubbleSize.large.side != CameraBubbleSize.large.cameraSide
+                    && CameraBubbleSize.medium.side != CameraBubbleSize.medium.cameraSide
+                    && CameraBubbleSize.small.side != CameraBubbleSize.small.cameraSide)
             check("取景框三档标题是 大/中/小",
                   CameraBubbleSize.large.title == "大"
                     && CameraBubbleSize.medium.title == "中"
                     && CameraBubbleSize.small.title == "小")
 
-            // 放得下就按设置的来（这版最要紧的一条：600 不能又被收成 200 那种）
-            let bigFrame = CGRect(x: 0, y: 0, width: 1504, height: 846)
-            check("大框里 600 不被收缩",
-                  CameraBubbleController.fittedSide(wanted: 600, anchor: bigFrame) == 600)
-            // 真的塞不下时按短边 80% 收，且不低于 96
-            check("小框里按短边 80% 收",
+            let frame = CGRect(x: 0, y: 0, width: 1282, height: 721)
+            // 摄像头录制：放得下就按设置的来（600 不能被收成别的数）
+            check("录制框里 600 原样落地",
+                  CameraBubbleController.fittedSide(wanted: 600, anchor: frame, placement: .centered) == 600)
+            // 摄像头录制：真的塞不下才收
+            check("塞不下时收到框高",
                   CameraBubbleController.fittedSide(wanted: 600,
-                                                    anchor: CGRect(x: 0, y: 0, width: 300, height: 200)) == 160)
-            check("极小框也不低于 96",
-                  CameraBubbleController.fittedSide(wanted: 600,
-                                                    anchor: CGRect(x: 0, y: 0, width: 60, height: 60)) == 96)
+                                                    anchor: CGRect(x: 0, y: 0, width: 400, height: 300),
+                                                    placement: .centered) == 300)
+            // 画中画：仍然按短边 45% 收，下限 96
+            check("画中画按短边 45% 收",
+                  CameraBubbleController.fittedSide(wanted: 200,
+                                                    anchor: CGRect(x: 0, y: 0, width: 400, height: 400),
+                                                    placement: .bottomTrailing) == 180)
+            check("画中画下限 96",
+                  CameraBubbleController.fittedSide(wanted: 200,
+                                                    anchor: CGRect(x: 0, y: 0, width: 100, height: 100),
+                                                    placement: .bottomTrailing) == 96)
 
-            // 固定录制框：16:9、居中、留边、不出界
+            check("摄像头录制默认大 600", Preferences().cameraRecordSize == .large)
+            check("摄像头录制尺寸读得回来",
+                  (try? JSONDecoder().decode(Preferences.self,
+                                             from: Data(#"{"cameraRecordSize":"small"}"#.bytes)))?
+                    .cameraRecordSize == .small)
+
+            // 固定录制框：16:9、居中、不出界、放得下 600 的取景框
             if let screen = NSScreen.main {
                 let visible = screen.visibleFrame
-                let frame = AppModel.fixedRecordFrame(on: screen)
-                check("固定框是 16:9", abs(frame.width / frame.height - 16.0 / 9.0) < 0.02)
+                let rect = AppModel.fixedRecordFrame(on: screen)
+                check("固定框是 16:9", abs(rect.width / rect.height - 16.0 / 9.0) < 0.02)
                 check("固定框居中",
-                      abs(frame.midX - visible.midX) <= 1 && abs(frame.midY - visible.midY) <= 1)
+                      abs(rect.midX - visible.midX) <= 1 && abs(rect.midY - visible.midY) <= 1)
                 check("固定框不出界",
-                      frame.minX >= visible.minX - 1 && frame.maxX <= visible.maxX + 1
-                        && frame.minY >= visible.minY - 1 && frame.maxY <= visible.maxY + 1)
-                check("固定框足够放进 600 的取景框",
-                      CameraBubbleController.fittedSide(wanted: 600, anchor: frame) == 600)
+                      rect.minX >= visible.minX - 1 && rect.maxX <= visible.maxX + 1
+                        && rect.minY >= visible.minY - 1 && rect.maxY <= visible.maxY + 1)
+                check("固定框放得下 600 的取景框",
+                      CameraBubbleController.fittedSide(wanted: 600, anchor: rect, placement: .centered) == 600)
             }
         }
 

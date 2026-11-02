@@ -66,15 +66,13 @@ enum RecordFileFormat: String, Codable, CaseIterable, Identifiable {
 /// `AVVideoExpectedSourceFrameRateKey` 用 `max(10, fps)`，这两头都能吃下 48/50/60。
 let recordFPSOptions: [Int] = [10, 15, 24, 25, 30, 48, 50, 60]
 
-/// 录制框里摄像头取景框的大小档位。
+/// 摄像头取景框的大小档位（两个场景两套数，别混用）。
 ///
-/// 用户口径（1.0.20 第二次改）：**大 600 / 中 550 / 小 500**，单位 pt，
-/// 取景框放在录制框里**居中**。
-///
-/// 早前是 200/180/150（贴着选区右下角的小窗）。1.0.20 一度给"只录摄像头"的
-/// 独立取景窗另开了一套 600/550/500（`windowSide`）；用户看过之后改成
-/// "固定录制框 + 录屏 + 大摄像头居中"，于是两套数字合并回这一套 ——
-/// 只留一个属性，避免再出现"设置里到底看的是哪套"的歧义。
+/// · `side`       —— **区域录制 / 全屏录制**贴在选区右下角的小窗：大 200 / 中 180 / 小 150。
+///   1.0.20 一度把这一套合并成 600/550/500，结果区域录制里一个 600 的圆把画面盖掉大半，
+///   用户要求「区域录制、全屏录制还原成之前的」—— 所以恢复。
+/// · `cameraSide` —— **摄像头录制**（固定录制框）里居中摆的那个大取景框：
+///   大 600 / 中 550 / 小 500。用户口径就是这三个数 —— 人脸要看得清。
 enum CameraBubbleSize: String, Codable, CaseIterable, Identifiable {
     case large
     case medium
@@ -88,8 +86,16 @@ enum CameraBubbleSize: String, Codable, CaseIterable, Identifiable {
         case .small:  return "小"
         }
     }
-    /// 取景框（圆形直径 / 圆角矩形宽度）的边长，单位 pt
+    /// 区域 / 全屏录制里画中画取景框的边长，单位 pt
     var side: CGFloat {
+        switch self {
+        case .large:  return 200
+        case .medium: return 180
+        case .small:  return 150
+        }
+    }
+    /// 摄像头录制（固定录制框）里取景框的边长，单位 pt
+    var cameraSide: CGFloat {
         switch self {
         case .large:  return 600
         case .medium: return 550
@@ -214,6 +220,8 @@ struct Preferences: Codable, Equatable {
     var recordAudio: RecordAudioSource = .mic
     var recordCamera: Bool = false     // 摄像头画中画
     var recordCameraSize: CameraBubbleSize = .medium
+    /// 摄像头录制（固定录制框）里取景框的大小：默认大 600
+    var cameraRecordSize: CameraBubbleSize = .large
     var recordFPS: Int = 30
     var recordShowCursor: Bool = true
     var recordFormat: RecordFileFormat = .mp4
@@ -265,6 +273,7 @@ struct Preferences: Codable, Equatable {
         recordAudio = try c.decodeIfPresent(RecordAudioSource.self, forKey: .recordAudio) ?? f.recordAudio
         recordCamera = try c.decodeIfPresent(Bool.self, forKey: .recordCamera) ?? f.recordCamera
         recordCameraSize = try c.decodeIfPresent(CameraBubbleSize.self, forKey: .recordCameraSize) ?? f.recordCameraSize
+        cameraRecordSize = try c.decodeIfPresent(CameraBubbleSize.self, forKey: .cameraRecordSize) ?? f.cameraRecordSize
         recordFPS = try c.decodeIfPresent(Int.self, forKey: .recordFPS) ?? f.recordFPS
         recordShowCursor = try c.decodeIfPresent(Bool.self, forKey: .recordShowCursor) ?? f.recordShowCursor
         // recordFormat 手动映射（不再走 decodeIfPresent(RecordFileFormat.self)）：
@@ -287,7 +296,7 @@ struct Preferences: Codable, Equatable {
         case pinDoubleClick, pinOpacity, pinShadow, maxPinHistory
         case ocrKeepLineBreaks, ocrLineOverlap, ocrIncremental, ocrAutoOpenLink
         case measureShowTips
-        case recordAudio, recordCamera, recordCameraSize, recordFPS, recordShowCursor
+        case recordAudio, recordCamera, recordCameraSize, cameraRecordSize, recordFPS, recordShowCursor
         case recordFormat, recordQuality, recordRevealInFinder
         case shortcuts
     }

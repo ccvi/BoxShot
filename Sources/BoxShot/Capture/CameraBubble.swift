@@ -24,6 +24,12 @@ final class CameraBubbleController {
         case roundedRect
     }
 
+    /// 取景框摆哪儿：两种录制模式两种口径
+    enum Placement {
+        case bottomTrailing   // 区域 / 全屏录制：贴选区右下角（1.0.20 之前的口径）
+        case centered         // 摄像头录制：摆在固定录制框正中
+    }
+
     /// 关掉取景框（用户点了 ✕）—— 工具条据此同步按钮状态
     var onClose: (() -> Void)?
 
@@ -34,9 +40,16 @@ final class CameraBubbleController {
     private var lastAnchor: CGRect = .zero
     /// 取景框大小档位（设置 → 录制 → 取景框大小；弹层里切换要实时生效，所以是 var）
     private(set) var size: CameraBubbleSize
+    private let placement: Placement
 
-    init(size: CameraBubbleSize) {
+    init(size: CameraBubbleSize, placement: Placement = .bottomTrailing) {
         self.size = size
+        self.placement = placement
+    }
+
+    /// 同一档位在两种模式下的实际点数不同（画中画 200/180/150，摄像头录制 600/550/500）
+    private var side: CGFloat {
+        placement == .centered ? size.cameraSide : size.side
     }
 
     /// 弹层 / 设置里切换档位时实时生效：只改窗口大小和位置，摄像头会话不动
@@ -53,7 +66,7 @@ final class CameraBubbleController {
     /// 否则摄像头的画面根本进不了成片（详见 Recorder.keepVisibleWindowNumbers）
     var windowNumber: Int { panel?.windowNumber ?? 0 }
 
-    /// anchor 是录制框在 AppKit 全局坐标里的框；取景框摆在框**正中**。
+    /// anchor 是录制框在 AppKit 全局坐标里的框。
     func show(anchor: CGRect) {
         lastAnchor = anchor
         if let panel {
@@ -103,21 +116,23 @@ final class CameraBubbleController {
 
     // ── 位置 ────────────────────────────────────────────────
 
-    /// 取景框边长 = 设置里的档位（大 600 / 中 550 / 小 500 pt）。
+    /// 取景框实际边长：档位点数在放不下时才收（最小 96pt）。
     ///
-    /// 只在录制框**实在放不下**时才收：按帧短边的 80% 收（最小 96pt）。
-    /// 用户口径是"我设 600 就是 600"，所以上限给得比早前的 45% 宽得多 ——
-    /// 45% 那套是"小窗别挡着被录内容"，现在是"人像要够大"，诉求反过来了。
-    /// 真的把小窗塞进 300×200 的选区时，80% 仍然是 160pt，不会撑破。
-    static func fittedSide(wanted: CGFloat, anchor: CGRect) -> CGFloat {
-        min(wanted, max(96, min(anchor.width, anchor.height) * 0.8))
+    /// 两种模式的收法不同，因为诉求相反：
+    /// · 画中画（右下角小窗）：按短边 **45%** 收 —— 170pt 的圆压在 300×200 的选区上
+    ///   会把被录内容盖掉大半，这种极端情况必须缩。
+    /// · 摄像头录制（居中大窗）：只在**真的塞不进**录制框**时才收（按 100% 短边）——
+    ///   用户口径是"我设 600 就是 600"，600 的圆放进 770 高的框里就该原样落地。
+    static func fittedSide(wanted: CGFloat, anchor: CGRect, placement: Placement) -> CGFloat {
+        let ratio: CGFloat = (placement == .centered) ? 1.0 : 0.45
+        return min(wanted, max(96, min(anchor.width, anchor.height) * ratio))
     }
 
     private func fittedSide(for anchor: CGRect) -> CGFloat {
-        Self.fittedSide(wanted: size.side, anchor: anchor)
+        Self.fittedSide(wanted: side, anchor: anchor, placement: placement)
     }
 
-    /// 取景框在录制框里**居中**（用户要求；早前是贴右下角）
+    /// 落位：画中画贴右下角，摄像头录制摆正中
     private func position(_ panel: NSPanel, anchor: CGRect) {
         var size = panel.frame.size
         size.width = fittedSide(for: anchor)
@@ -125,8 +140,17 @@ final class CameraBubbleController {
         if abs(panel.frame.width - size.width) > 0.5 || abs(panel.frame.height - size.height) > 0.5 {
             panel.setContentSize(size)
         }
-        let x = anchor.midX - size.width / 2
-        let y = anchor.midY - size.height / 2
+        let x: CGFloat
+        let y: CGFloat
+        switch placement {
+        case .bottomTrailing:
+            let inset: CGFloat = 18
+            x = anchor.maxX - size.width - inset
+            y = anchor.minY + inset
+        case .centered:
+            x = anchor.midX - size.width / 2
+            y = anchor.midY - size.height / 2
+        }
         panel.setFrameOrigin(NSPoint(x: x, y: y))
         // 落位诊断：坐标是 AppKit 全局（左下原点），和录制框同一个坐标系。
         // 「取景框怎么没在框中间」这类问题，只有把两个矩形打出来才对得上账。
