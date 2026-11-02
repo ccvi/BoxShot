@@ -311,6 +311,10 @@ enum SelfTest {
             let visible = CGRect(x: 0, y: 0, width: 1710, height: 1077)
             let panelSize = CGSize(width: 200, height: 48)
             check("调色板正好 6 个颜色", OverlayEditorController.colorPalette.count == 6)
+            check("色卡是 黄绿蓝红橙紫 六色（含色值）",
+                  OverlayEditorController.colorPalette.map { $0.hexString }
+                    == ["#F8CE43", "#62C563", "#3887FB", "#EB4259", "#F3933D", "#BD3DDD"])
+            check("色块是圆形（圆角取半径）", OverlayEditorController.swatchSide > 0)
 
             let toolbar = CGRect(x: 300, y: 500, width: 700, height: 64)
             let p1 = OverlayEditorController.colorPanelOrigin(toolbar: toolbar,

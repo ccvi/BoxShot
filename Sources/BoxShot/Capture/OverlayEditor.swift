@@ -388,7 +388,7 @@ final class OverlayEditorController: NSObject {
         button.bezelStyle = .regularSquare
         button.isBordered = false
         button.wantsLayer = true
-        button.layer?.cornerRadius = 10
+        button.layer?.cornerRadius = 15   // 30×30 的圆
         button.layer?.borderWidth = 1.5
         button.layer?.borderColor = NSColor.white.withAlphaComponent(0.75).cgColor
         button.toolTip = "颜色与粗细"
@@ -483,10 +483,13 @@ final class OverlayEditorController: NSObject {
                                                    visible: screen.visibleFrame))
     }
 
-    /// 调色板：6 个颜色（1.0.10 用户口径「颜色 6 个颜色」）。
+    /// 色块直径（pt）：圆形，圆角取一半
+    static let swatchSide: CGFloat = 26
+
+    /// 调色板：6 个颜色（1.0.10 用户口径「颜色 6 个颜色」，顺序按他给的色卡）。
     /// 抽成常量是为了自检能盯着数量 —— 以前是散在这里的数组字面量，
     /// 加一个减一个没人会发现。
-    static let colorPalette: [RGBColor] = [.red, .blue, .yellow, .green, .white, .black]
+    static let colorPalette: [RGBColor] = [.yellow, .green, .blue, .red, .orange, .purple]
 
     /// 颜色面板与工具条的间距
     static let colorPanelGap: CGFloat = 8
@@ -617,14 +620,14 @@ final class OverlayEditorController: NSObject {
     }
 
     private func divider() -> NSView {
-        let view = NSView(frame: NSRect(x: 0, y: 0, width: 1, height: 32))
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: 1, height: 26))
         view.wantsLayer = true
         view.layer?.backgroundColor = NSColor.separatorColor.cgColor
         // 同上：裸 NSView 没有 intrinsicContentSize，在 NSStackView 里会被压成 0 宽
         view.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             view.widthAnchor.constraint(equalToConstant: 1),
-            view.heightAnchor.constraint(equalToConstant: 32),
+            view.heightAnchor.constraint(equalToConstant: 26),
         ])
         return view
     }
@@ -670,21 +673,22 @@ final class OverlayEditorController: NSObject {
         button.isBordered = false
         button.wantsLayer = true
         button.layer?.backgroundColor = color.cgColor
-        button.layer?.cornerRadius = 8
+        // 圆形：圆角 = 边长的一半（1.0.10 用户口径「颜色改成圆形的」）
+        button.layer?.cornerRadius = Self.swatchSide / 2
         button.toolTip = "颜色 \(color.hexString)（有选中标注时直接改它）"
         button.setButtonType(.momentaryChange)
         button.onAction = { [weak self] in
             self?.doc.applyToSelected(color: color)
             self?.refresh()
         }
-        button.frame = NSRect(x: 0, y: 0, width: 21, height: 32)
+        button.frame = NSRect(x: 0, y: 0, width: Self.swatchSide, height: Self.swatchSide)
         // 🔴 这几条约束不能省：NSStackView 按 intrinsicContentSize 排，
         // 而这个按钮 title 为空、只有 layer 底色 → intrinsic 是 0×0，
         // 整排色块会被压成 0 宽（表现为"颜色面板是空的"）。
         button.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            button.widthAnchor.constraint(equalToConstant: 21),
-            button.heightAnchor.constraint(equalToConstant: 32),
+            button.widthAnchor.constraint(equalToConstant: Self.swatchSide),
+            button.heightAnchor.constraint(equalToConstant: Self.swatchSide),
         ])
         return button
     }

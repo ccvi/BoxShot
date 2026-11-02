@@ -190,10 +190,20 @@ struct RGBColor: Equatable {
     var blue: Double
     var alpha: Double = 1
 
-    static let red    = RGBColor(red: 0.95, green: 0.26, blue: 0.21)
-    static let blue   = RGBColor(red: 0.15, green: 0.45, blue: 0.95)
-    static let yellow = RGBColor(red: 1.00, green: 0.78, blue: 0.10)
-    static let green  = RGBColor(red: 0.20, green: 0.72, blue: 0.35)
+    // 六个主色按用户给的色卡取值（直接从他那张图上取的像素中心）：
+    // 黄 #F8CE43 / 绿 #62C563 / 蓝 #3887FB / 红 #EB4259 / 橙 #F3933D / 紫 #BD3DDD
+    static let yellow = srgb(248, 206, 67)    // #F8CE43
+    static let green  = srgb(98, 197, 99)     // #62C563
+    static let blue   = srgb(56, 135, 251)    // #3887FB
+    static let red    = srgb(235, 66, 89)     // #EB4259
+    static let orange = srgb(243, 147, 61)    // #F3933D
+    static let purple = srgb(189, 61, 221)    // #BD3DDD
+
+    /// 用 0–255 写色值，免得手算浮点把 hexString 算歪一档
+    static func srgb(_ r: Int, _ g: Int, _ b: Int) -> RGBColor {
+        RGBColor(red: Double(r) / 255, green: Double(g) / 255, blue: Double(b) / 255)
+    }
+    // 白 / 黑不在色卡里，但取色标注、文字这类地方仍然用得到
     static let white  = RGBColor(red: 1, green: 1, blue: 1)
     static let black  = RGBColor(red: 0, green: 0, blue: 0)
 

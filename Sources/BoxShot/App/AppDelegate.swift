@@ -587,7 +587,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // 合成一次点击：第 6 个色块（黑，最不容易和默认色撞）。
                 // 坐标是 AppKit 左下原点 → 全局左上原点。
                 // 面板内边距 10、色块 21 宽、间距 6：第 n 个色块中心 = minX+10+(21+6)*n+10.5
-                let cx = panel.minX + 10 + (21 + 6) * 5 + 10.5
+                let side = OverlayEditorController.swatchSide
+                let cx = panel.minX + 10 + (side + 6) * 5 + side / 2
                 let cy = panel.midY
                 let screenH = ScreenCapture.activeScreen().frame.height
                 let src = CGEventSource(stateID: .hidSystemState)
