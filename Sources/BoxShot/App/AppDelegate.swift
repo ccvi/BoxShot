@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import Foundation
 
 // ============================================================
@@ -66,6 +67,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let displayID = ScreenCapture.display(for: ScreenCapture.activeScreen())
                 self.model.beginScrollCapture(displayID: displayID,
                                               region: CGRect(x: 120, y: 120, width: 900, height: 620))
+            }
+        }
+        // 诊断入口：--recordcamera 走一遍"带摄像头取景框的真录制"，
+        // 结束时从成片里抽一帧存 /tmp/boxshot-recordcamera-frame.jpg。
+        // 「录出来的视频没有摄像头影像」这种问题只有端到端跑一次才看得清：
+        // 是取景框没上屏、还是被"排除自家窗口"排掉了、还是根本没权限。
+        let cameraTrigger = "/tmp/boxshot-recordcamera.trigger"
+        if CommandLine.arguments.contains("--recordcamera")
+            || FileManager.default.fileExists(atPath: cameraTrigger) {
+            try? FileManager.default.removeItem(atPath: cameraTrigger)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                self?.runRecordCameraDiagnostics()
+            }
+        }
+        // 诊断入口：--esctest 打开区域截图遮罩 → 自己投一个 Esc 进去 → 看遮罩有没有收掉。
+        // 「Esc 没生效」这种问题，光读代码看不出是"判断写错"还是"按键根本没进来"。
+        let escTrigger = "/tmp/boxshot-esctest.trigger"
+        if CommandLine.arguments.contains("--esctest")
+            || FileManager.default.fileExists(atPath: escTrigger) {
+            try? FileManager.default.removeItem(atPath: escTrigger)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                self?.runEscDiagnostics()
+            }
+        }
+        // 诊断入口：--escwait 打开遮罩后**等外部真实按键** 15 秒（配合
+        // `osascript -e 'tell application "System Events" to key code 53'` 或人手动按），
+        // 用来区分「代码没接住」和「按键根本没进来」——本机 AX 未授权，
+        // CGEvent.post 是空操作，光靠自投事件证明不了真实按键这条路。
+        let escWaitTrigger = "/tmp/boxshot-escwait.trigger"
+        if CommandLine.arguments.contains("--escwait")
+            || FileManager.default.fileExists(atPath: escWaitTrigger) {
+            try? FileManager.default.removeItem(atPath: escWaitTrigger)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                self?.runEscWaitDiagnostics()
+            }
+        }
+        // 诊断入口：--dragtest 用合成鼠标拖一次框，验「松手即截图」这条路
+        // （用户明确要求去掉"单击选区内 / 回车"那一步，这条流程必须端到端跑一遍）。
+        let dragTrigger = "/tmp/boxshot-dragtest.trigger"
+        if CommandLine.arguments.contains("--dragtest")
+            || FileManager.default.fileExists(atPath: dragTrigger) {
+            try? FileManager.default.removeItem(atPath: dragTrigger)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                self?.runDragTestDiagnostics()
+            }
+        }
+        // 诊断入口：--windowtest 走一遍「窗口截图」（只点一下，不拖），
+        // 验 windowPickMode 真的强制开了窗口高亮、并且点到的是别人家的窗口
+        // 而不是盖在上面的自家遮罩。
+        let windowTrigger = "/tmp/boxshot-windowtest.trigger"
+        if CommandLine.arguments.contains("--windowtest")
+            || FileManager.default.fileExists(atPath: windowTrigger) {
+            try? FileManager.default.removeItem(atPath: windowTrigger)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                self?.runWindowTestDiagnostics()
             }
         }
         // 诊断入口：--show-settings 直接弹设置窗口，用来核对各页控件是否
@@ -138,6 +194,290 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 log("诊断结束")
                 exit(0)
             }
+        }
+    }
+
+    // ── 诊断：Esc 到底进不进得来 ────────────────────────────
+
+    private func runEscDiagnostics() {
+        let logURL = URL(fileURLWithPath: "/tmp/boxshot-esctest.log")
+        try? "".write(to: logURL, atomically: true, encoding: .utf8)
+        func log(_ text: String) {
+            NSLog("[BoxShot][esctest] %@", text)
+            guard let handle = try? FileHandle(forWritingTo: logURL) else { return }
+            handle.seekToEndOfFile()
+            handle.write("\(text)\n".data(using: .utf8)!)
+            try? handle.close()
+        }
+
+        model.perform(.regionShot)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            log("遮罩已开：isActive=\(self.model.isRegionSelectorActive)")
+            log("keyWindow=\(NSApp.keyWindow?.className ?? "nil") · isKey=\(NSApp.keyWindow?.isKeyWindow ?? false) · appActive=\(NSApp.isActive)")
+            log("AX 可信（能发 HID 事件）=\(AXIsProcessTrusted())")
+            // ① 先走"真按键"这一路：CGEvent 投到 HID 层，由窗口服务器分发给前台应用，
+            //    跟手指按下去等价。postEvent 只是往自己的事件队列里塞，绕不过窗口服务器，
+            //    所以它通过 ≠ 用户按下去也能过。
+            let src = CGEventSource(stateID: .hidSystemState)
+            if let down = CGEvent(keyboardEventSource: src, virtualKey: 53, keyDown: true),
+               let up = CGEvent(keyboardEventSource: src, virtualKey: 53, keyDown: false) {
+                down.post(tap: .cghidEventTap)
+                up.post(tap: .cghidEventTap)
+                log("已投递 HID 层真实 Esc")
+            } else {
+                log("HID 层 Esc 构造失败")
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
+                if !self.model.isRegionSelectorActive {
+                    log("✅ 真实 Esc 生效，遮罩已收起")
+                    exit(0)
+                }
+                log("❌ 真实 Esc 没生效（当前 isActive=true）→ 退到 postEvent 这一路再试")
+                if let ev = NSEvent.keyEvent(with: .keyDown, location: .zero,
+                                             modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                             windowNumber: NSApp.keyWindow?.windowNumber ?? 0,
+                                             context: nil, characters: "\u{1b}",
+                                             charactersIgnoringModifiers: "\u{1b}",
+                                             isARepeat: false, keyCode: 53) {
+                    NSApp.postEvent(ev, atStart: false)
+                    log("已投递 postEvent Esc")
+                } else {
+                    log("Esc 事件构造失败")
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                    log("postEvent 之后：isActive=\(self.model.isRegionSelectorActive)")
+                    log(self.model.isRegionSelectorActive
+                        ? "❌ 两条路都没生效"
+                        : "⚠️ 只有 postEvent 生效（真按键这一路不通，先确认 AX 授权）")
+                    exit(0)
+                }
+            }
+        }
+    }
+
+    // ── 诊断：等外部真实按键 ──────────────────────────────────
+
+    /// 打开遮罩 → 什么都不投，纯等 15 秒，看外部按下来的 Esc 能不能收掉遮罩。
+    /// 本机 `AXIsProcessTrusted()` 是 false，`CGEvent.post` 等于往空气里发，
+    /// 所以「自投 Esc 没生效」并不能说明真实按键不通；这条路径是唯一能证明的。
+    private func runEscWaitDiagnostics() {
+        let logURL = URL(fileURLWithPath: "/tmp/boxshot-escwait.log")
+        try? "".write(to: logURL, atomically: true, encoding: .utf8)
+        func log(_ text: String) {
+            NSLog("[BoxShot][escwait] %@", text)
+            guard let handle = try? FileHandle(forWritingTo: logURL) else { return }
+            handle.seekToEndOfFile()
+            handle.write("\(text)\n".data(using: .utf8)!)
+            try? handle.close()
+        }
+
+        _ = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            log("收到 keyDown code=\(event.keyCode) chars=\(event.charactersIgnoringModifiers ?? "")")
+            return event
+        }
+
+        model.perform(.regionShot)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            log("遮罩已开 isActive=\(self.model.isRegionSelectorActive)")
+            log("keyWindow=\(NSApp.keyWindow?.className ?? "nil") · isKey=\(NSApp.keyWindow?.isKeyWindow ?? false) · appActive=\(NSApp.isActive)")
+            log("AX 可信=\(AXIsProcessTrusted()) · 等外部真实 Esc 15 秒…")
+            let deadline = Date().addingTimeInterval(15)
+            let timer = Timer(timeInterval: 0.5, repeats: true) { t in
+                let stillActive = self.model.isRegionSelectorActive
+                if !stillActive || Date() > deadline {
+                    t.invalidate()
+                    log("结束：isActive=\(stillActive)")
+                    log(stillActive ? "❌ 15 秒里没收到能结束截图的 Esc" : "✅ 外部真实 Esc 生效，遮罩已收起")
+                    exit(0)
+                }
+            }
+            RunLoop.main.add(timer, forMode: .common)
+        }
+    }
+
+    // ── 诊断：合成鼠标拖框，验「松手即截图」 ─────────────────
+
+    /// 打开遮罩 → 用 CGEvent 合成一次左键拖动 → 松手。
+    /// 判定标准：遮罩自己收掉，且浮层编辑器带着一个非空框冒出来。
+    /// 之所以要合成而不是读代码：这条路径上有三件事接力（mouseUp → confirm →
+    /// finish → delegate → 异步截图 → 浮层重开），只改一处很容易断开却看着"写了"。
+    private func runDragTestDiagnostics() {
+        let logURL = URL(fileURLWithPath: "/tmp/boxshot-dragtest.log")
+        try? "".write(to: logURL, atomically: true, encoding: .utf8)
+        func log(_ text: String) {
+            NSLog("[BoxShot][dragtest] %@", text)
+            guard let handle = try? FileHandle(forWritingTo: logURL) else { return }
+            handle.seekToEndOfFile()
+            handle.write("\(text)\n".data(using: .utf8)!)
+            try? handle.close()
+        }
+
+        let src = CGEventSource(stateID: .hidSystemState)
+        func post(_ type: CGEventType, _ p: CGPoint) {
+            CGEvent(mouseEventSource: src, mouseType: type,
+                    mouseCursorPosition: p, mouseButton: .left)?.post(tap: .cghidEventTap)
+        }
+
+        model.perform(.regionShot)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            log("遮罩已开 isActive=\(self.model.isRegionSelectorActive) AX=\(AXIsProcessTrusted())")
+            // 逻辑坐标（左上原点，点）。屏幕 1710×1107，取中间一块避免贴边。
+            let start = CGPoint(x: 420, y: 300)
+            let end   = CGPoint(x: 980, y: 720)
+            post(.mouseMoved, start)
+            post(.leftMouseDown, start)
+
+            var step = 0
+            let total = 10
+            let timer = Timer(timeInterval: 0.05, repeats: true) { t in
+                step += 1
+                let f = CGFloat(step) / CGFloat(total)
+                let p = CGPoint(x: start.x + (end.x - start.x) * f,
+                                y: start.y + (end.y - start.y) * f)
+                post(.leftMouseDragged, p)
+                guard step >= total else { return }
+                t.invalidate()
+                post(.leftMouseUp, p)
+                log("已松开左键（\(Int(end.x - start.x)) × \(Int(end.y - start.y))）")
+
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                    log("松手后：遮罩 isActive=\(self.model.isRegionSelectorActive)（应为 false）")
+                    if let editor = self.model.overlayEditor {
+                        log("浮层编辑器已出现 frame=\(editor.selectionFrame)")
+                        log("✅ 松手即截图：遮罩已收、浮层已出")
+                    } else {
+                        log("❌ 没有浮层编辑器（截图没走通）")
+                    }
+                    exit(0)
+                }
+            }
+            RunLoop.main.add(timer, forMode: .common)
+        }
+    }
+
+    // ── 诊断：窗口截图（点选窗口） ────────────────────────────
+
+    /// 走 `windowShot` 动作 → 合成一次单击 → 看浮层是不是按"某个窗口的框"开的。
+    /// 判定：浮层框要明显小于全屏，且遮罩已收。
+    private func runWindowTestDiagnostics() {
+        let logURL = URL(fileURLWithPath: "/tmp/boxshot-windowtest.log")
+        try? "".write(to: logURL, atomically: true, encoding: .utf8)
+        func log(_ text: String) {
+            NSLog("[BoxShot][windowtest] %@", text)
+            guard let handle = try? FileHandle(forWritingTo: logURL) else { return }
+            handle.seekToEndOfFile()
+            handle.write("\(text)\n".data(using: .utf8)!)
+            try? handle.close()
+        }
+
+        let screenFrame = ScreenCapture.activeScreen().frame
+        let src = CGEventSource(stateID: .hidSystemState)
+        func post(_ type: CGEventType, _ p: CGPoint) {
+            CGEvent(mouseEventSource: src, mouseType: type,
+                    mouseCursorPosition: p, mouseButton: .left)?.post(tap: .cghidEventTap)
+        }
+
+        model.perform(.windowShot)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            log("窗口模式遮罩已开 isActive=\(self.model.isRegionSelectorActive) 屏幕=\(screenFrame)")
+            // 屏幕左上象限里点一下（那里通常有一个别人的窗口）
+            let p = CGPoint(x: 480, y: 260)
+            post(.mouseMoved, p)
+            post(.leftMouseDown, p)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                post(.leftMouseUp, p)
+                log("已在 \(Int(p.x)),\(Int(p.y)) 单击")
+
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                    log("点击后：遮罩 isActive=\(self.model.isRegionSelectorActive)（应为 false）")
+                    if let editor = self.model.overlayEditor {
+                        let f = editor.selectionFrame
+                        log("浮层 frame=\(f)")
+                        let fullScreen = abs(f.width - screenFrame.width) < 2 && abs(f.height - screenFrame.height) < 2
+                        log(fullScreen ? "❌ 框是整屏 —— 点到的是自家遮罩，不是目标窗口"
+                                       : "✅ 窗口截图：拿到了一个具体窗口的框")
+                    } else {
+                        log("❌ 没有浮层编辑器（点选窗口没走通）")
+                    }
+                    exit(0)
+                }
+            }
+        }
+    }
+
+    // ── 诊断：带摄像头取景框的真录制 ──────────────────────────
+
+    private var cameraProbeBubble: CameraBubbleController?
+
+    private func runRecordCameraDiagnostics() {
+        let logURL = URL(fileURLWithPath: "/tmp/boxshot-recordcamera.log")
+        try? "".write(to: logURL, atomically: true, encoding: .utf8)
+        func log(_ text: String) {
+            NSLog("[BoxShot][recordcam] %@", text)
+            guard let handle = try? FileHandle(forWritingTo: logURL) else { return }
+            handle.seekToEndOfFile()
+            handle.write("\(text)\n".data(using: .utf8)!)
+            try? handle.close()
+        }
+
+        guard let screen = NSScreen.main else { log("没有屏幕"); exit(0) }
+        let bubble = CameraBubbleController(size: .medium)
+        cameraProbeBubble = bubble
+        bubble.show(anchor: screen.visibleFrame)
+        log("取景框已上屏：windowNumber=\(bubble.windowNumber) 边长=\(CameraBubbleSize.medium.side)")
+
+        // 等摄像头会话真的出画（首次还要过权限）
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+            let displayID = ScreenCapture.display(for: ScreenCapture.activeScreen())
+            let recorder = RecorderController()
+            self.recordTestRecorder = recorder
+            recorder.keepVisibleWindowNumbers = [bubble.windowNumber]
+            recorder.onError = { log("错误：\($0)") }
+            recorder.onWarning = { log("提醒：\($0)") }
+            var outURL: URL?
+            do {
+                try recorder.startRecording(displayID: displayID, region: nil, audio: .none,
+                                            camera: false, fps: 30, showCursor: false,
+                                            format: .mp4, quality: .medium, showsHUD: false)
+                // outputURL 在收尾时会被清空，这里先拿住
+                outURL = recorder.outputURL
+                log("开始录制全屏 4 秒 → \(outURL?.lastPathComponent ?? "?")")
+            } catch {
+                log("启动失败：\(error.localizedDescription)")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { exit(0) }
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
+                log("排除报告：\(recorder.lastExclusionReport)")
+                recorder.stop(reason: .user)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                    guard let url = outURL else { log("没有输出文件"); exit(0) }
+                    log("输出：\(url.path)")
+                    self.extractFrame(from: url, seconds: 2.0, log: log)
+                    exit(0)
+                }
+            }
+        }
+    }
+
+    /// 从成片里抽一帧存成 JPG：有摄像头画面的话，右下角那块应该是人像而不是桌面
+    private func extractFrame(from url: URL, seconds: Double, log: (String) -> Void) {
+        let asset = AVURLAsset(url: url)
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .zero
+        do {
+            let cg = try generator.copyCGImage(at: CMTime(seconds: seconds, preferredTimescale: 600),
+                                               actualTime: nil)
+            let rep = NSBitmapImageRep(cgImage: cg)
+            if let data = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.9]) {
+                let out = "/tmp/boxshot-recordcamera-frame.jpg"
+                try data.write(to: URL(fileURLWithPath: out))
+                log("抽帧 \(cg.width)×\(cg.height) → \(out)")
+            }
+        } catch {
+            log("抽帧失败：\(error.localizedDescription)")
         }
     }
 

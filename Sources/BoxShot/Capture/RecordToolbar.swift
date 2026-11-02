@@ -322,6 +322,11 @@ final class RecordToolbarController: NSObject {
             if !isGIF, prefs.recordCamera, cameraBubble == nil {
                 toggleCameraBubble()
             }
+            // 🔴 取景框是本进程的窗口，而"排除自家窗口"是按 pid 一刀切的：
+            // 不把它挑出来，摄像头画面会被一并从录制里排掉 ——
+            // 用户看到的就是"录出来的视频没有摄像头影像"。
+            let bubbleNumber = cameraBubble?.windowNumber ?? 0
+            controller.keepVisibleWindowNumbers = bubbleNumber > 0 ? [bubbleNumber] : []
             try controller.startRecording(displayID: displayID,
                                           region: region,
                                           // GIF 没有音轨：这里明确传 none，别让引擎白开一路采集

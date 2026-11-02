@@ -139,9 +139,10 @@ final class OverlayEditorController: NSObject {
                                      height: selectionFrame.height)
         }
 
-        let panel = NSPanel(contentRect: panelFrame,
-                            styleMask: [.borderless, .nonactivatingPanel],
-                            backing: .buffered, defer: false)
+        // KeyablePanel：无边框面板默认拿不到 key window，键盘（Esc / ⌘C / ⌘S）进不来
+        let panel = KeyablePanel(contentRect: panelFrame,
+                                 styleMask: [.borderless, .nonactivatingPanel],
+                                 backing: .buffered, defer: false)
         panel.level = .floating
         panel.isOpaque = false
         panel.backgroundColor = .clear

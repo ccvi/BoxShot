@@ -34,6 +34,9 @@ final class RegionSelector: NSObject {
     private var window: NSWindow?
     private var overlayView: OverlayView?
     private var displayID: CGDirectDisplayID = 0
+    /// Esc 的兜底监听：面板万一没拿到 key window（无边框窗口的老毛病），
+    /// 按键事件还是本应用收到的，本地监听能先一步接住。
+    private var escMonitor: Any?
     private(set) var isActive = false
 
     func begin(highlightWindows: Bool, crosshair: Bool) {
@@ -43,7 +46,7 @@ final class RegionSelector: NSObject {
         let screen = ScreenCapture.activeScreen()
         displayID = ScreenCapture.display(for: screen)
 
-        let panel = NSWindow(contentRect: screen.frame,
+        let panel = KeyableWindow(contentRect: screen.frame,
                              styleMask: [.borderless],
                              backing: .buffered,
                              defer: false,
@@ -74,9 +77,29 @@ final class RegionSelector: NSObject {
         window = panel
         overlayView = view
         isActive = true
-        panel.makeKeyAndOrderFront(nil)
+        // 🔴 顺序不能反：**先激活应用，再让窗口成为 key**。
+        // 反过来写（先 makeKeyAndOrderFront 再 activate）在本应用还没 active 时，
+        // AppKit 会把 "become key" 推后到激活之后才做，中间那段时间窗口是
+        // "看得见但收不到键盘"——表现就是"按 Esc 没反应"，而这恰好是最难靠
+        // 读代码发现的（代码里明明写了两句）。再补一次 makeKey() 兜底。
         NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+        panel.makeKey()
         view.warmUpWindowList()
+        installEscMonitor()
+    }
+
+    /// 🔴 双保险。第一条路是让面板真的成为 key window（KeyableWindow），
+    /// keyDown 直接进视图；第二条路就是这个本地监听 —— 就算窗口因为系统原因
+    /// 没拿到焦点，只要应用在收键盘事件，Esc 一样能结束截图。
+    /// 用户反馈"全局按 Esc 强制结束截屏没生效"就是因为以前只有第一条路，
+    /// 而它从来没通。
+    private func installEscMonitor() {
+        escMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, self.isActive, event.keyCode == 53 else { return event }
+            self.cancel()
+            return nil
+        }
     }
 
     func cancel() {
@@ -87,6 +110,8 @@ final class RegionSelector: NSObject {
 
     fileprivate func finish() {
         isActive = false
+        if let escMonitor { NSEvent.removeMonitor(escMonitor) }
+        escMonitor = nil
         let view = overlayView
         let panel = window
         overlayView = nil
@@ -253,10 +278,14 @@ final class RegionSelector: NSObject {
             if isDragging {
                 let rect = normalizedRect(start, dragCurrent ?? p)
                 if rect.width >= 8 && rect.height >= 8 {
-                    // 进入调整阶段：不立刻截图，先让用户拖手柄/方向键微调，回车确认
-                    selection = rect
-                    phase = .adjusting
-                    needsDisplay = true
+                    // 松开鼠标 = 立刻截（1.0.10 用户要求去掉"单击选区内 / 回车开始"
+                    // 这一步确认）。框能调大小这件事已经搬到截完的浮层里做，
+                    // 选区阶段不再需要"调整态"。
+                    confirm(rect: rect)
+                    dragStart = nil
+                    dragCurrent = nil
+                    isDragging = false
+                    return
                 } else {
                     needsDisplay = true // 太小视为误触，留在选区模式
                 }
@@ -437,7 +466,7 @@ final class RegionSelector: NSObject {
             guard let rect = selectionRect else {
                 drawCrosshair(ctx)
                 // 冷启动时屏幕上只有一个暗幕，没有任何提示会让人以为卡住了
-                drawCenteredHint("拖动框选区域 · 右键取消", ctx: ctx)
+                drawCenteredHint("拖动框选区域 · 松手即截图 · Esc 或右键取消", ctx: ctx)
                 return
             }
 
@@ -451,11 +480,16 @@ final class RegionSelector: NSObject {
             ctx.setLineWidth(2)
             ctx.stroke(rect)
 
-            // 尺寸标签（拖拽/调整时都显示）
+            // 尺寸标签 + 操作提示（1.0.10：拖完松手就截，没有"调整态"了）
             let label = "\(Int(rect.width)) × \(Int(rect.height))"
-            drawLabel(label, above: rect, ctx: ctx)
+            if phase == .dragging {
+                drawHint("\(label)   ·   松手即截图   ·   Esc / 右键取消", above: rect, ctx: ctx)
+            } else {
+                drawLabel(label, above: rect, ctx: ctx)
+            }
 
-            // 八个手柄（可调整阶段才可拖，但一直画出来提示可调）
+            // 八个手柄：1.0.10 起选区不再停留（松手就截），这段只在
+            // 有"残留选区"时才可能画到，留着是为了别把老逻辑改出一堆空洞
             if selection != nil {
                 ctx.setFillColor(NSColor.white.cgColor)
                 ctx.setStrokeColor(NSColor.controlAccentColor.cgColor)
@@ -465,7 +499,7 @@ final class RegionSelector: NSObject {
                     ctx.fillEllipse(in: dot)
                     ctx.strokeEllipse(in: dot)
                 }
-                drawHint("单击选区内 / 回车 开始 · 拖手柄调整 · 方向键微调（⇧ ×10）· Esc 或右键取消截图",
+                drawHint("Esc 或右键取消截图",
                          above: rect, ctx: ctx)
             }
         }

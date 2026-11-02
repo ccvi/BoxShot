@@ -90,7 +90,7 @@ final class ScrollCaptureController: NSObject {
         let region = selectionFrameAppKit
         // 🔴 面板比选区**大一圈**：左边/右边/下边各多 2px，上方多出一条状态带。
         // 选区内部必须完全透明 —— 见 ScrollFrameView.draw 的注释。
-        let panel = NSPanel(contentRect: Self.panelRect(forRegion: region),
+        let panel = KeyablePanel(contentRect: Self.panelRect(forRegion: region),
                             styleMask: [.borderless, .nonactivatingPanel],
                             backing: .buffered, defer: false)
         panel.level = .floating

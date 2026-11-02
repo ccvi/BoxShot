@@ -41,6 +41,10 @@ final class CameraBubbleController {
 
     var isVisible: Bool { panel != nil }
 
+    /// 取景框窗口号：录制时需要把它从"排除自家窗口"里挑出来，
+    /// 否则摄像头的画面根本进不了成片（详见 Recorder.keepVisibleWindowNumbers）
+    var windowNumber: Int { panel?.windowNumber ?? 0 }
+
     /// anchor 是选区在 AppKit 全局坐标里的框；取景框贴它的右下角内侧。
     func show(anchor: CGRect) {
         lastAnchor = anchor

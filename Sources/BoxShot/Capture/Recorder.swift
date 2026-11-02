@@ -39,6 +39,14 @@ final class RecorderController: NSObject {
     /// 录制完成提示音（音效名由工具条按设置传入；关掉提示音时传空串）。
     /// 这里以前无条件播 Glass —— 设置里关掉提示音，录完还是会"叮"一声。
     var finishedSoundName: String = ""
+    /// 属于本进程、但**必须留在画面里**的窗口号（摄像头取景框）。
+    ///
+    /// 🔴 排除自己窗口的规则是按 pid 一刀切，摄像头取景框刚好也在本进程里，
+    /// 于是被一起排掉了 —— 用户看到的症状就是"录出来的视频没有摄像头画面"。
+    /// 取景框的设计本来就是"所见即所得地被录进画面"，这一个窗口必须放过。
+    var keepVisibleWindowNumbers: Set<Int> = []
+    /// 诊断用：最近一次建过滤器时，自己有多少窗口被排除、有几个被保留
+    private(set) var lastExclusionReport: String = ""
 
     private var stream: SCStream?
     private var writer: AVAssetWriter?
@@ -60,7 +68,8 @@ final class RecorderController: NSObject {
     private var sessionStarted = false
     private var isStopping = false
     private var hasOutput = false
-    private var outputURL: URL?
+    /// 诊断（--recordcamera）要拿它去抽帧核对，所以对外只读
+    private(set) var outputURL: URL?
     private var hud: RecordHUD?
     /// 用工具条录制时不再弹自带 HUD（曾经两个"计时+停止"同时上屏）
     private var showsHUD = true
@@ -240,10 +249,14 @@ final class RecorderController: NSObject {
                 // 🔴 按 pid 认自己，不按 bundleIdentifier —— 裸二进制调试时它是 nil，
                 //   过滤结果恒为空，等于没排除。ScreenCapture.captureRegion 早就是 pid 口径，这里跟上。
                 let ownPID = ProcessInfo.processInfo.processIdentifier
+                let keep = keepVisibleWindowNumbers
                 let ownWindows = content.windows.filter {
-                    $0.owningApplication?.processID == ownPID
+                    $0.owningApplication?.processID == ownPID && !keep.contains(Int($0.windowID))
                 }
                 let filter = SCContentFilter(display: display, excludingWindows: ownWindows)
+                NSLog("[BoxShot] 录制排除自家窗口 %d 个（保留 %d 个：摄像头取景框）",
+                      ownWindows.count, keep.count)
+                self.lastExclusionReport = "排除 \(ownWindows.count) 个 · 保留 \(keep.count) 个 · 本进程窗口 \(content.windows.filter { $0.owningApplication?.processID == ownPID }.count) 个"
 
                 let config = SCStreamConfiguration()
                 config.captureResolution = .best

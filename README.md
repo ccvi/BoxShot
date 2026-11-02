@@ -4,18 +4,18 @@
 
 零第三方依赖——截图走 ScreenCaptureKit，识别走 Vision，热键走 Carbon，编码走 AVFoundation。
 
-- 当前版本：**1.0.9**
+- 当前版本：**1.0.10**
 - 作者：ccvi1223 · ccvi1223@qq.com
 - 工程最低版本：`.macOS(.v14)`（`Package.swift`）
 - 常驻形态：`LSUIElement = true`，只在菜单栏，不占 Dock
 
 ---
 
-## 功能（1.0.9 已实现）
+## 功能（1.0.10 已实现）
 
 | 区域 | 能力 |
 | --- | --- |
-| 截图 | 区域截图（**拖出后不立刻截**：八向手柄可调、方向键微调 ⇧×10、Shift 约束正方形，⏎ 或选区内单击确认）、截图直进剪贴板、重复上次区域、全屏（鼠标所在屏）、窗口（轻点选窗口，可高亮） |
+| 截图 | 区域截图（**拖完松手就截**，尺寸微调搬到截完的浮层里）、截图直进剪贴板、重复上次区域、全屏（鼠标所在屏）、窗口（轻点选窗口，窗口模式下强制高亮） |
 | 历史 | 最近 N 张截图落盘留档（默认 20），菜单「截图历史…」网格重看，可重开标注 / 复制 / 贴图 / Finder 定位 |
 | 滚动截图 | 手动滚动自动抓帧拼接，横向/竖向都能拼，「缩略图」窗口实时跟着长 |
 | 识别 | OCR（中英混排，可保留换行、可追加到剪贴板）、二维码/条形码 11 种码制 |
@@ -53,6 +53,24 @@ swift build --disable-sandbox   # 只编译（本机 sandbox-exec 受限，必�
 | AppKit | 主屏左下角，y 向上 | 所有窗口/视图布局 |
 
 全局 → 显示器局部是减去该屏 `CGDisplayBounds().origin`；AppKit ← 全局是 `y = 主屏高 - rect.maxY`。像素换算不在截图侧做：`captureImage` 直接吃点的 `sourceRect`、吐像素尺寸的 `CGImage`，点→像素的换算只发生在 UI 层（标注那一步）。
+
+## 框完就截：选区阶段没有"调整态"了
+
+1.0.10 起，拖完**松开鼠标就是截图**。之前要再「单击选区内」或按 ⏎ 确认一次，用户看到那行提示的反应是「我以为还没截」，多一步还容易以为卡住了。
+
+- 阈值照旧：宽或高 < 8pt 视为误触，留在选区模式，不产生一张 3×5 的废图。
+- **代价是选区阶段的八向手柄、方向键微调、Shift 约束正方形一起下线**（它们都挂在"调整态"上）。改尺寸这件事本来就在截完的浮层里做，那里有真手柄、能拖框、能扩出去从整屏原图取内容，比在遮罩上调更完整。
+- 提示文案跟着改成「拖动框选区域 · 松手即截图 · Esc 或右键取消」，拖拽中显示「W × H · 松手即截图」。
+- 验收用 `--dragtest`：合成 10 步 `leftMouseDragged` 后再 `leftMouseUp`，判定「遮罩自己收掉 + 浮层按拖出来的框打开」。实测拖 560×420，浮层 `frame=(420, 387, 560, 420)`（AppKit 左下原点，`1107-720=387` 对得上）。
+
+## 参数接进来却没人用：窗口截图等于普通截图
+
+`startRegionShot(copyDirectly:windowPickMode:pipeline:)` 里的 `windowPickMode` **一直是只进不出**——签名收了这个参数，函数体里没人读，于是「窗口截图」和「开始截图」行为完全一样；除非用户碰巧在设置里开了「窗口高亮」，否则点窗口根本没有可点的目标，看起来就是"这个动作没生效"。
+
+现在：`highlightWindows: windowPickMode || prefs.value.windowHighlight`，且窗口模式下**关掉十字线**（要的是点窗口，不是拉框）。验收用 `--windowtest`：合成一次单击，检查浮层框明显小于全屏（实测拿到 `(0, 58, 855, 1015)`，正是当时那个前台窗口）。
+
+> 教训：加参数先搜一遍它在函数体里出现过几次。`swift build` 不会为「未使用的形参」报警（它本来也允许），这种洞只有端到端跑一遍才露出来。
+
 
 ## 滚动截图：听用户的滚轮，不合成事件
 
@@ -132,7 +150,18 @@ swift build --disable-sandbox   # 只编译（本机 sandbox-exec 受限，必�
 - 因为不再合成，`AVAssetWriterInputPixelBufferAdaptor` 那条合成路径现在只服务「暂停后重编时间戳」。
 
 
-录制时把自己的窗口放进 `excludingWindows`，浮条和贴图不会进画面。过滤条件按 **pid** 认自己，不按 `bundleIdentifier`：裸二进制调试时后者是 nil，过滤结果恒为空，等于没排除。
+录制时把自己家的浮条 / 工具条 / 贴图放进 `excludingWindows`，它们不会进画面。过滤条件按 **pid** 认自己，不按 `bundleIdentifier`：裸二进制调试时后者是 nil，过滤结果恒为空，等于没排除。
+
+🔴 **但按 pid 一刀切会把「本意要录进去」的窗口一起排掉** —— 摄像头取景框就在同一个进程里。1.0.9 的用户反馈「录制生成的视频没有摄像头的影像」就是这条：取景框明明在屏幕上，却被自己的排除名单干掉了。现在 `Recorder` 多一个白名单：
+
+```swift
+var keepVisibleWindowNumbers: Set<Int> = []   // 工具条把取景框的 windowNumber 塞进来
+let ownWindows = content.windows.filter {
+    $0.owningApplication?.processID == ownPID && !keep.contains(Int($0.windowID))
+}
+```
+
+并且每次开录都留一行 `lastExclusionReport`（`排除 N 个 · 保留 M 个 · 本进程窗口 K 个`）—— 这类问题只能靠这三个数字判断错在哪一侧，光看画面分不清是「没上屏」还是「被排掉了」。实测：`排除 0 个 · 保留 1 个`，成片抽帧右下角能看到人像。
 
 ### 三个把「点录制」直接干掉的坑
 
@@ -239,6 +268,35 @@ firstResponder，`keyDown` 永远收不到 —— 界面上看着像在等按键
 | 滚动截图 | 直接结束，不返回图片 |
 | 录制工具条 | 录制中 / 启动中**不响应**（防止误停），停止靠 ✕ 或工具条的停止按钮 |
 
+## 🔴 无边框窗口一个键都收不到（1.0.10 才找到）
+
+用户连着两版报「全局按 Esc 强制结束截屏没生效，截图、窗口截图都没生效」。前两次都在改**判断**（Esc 该退到哪一层、要不要只撤选区），而真正的病根是**按键从来没进过这个进程**：
+
+`NSWindow` / `NSPanel` 的 **`canBecomeKey` 默认是 `false`**（无边框窗口尤其）。窗口不是 key window，`keyDown` 就一个键都收不到 —— `makeKeyAndOrderFront(nil)` 叫了也白叫，`NSApp.keyWindow` 甚至是 nil，而代码看上去两句都在。修法是子类覆写：
+
+```swift
+final class KeyableWindow: NSWindow   { override var canBecomeKey: Bool { true }; override var canBecomeMain: Bool { false } }
+final class KeyablePanel:  NSPanel    { override var canBecomeKey: Bool { true }; override var canBecomeMain: Bool { false } }
+```
+
+选区遮罩、标注浮层、滚动截图的取景框都换成了这两个类。
+
+**还有第二条，顺序不能反**：先 `NSApp.activate(ignoringOtherApps: true)`，再 `makeKeyAndOrderFront` + `makeKey()`。反过来写时应用还没 active，AppKit 会把「become key」推后到激活之后，中间那段时间窗口**看得见但收不到键盘**。
+
+最后再挂一条 `NSEvent.addLocalMonitorForEvents(matching: .keyDown)` 兜住 Esc —— 只要应用收到键盘，就算窗口因为系统原因没拿到焦点也能退出。
+
+### 验证 Esc 要投真键，不能只投自己的队列
+
+`NSApp.postEvent` 只是往**自己的**事件队列里塞一个事件，绕不过窗口服务器，所以它通过并不代表用户按下去也能过。1.0.9 就是被这条骗过去的。真正的等价物是 HID 层投放：
+
+```swift
+let src = CGEventSource(stateID: .hidSystemState)
+CGEvent(keyboardEventSource: src, virtualKey: 53, keyDown: true)?.post(tap: .cghidEventTap)
+```
+
+⚠️ 这需要本进程有辅助功能授权（`AXIsProcessTrusted()`），否则 `post` 是往空气里发、日志里只会看到「没生效」，很容易误判。1.0.10 的实测结论：`AX=true` 时 HID Esc 立刻收掉遮罩；`AX=false` 时同一份代码两条路都失败。
+
+
 ## 提示音：和 BoxPaste 同一套系统音效
 
 八档（Blow / Bottle / Funk / Glass / Hero / Morse / Ping / Purr），中文名照搬 BoxPaste，旁边有「试听」。播放点统一走 `AppModel.playFeedbackSound()`（开关和音效名都在设置里）；录制收尾那条在 `Recorder` 里拿不到 model，改由工具条注入 `finishedSoundName` —— 顺手修掉「关了提示音，录完还是会叮一声」。
@@ -267,9 +325,11 @@ firstResponder，`keyDown` 永远收不到 —— 界面上看着像在等按键
 Sources/BoxShot/
 ├── main.swift              诊断参数必须抢在 NSApplication.run() 之前
 ├── App/                    AppDelegate（窗口/菜单装配）、AppModel（13 个动作的调度）、SelfTest
-├── Capture/                RegionSelector（截图前遮罩）、OverlayEditor（截图后原位浮层）、
-│                           ScrollCaptureController、Recorder、RecordToolbar、MeasureOverlay
-├── Core/                   ScreenCapture、Stitch、OCR、Shortcuts、HotKeyCenter、Preferences、Support、ShotHistory
+├── Capture/                RegionSelector（截图前遮罩）、KeyablePanel（能成为 key 的无边框窗口/面板）、
+│                           OverlayEditor（截图后原位浮层）、ScrollCaptureController、Recorder、
+│                           RecordToolbar、CameraBubble、MeasureOverlay
+├── Core/                   ScreenCapture、Stitch、OCR、Shortcuts、HotKeyCenter、Preferences、
+│                           SoundFeedback、Support、ShotHistory
 ├── Editor/                 AnnotationModels（数据模型 + 渲染器）、EditorView、EditorWindow
 ├── Pin/                    PinController（贴图窗 + 历史）
 └── UI/                     StatusItemController、SettingsView、ResultWindow、HistoryWindow
@@ -302,7 +362,7 @@ Resources/
 | 设置 | `UserDefaults["com.pcxx.boxshot.preferences"]`，JSON 编码的 `Preferences`（29 个字段） |
 | 贴图历史 | `~/Library/Application Support/BoxShot/pins/` + `pins.json` |
 | 截图历史 | `~/Library/Application Support/BoxShot/History/` + `history.json`（PNG 原图 + 清单；删条目连文件一起删） |
-| 开机自启 | `~/Library/LaunchAgents/com.pcxx.boxshot.plist`（`/usr/bin/open -g`，不是 SMAppService） |
+| 开机自启 | 已下线（1.0.9 按用户要求整项去掉）。存量机器上的 `~/Library/LaunchAgents/com.pcxx.boxshot.plist` 由启动流程清掉，否则会留一个界面里关不掉的自动启动项 |
 | 默认截图目录 | 桌面（`saveDirectory` 为 nil 时每次弹面板问） |
 
 配置解码是手写的，每个字段 `decodeIfPresent ?? 默认值`——新增字段不能让旧配置整份作废，否则升级一次设置全丢。
@@ -317,7 +377,7 @@ Resources/
 .build/release/BoxShot --selftest
 ```
 
-当前 94 处断言，覆盖键位资格判定（含纯字母/空格不能当全局热键、F7 可以这几条）、拖手柄改截图框的几何（含屏幕框 → 像素矩形的 y 轴翻转）、拼接找回 60px 偏移、OCR 行聚类、偏好解码兜底、渲染管线（含「效果区域真的改了像素」和「底图没有上下颠倒」这两条）、撤销/重做、点选移动删除、文本贴图、文件名去重。只测纯逻辑，不碰屏幕捕获——无授权环境下跑不了，打包机也不该弹窗。
+当前 95 处断言，覆盖键位资格判定（含纯字母/空格不能当全局热键、F7 可以这几条）、拖手柄改截图框的几何（含屏幕框 → 像素矩形的 y 轴翻转）、拼接找回 60px 偏移、OCR 行聚类、偏好解码兜底、提示音八档名单、取景框三档绝对值、滚动缩略图 180×600 与四条落位几何、渲染管线（含「效果区域真的改了像素」和「底图没有上下颠倒」这两条）、撤销/重做、点选移动删除、文本贴图、文件名去重。只测纯逻辑，不碰屏幕捕获——无授权环境下跑不了，打包机也不该弹窗。
 
 ## 诊断
 
@@ -333,6 +393,16 @@ Resources/
 | `/tmp/boxshot-scrolltest.trigger` | 同上，标记文件触发 |
 | `--recordtest` | 不开界面，直接跑 3 秒真实录制（320×240 / MP4 / 无声），过程逐行写 `/tmp/boxshot-recordtest.log`，结束后自行退出。用于判断「点了录制没反应」是引擎起不来还是界面没接上 |
 | `/tmp/boxshot-recordtest.trigger` | 同上，但靠**标记文件**触发：`touch` 之后正常启动应用即可。某些环境下 `open -a App --args …` 不会把参数传进 `CommandLine.arguments`（实测 LaunchServices 按原 argv 起进程），只能走这条 |
+| `--esctest` | 开遮罩 → **HID 层真按键** Esc → 看遮罩收没收。日志 `/tmp/boxshot-esctest.log`，会先打印 `keyWindow` 类名和 `AXIsProcessTrusted()`；AX 未授权时 `CGEvent.post` 等于发空气，会退到 `postEvent` 再试一次并注明"只有 postEvent 生效" |
+| `/tmp/boxshot-esctest.trigger` | 同上，标记文件触发 |
+| `--escwait` | 开遮罩后**什么都不投**，纯等 15 秒外部真按键（人手按 / 带授权的 `osascript`），逐条记录收到的 `keyDown`。用来区分「代码没接住」和「按键根本没进来」 |
+| `/tmp/boxshot-escwait.trigger` | 同上，标记文件触发 |
+| `--dragtest` | 开遮罩 → 合成 10 步左键拖动 + 松手 → 判定遮罩收起且浮层按拖出来的框打开。验「松手即截」，日志 `/tmp/boxshot-dragtest.log` |
+| `/tmp/boxshot-dragtest.trigger` | 同上，标记文件触发 |
+| `--windowtest` | 走「窗口截图」动作 → 合成一次单击 → 检查拿到的框是否明显小于全屏（小于 = 真的点到了某个窗口，等于全屏 = 点到的是自家遮罩）。日志 `/tmp/boxshot-windowtest.log` |
+| `/tmp/boxshot-windowtest.trigger` | 同上，标记文件触发 |
+| `--recordcamera` | 上屏取景框 → 全屏录 4 秒 → 从成片里抽 2.0s 处一帧存 `/tmp/boxshot-recordcamera-frame.jpg`。日志里带 `排除 N 个 · 保留 M 个` 的排除报告，验「录出来的视频有没有摄像头画面」只能靠它 |
+| `/tmp/boxshot-recordcamera.trigger` | 同上，标记文件触发 |
 
 ## 已知问题（待修）
 

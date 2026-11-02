@@ -152,8 +152,8 @@ final class AppModel: ObservableObject {
         guard ScreenCapture.ensurePermission() else { return }
         // 已经有编辑器开着时先收掉，避免同时改两张图
         guard editorController == nil || !editorController!.isVisible else { return }
-        // Esc 不再负责退出选区遮罩了，万一上一块遮罩还挂着，这里主动收掉，
-        // 否则新遮罩会叠在旧遮罩上（点哪儿都没反应）。
+        // 万一上一块遮罩还挂着（上一次截图被别的东西打断了），这里主动收掉，
+        // 否则新遮罩会叠在旧遮罩上 —— 点哪儿都没反应，看着像"截图功能坏了"。
         discardActiveSelector()
         pendingCopyDirectly = copyDirectly
         pendingPipeline = pipeline
@@ -162,9 +162,16 @@ final class AppModel: ObservableObject {
         let selector = RegionSelector()
         selector.delegate = self
         regionSelector = selector
-        selector.begin(highlightWindows: prefs.value.windowHighlight,
-                       crosshair: prefs.value.showCrosshair)
+        // 🔴 windowPickMode 以前是**只进不出**的参数：接进来了却没人用，
+        // 于是「窗口截图」跟「开始截图」一模一样 —— 除非用户在设置里碰巧
+        // 开了窗口高亮，否则点窗口根本没有高亮可点，等于这个动作不存在。
+        // 窗口模式必须强制高亮，并且不要十字线（要的是"点窗口"，不是"拉框"）。
+        selector.begin(highlightWindows: windowPickMode || prefs.value.windowHighlight,
+                       crosshair: windowPickMode ? false : prefs.value.showCrosshair)
     }
+
+    /// 诊断用：选区遮罩是不是还开着（--esctest 拿它判断 Esc 到底生效没有）
+    var isRegionSelectorActive: Bool { regionSelector?.isActive ?? false }
 
     /// 收掉可能还留在屏上的选区遮罩（重复触发截图/录制时用）
     private func discardActiveSelector() {
