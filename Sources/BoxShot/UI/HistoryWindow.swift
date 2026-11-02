@@ -80,6 +80,8 @@ struct ShotHistoryView: View {
     var onReveal: (ShotHistoryItem) -> Void
 
     @State private var selectedID: UUID?
+    /// 全部图片的磁盘总大小（后台算，随条目数变化重算）
+    @State private var totalSizeText: String = ""
 
     private var selectedItem: ShotHistoryItem? {
         store.items.first { $0.id == selectedID }
@@ -123,6 +125,31 @@ struct ShotHistoryView: View {
         }
         .frame(minWidth: 560, minHeight: 380)
         .background(Color(nsColor: .windowBackgroundColor))
+        // 条目增删（含清空/删除）后重算总大小；用 count 当 id，条目数不变就不用重算
+        .task(id: store.items.count) { await recomputeTotalSize() }
+    }
+
+    /// 遍历每张图的文件属性累加 size。文件在磁盘上（几十张 4K 也就几 MB 的
+    /// stat 开销），放后台队列算，别卡主线程；有文件被手动删掉的就跳过。
+    private func recomputeTotalSize() async {
+        guard !store.items.isEmpty else {
+            totalSizeText = ""
+            return
+        }
+        let urls = store.items.map { ShotHistoryStore.shared.url(for: $0).path }
+        let total = await Task.detached(priority: .utility) { () -> Int64 in
+            let fm = FileManager.default
+            var sum: Int64 = 0
+            for path in urls {
+                if let size = try? fm.attributesOfItem(atPath: path)[.size] as? Int64 {
+                    sum += size
+                }
+            }
+            return sum
+        }.value
+        totalSizeText = total > 0
+            ? ByteCountFormatter.string(fromByteCount: total, countStyle: .file)
+            : ""
     }
 
     private var placeholder: some View {
@@ -141,8 +168,12 @@ struct ShotHistoryView: View {
 
     private var actionBar: some View {
         HStack(spacing: 8) {
-            Text("共 \(store.items.count) 张")
+            // 2026-11-02 用户口径：底部显示全部图片的总大小
+            Text(totalSizeText.isEmpty
+                 ? "共 \(store.items.count) 张"
+                 : "共 \(store.items.count) 张 · \(totalSizeText)")
                 .font(.callout)
+                .monospacedDigit()
                 .foregroundStyle(.secondary)
             Spacer()
             Button("打开标注") { if let item = selectedItem { onOpen(item) } }

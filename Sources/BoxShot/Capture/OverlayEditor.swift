@@ -327,6 +327,12 @@ final class OverlayEditorController: NSObject {
     static let toolbarDividerHeight: CGFloat = 26 * toolbarScale
     /// 工具条容器圆角（原 14）
     static let toolbarContainerCornerRadius: CGFloat = 14 * toolbarScale
+    /// 工具条 / 颜色面板容器底色：**不透明灰黑**。
+    /// 2026-11-02 用户口径「两个工具条变成圆角矩形框，底色为不透明的灰黑色」——
+    /// 以前是 NSVisualEffectView(.hudWindow) 毛玻璃，截图内容（晚霞之类的暖色）
+    /// 会从底下透出来，图标看着发脏。改成实心 NSView + layer 底色，
+    /// 圆角不变。工具条和颜色面板必须用同一个值，别一处实心一处毛玻璃。
+    static let toolbarBackgroundColor = NSColor(calibratedWhite: 0.13, alpha: 1)
     /// 「当前颜色」那颗圆点的直径：**30 的 70% = 21**。
     /// 用户 1.0.11 原话「工具条那个控制颜色的小圆按钮缩小 30%」—— 只缩这颗，
     /// 工具条别的一律不动。它只有 layer 底色、没有图片，内禀尺寸是 0，
@@ -404,11 +410,13 @@ final class OverlayEditorController: NSObject {
 
         stack.layoutSubtreeIfNeeded()
         let size = stack.fittingSize
-        let container = NSVisualEffectView(frame: NSRect(origin: .zero, size: size))
-        container.material = .hudWindow
-        container.state = .active
+        // 不透明灰黑实底（2026-11-02 用户口径）。以前是 NSVisualEffectView(.hudWindow)
+        // 毛玻璃，截图内容从底下透出来；NSVisualEffectView 无论 state 怎么调都会画
+        // 一层材质，要实底就得换成普通 NSView + layer 底色。
+        let container = NSView(frame: NSRect(origin: .zero, size: size))
         container.wantsLayer = true
         container.layer?.cornerRadius = Self.toolbarContainerCornerRadius
+        container.layer?.backgroundColor = Self.toolbarBackgroundColor.cgColor
         container.addSubview(stack)
         stack.frame = container.bounds
 
@@ -498,11 +506,11 @@ final class OverlayEditorController: NSObject {
         stack.layoutSubtreeIfNeeded()
         let size = stack.fittingSize
 
-        let container = NSVisualEffectView(frame: NSRect(origin: .zero, size: size))
-        container.material = .hudWindow
-        container.state = .active
+        // 同工具条：不透明灰黑实底 + 圆角（2026-11-02 用户口径）
+        let container = NSView(frame: NSRect(origin: .zero, size: size))
         container.wantsLayer = true
         container.layer?.cornerRadius = 10
+        container.layer?.backgroundColor = Self.toolbarBackgroundColor.cgColor
         container.addSubview(stack)
         stack.frame = container.bounds
 
@@ -538,9 +546,9 @@ final class OverlayEditorController: NSObject {
     static let colorPanelDividerHeight: CGFloat = 18
 
     /// 调色板：6 个颜色（1.0.10 用户口径「颜色 6 个颜色」，顺序按他给的色卡）。
-    /// 抽成常量是为了自检能盯着数量 —— 以前是散在这里的数组字面量，
-    /// 加一个减一个没人会发现。
-    static let colorPalette: [RGBColor] = [.yellow, .green, .blue, .red, .orange, .purple]
+    /// 真身在 RGBColor.palette（编辑窗口共用同一份）；这里留常量别名，
+    /// 自检盯着数量 —— 以前是散在这里的数组字面量，加一个减一个没人会发现。
+    static let colorPalette: [RGBColor] = RGBColor.palette
 
     /// 颜色面板与工具条的间距
     static let colorPanelGap: CGFloat = 8
@@ -1266,6 +1274,11 @@ final class OverlayEditorView: NSView {
                     Support.copyTextToClipboard(color.hexString)
                     flashStatus("已取色 \(color.hexString)")
                 }
+            case .step:
+                // 步骤标注：点一下放一个编号气泡，序号渲染时按顺序自动递增
+                let shape = AnnotationShape(tool: .step, points: [p], color: doc.color, lineWidth: 0)
+                doc.commit(shape)
+                flashStatus("步骤 \(EditorRenderer.stepNumber(of: shape, in: doc.shapes))")
             default:
                 break
             }

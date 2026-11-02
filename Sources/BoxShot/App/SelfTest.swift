@@ -427,6 +427,97 @@ enum SelfTest {
                     && !EditorTool.highlight.title.contains("半透明"))
         }
 
+        // ── 编辑窗口色板 = 截图工具条色卡（2026-11-02 用户口径：颜色对应）──
+        do {
+            check("编辑器与工具条共用同一份调色板（防两处漂移）",
+                  RGBColor.palette.map { $0.hexString }
+                    == OverlayEditorController.colorPalette.map { $0.hexString })
+            check("编辑器色板含橙紫（老色板没有的那两个）",
+                  RGBColor.palette.contains(.orange) && RGBColor.palette.contains(.purple))
+        }
+
+        // ── 步骤标注（点击放 ①②③，自动递增）──
+        do {
+            check("步骤标注是单击工具（不是拖拽）", !EditorTool.step.isDragTool)
+            let s1 = AnnotationShape(tool: .step, points: [CGPoint(x: 10, y: 10)], color: .red, lineWidth: 0)
+            let s2 = AnnotationShape(tool: .step, points: [CGPoint(x: 40, y: 10)], color: .red, lineWidth: 0)
+            let s3 = AnnotationShape(tool: .step, points: [CGPoint(x: 70, y: 10)], color: .red, lineWidth: 0)
+            let list = [s1, s2, s3]
+            check("步骤序号按数组顺序 1/2/3",
+                  EditorRenderer.stepNumber(of: s1, in: list) == 1
+                    && EditorRenderer.stepNumber(of: s2, in: list) == 2
+                    && EditorRenderer.stepNumber(of: s3, in: list) == 3)
+            // 删掉第一步 → 后面的自动补号（渲染时按顺序数，不存死序号）
+            let remaining = [s2, s3]
+            check("删掉一步后序号自动重排",
+                  EditorRenderer.stepNumber(of: s2, in: remaining) == 1
+                    && EditorRenderer.stepNumber(of: s3, in: remaining) == 2)
+            // 渲染出来确实是圆底：圆心偏移处应为标注色
+            let white = solidImage(width: 100, height: 100, color: CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
+            let stepShape = AnnotationShape(tool: .step, points: [CGPoint(x: 50, y: 50)], color: .red, lineWidth: 0)
+            let stepOut = EditorRenderer.render(base: white, shapes: [stepShape], effects: EffectImages(base: white))
+            let inBubble = stepOut.flatMap { EditorDocument(image: $0).pixelColor(at: CGPoint(x: 35, y: 50)) }
+            check("步骤标注渲染出圆底（标注色）",
+                  inBubble != nil && inBubble!.red > 0.7 && inBubble!.green < 0.4)
+            let onWhite = stepOut.flatMap { EditorDocument(image: $0).pixelColor(at: CGPoint(x: 5, y: 5)) }
+            check("步骤标注外仍是底图",
+                  onWhite != nil && onWhite!.red > 0.95)
+            check("步骤标注可命中（点选删除用）",
+                  stepShape.hitTest(CGPoint(x: 52, y: 52)) && !stepShape.hitTest(CGPoint(x: 90, y: 90)))
+        }
+
+        // ── 截图美化（背景 / 圆角 / 阴影 / padding，Xnapper 式套壳）──
+        do {
+            let white = solidImage(width: 40, height: 40, color: CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
+            let effects = EffectImages(base: white)
+            var style = BeautifyOptions()
+            style.background = .color(.blue)
+            style.padding = 20
+            style.cornerRadius = 8
+            style.shadow = false   // 阴影会污染边角像素，纯色断言关掉它
+            let out = EditorRenderer.render(base: white, shapes: [], effects: effects, beautify: style)
+            check("美化输出尺寸 = 底图 + 四周 padding",
+                  out != nil && out?.width == 80 && out?.height == 80)
+            let corner = out.flatMap { EditorDocument(image: $0).pixelColor(at: CGPoint(x: 2, y: 2)) }
+            check("padding 区是背景色",
+                  corner != nil && corner!.blue > 0.8 && corner!.red < 0.4)
+            let center = out.flatMap { EditorDocument(image: $0).pixelColor(at: CGPoint(x: 40, y: 40)) }
+            check("底图区域原样保留",
+                  center != nil && center!.red > 0.95 && center!.green > 0.95)
+            // 不开美化：尺寸不变（老路径零回归）
+            let plain = EditorRenderer.render(base: white, shapes: [], effects: effects)
+            check("不开美化时渲染尺寸不变",
+                  plain != nil && plain?.width == 40 && plain?.height == 40)
+            // 默认参数是"能直接用"的：有背景、有边距、开阴影
+            check("美化默认参数开箱可用",
+                  BeautifyOptions().padding > 0 && BeautifyOptions().shadow)
+        }
+
+        // ── OCR 表格 → Markdown ──
+        do {
+            // 一张"标题行 + 表头 + 一行数据"的合成图（归一化坐标）
+            let obs: [OCREngine.TextObservation] = [
+                .init(text: "价目表", bounds: CGRect(x: 0.1, y: 0.02, width: 0.1, height: 0.04)),
+                .init(text: "名称",   bounds: CGRect(x: 0.10, y: 0.15, width: 0.12, height: 0.04)),
+                .init(text: "金额",   bounds: CGRect(x: 0.60, y: 0.15, width: 0.12, height: 0.04)),
+                .init(text: "苹果",   bounds: CGRect(x: 0.10, y: 0.30, width: 0.12, height: 0.04)),
+                .init(text: "五元",   bounds: CGRect(x: 0.60, y: 0.30, width: 0.12, height: 0.04)),
+            ]
+            let markdown = OCREngine.tableMarkdown(from: obs)
+            check("表格重排出 Markdown", markdown != nil)
+            check("表头是第一行", markdown?.contains("| 名称 | 金额 |") == true)
+            check("数据行对上列", markdown?.contains("| 苹果 | 五元 |") == true)
+            check("有分隔行", markdown?.contains("---") == true)
+            // 表上方的标题不混进表格
+            check("表外标题没被当进表格", markdown?.contains("价目表") != true)
+            // 普通段落（没有多列行）返回 nil
+            let paragraph: [OCREngine.TextObservation] = [
+                .init(text: "第一段", bounds: CGRect(x: 0.1, y: 0.1, width: 0.5, height: 0.04)),
+                .init(text: "第二段", bounds: CGRect(x: 0.1, y: 0.3, width: 0.5, height: 0.04)),
+            ]
+            check("普通文本不硬拼表格", OCREngine.tableMarkdown(from: paragraph) == nil)
+        }
+
         // ── 取景框档位 ──
         do {
             // 用户口径（1.0.12 再上调一次）：绝对值 大 200 / 中 180 / 小 150

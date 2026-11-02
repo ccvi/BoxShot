@@ -18,6 +18,8 @@ final class EditorDocument: ObservableObject {
     @Published var lineWidth: CGFloat = 4
     /// 当前选中的标注（"选择"工具点选；⌫ 删除；拖动移动）
     @Published var selectedID: UUID?
+    /// 截图美化（Xnapper 式套壳）；nil = 关闭。底图不动，渲染时往外套
+    @Published var beautify: BeautifyOptions?
 
     private var undoStack: [[AnnotationShape]] = []
     private var redoStack: [[AnnotationShape]] = []
@@ -32,6 +34,13 @@ final class EditorDocument: ObservableObject {
 
     var imageSize: CGSize {
         CGSize(width: baseImage.width, height: baseImage.height)
+    }
+
+    /// 画布尺寸：美化开启时 = 底图 + 四周 padding（画背景的那块）
+    var canvasSize: CGSize {
+        guard let beautify else { return imageSize }
+        return CGSize(width: imageSize.width + beautify.padding * 2,
+                      height: imageSize.height + beautify.padding * 2)
     }
 
     // ── 撤销 / 重做 ──
@@ -138,7 +147,8 @@ final class EditorDocument: ObservableObject {
     // ── 成品输出 ──
 
     func rendered() -> CGImage? {
-        EditorRenderer.render(base: baseImage, shapes: shapes, effects: effects)
+        EditorRenderer.render(base: baseImage, shapes: shapes, effects: effects,
+                              beautify: beautify)
     }
 
     /// 取色：读底图指定像素的颜色
@@ -207,7 +217,11 @@ struct EditorView: View {
         }
         .onAppear { measureFit() }
         .overlay(alignment: .bottom) {
-            if cropRect != nil { cropBar }
+            if cropRect != nil {
+                cropBar
+            } else if doc.beautify != nil {
+                beautifyBar
+            }
         }
     }
 
@@ -238,8 +252,71 @@ struct EditorView: View {
         onCrop?(result.image, result.shapes)
     }
 
+    // ── 截图美化（Xnapper 式：背景 / 圆角 / 阴影 / 边距）──
+
+    /// 分两行：上面色板 + 收起，下面滑杆 + 阴影。挤成一行在窄窗口放不下。
+    private var beautifyBar: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 5) {
+                ForEach(BeautifyOptions.solidPresets, id: \.hexString) { c in
+                    beautifySolidSwatch(c)
+                }
+                ForEach(Array(BeautifyOptions.gradientPresets.enumerated()), id: \.offset) { _, pair in
+                    beautifyGradientSwatch(pair.0, pair.1)
+                }
+                Spacer()
+                Button("收起") { withAnimation { doc.beautify = nil } }
+            }
+            HStack(spacing: 10) {
+                Text("边距").font(.caption).foregroundStyle(.secondary)
+                Slider(value: Binding(get: { doc.beautify?.padding ?? 48 },
+                                      set: { doc.beautify?.padding = $0 }),
+                       in: 0...160, step: 8)
+                    .frame(width: 110)
+                Text("圆角").font(.caption).foregroundStyle(.secondary)
+                Slider(value: Binding(get: { doc.beautify?.cornerRadius ?? 16 },
+                                      set: { doc.beautify?.cornerRadius = $0 }),
+                       in: 0...64, step: 4)
+                    .frame(width: 90)
+                Toggle("阴影", isOn: Binding(get: { doc.beautify?.shadow ?? true },
+                                            set: { doc.beautify?.shadow = $0 }))
+                    .toggleStyle(.checkbox)
+                    .font(.caption)
+                Spacer()
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(.thickMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .padding(.horizontal, 14)
+        .padding(.bottom, 12)
+    }
+
+    private func beautifySolidSwatch(_ c: RGBColor) -> some View {
+        let selected = doc.beautify?.background == .color(c)
+        return Circle()
+            .fill(Color(nsColor: c.nsColor))
+            .frame(width: 16, height: 16)
+            .overlay(Circle().strokeBorder(selected ? Color.accentColor : Color.gray.opacity(0.4),
+                                           lineWidth: 2))
+            .onTapGesture { doc.beautify?.background = .color(c) }
+            .help("背景 \(c.hexString)")
+    }
+
+    private func beautifyGradientSwatch(_ a: RGBColor, _ b: RGBColor) -> some View {
+        let selected = doc.beautify?.background == .gradient(a, b)
+        return Circle()
+            .fill(LinearGradient(colors: [Color(nsColor: a.nsColor), Color(nsColor: b.nsColor)],
+                                 startPoint: .topLeading, endPoint: .bottomTrailing))
+            .frame(width: 16, height: 16)
+            .overlay(Circle().strokeBorder(selected ? Color.accentColor : Color.gray.opacity(0.4),
+                                           lineWidth: 2))
+            .onTapGesture { doc.beautify?.background = .gradient(a, b) }
+            .help("渐变 \(a.hexString) → \(b.hexString)")
+    }
+
     private var displaySize: CGSize {
-        CGSize(width: doc.imageSize.width * fitScale, height: doc.imageSize.height * fitScale)
+        CGSize(width: doc.canvasSize.width * fitScale, height: doc.canvasSize.height * fitScale)
     }
 
     private var canvas: some View {
@@ -251,8 +328,45 @@ struct EditorView: View {
 
                 Canvas { context, _ in
                     context.scaleBy(x: fitScale, y: fitScale)
-                    context.draw(Image(decorative: doc.baseImage, scale: 1),
-                                 in: CGRect(origin: .zero, size: doc.imageSize))
+                    let pad = doc.beautify?.padding ?? 0
+
+                    if let b = doc.beautify {
+                        // 美化壳：背景铺满 → 圆角底图（+ 阴影）→ 标注画在底图坐标里
+                        let full = CGRect(origin: .zero, size: doc.canvasSize)
+                        switch b.background {
+                        case .color(let c):
+                            context.fill(Path(full), with: .color(Color(nsColor: c.nsColor)))
+                        case .gradient(let from, let to):
+                            context.fill(Path(full), with: .linearGradient(
+                                Gradient(colors: [Color(nsColor: from.nsColor),
+                                                  Color(nsColor: to.nsColor)]),
+                                startPoint: CGPoint(x: full.minX, y: full.minY),
+                                endPoint: CGPoint(x: full.maxX, y: full.maxY)))
+                        }
+                        let imgRect = CGRect(x: pad, y: pad,
+                                             width: doc.imageSize.width, height: doc.imageSize.height)
+                        let rounded = Path(roundedRect: imgRect, cornerRadius: b.cornerRadius)
+                        if b.shadow {
+                            context.drawLayer { layer in
+                                layer.addFilter(.shadow(color: .black.opacity(0.28),
+                                                        radius: BeautifyOptions.shadowBlur / 2,
+                                                        x: 0, y: BeautifyOptions.shadowOffsetY / 2))
+                                layer.fill(rounded, with: .color(.white))
+                            }
+                        } else {
+                            context.fill(rounded, with: .color(.white))
+                        }
+                        context.drawLayer { layer in
+                            layer.clip(to: rounded)
+                            layer.draw(Image(decorative: doc.baseImage, scale: 1), in: imgRect)
+                        }
+                    } else {
+                        context.draw(Image(decorative: doc.baseImage, scale: 1),
+                                     in: CGRect(origin: .zero, size: doc.imageSize))
+                    }
+
+                    // 之后的标注一律画在"底图坐标"空间（美化时 = 平移 padding）
+                    context.translateBy(x: pad, y: pad)
 
                     for shape in doc.shapes {
                         drawShape(shape, in: &context)
@@ -300,9 +414,13 @@ struct EditorView: View {
             .contentShape(Rectangle())
             .gesture(dragGesture)
             .onTapGesture { location in
-                handleTap(clampToImage(CGPoint(x: location.x / fitScale, y: location.y / fitScale)))
+                let pad = doc.beautify?.padding ?? 0
+                handleTap(clampToImage(CGPoint(x: location.x / fitScale - pad,
+                                               y: location.y / fitScale - pad)))
             }
             .onChange(of: geo.size) { _ in measureFit(with: geo.size) }
+            // 美化 padding 变了画布尺寸跟着变，适配缩放要重算
+            .onChange(of: doc.canvasSize) { _ in measureFit(with: geo.size) }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background {
                 // 视图尺寸进入 GeometryReader 后先量一次适配缩放
@@ -318,8 +436,9 @@ struct EditorView: View {
         DragGesture(minimumDistance: 1)
             .onChanged { value in
                 guard doc.imageSize.width > 0 else { return }
-                let p = clampToImage(CGPoint(x: value.location.x / fitScale,
-                                             y: value.location.y / fitScale))
+                let pad = doc.beautify?.padding ?? 0
+                let p = clampToImage(CGPoint(x: value.location.x / fitScale - pad,
+                                             y: value.location.y / fitScale - pad))
                 if doc.tool == .crop {
                     let anchor = cropAnchor ?? p
                     cropAnchor = anchor
@@ -396,6 +515,14 @@ struct EditorView: View {
                 Support.copyTextToClipboard(color.hexString)
                 flash("已取色 \(color.hexString)，色值复制到剪贴板")
             }
+        case .step:
+            // 点一下放一个编号气泡，序号渲染时按数组顺序数（自动递增）；
+            // 删掉中间一步，后面的自动往前补号
+            doc.selectedID = nil
+            let shape = AnnotationShape(tool: .step, points: [p],
+                                        color: doc.color, lineWidth: 0)
+            doc.commit(shape)
+            flash("步骤 \(EditorRenderer.stepNumber(of: shape, in: doc.shapes))")
         default:
             break
         }
@@ -424,8 +551,8 @@ struct EditorView: View {
     private func measureFit(with size: CGSize? = nil) {
         let availW = (size?.width ?? 1200) - 24
         let availH = (size?.height ?? 800) - 24
-        guard doc.imageSize.width > 0, doc.imageSize.height > 0 else { return }
-        let scale = min(availW / doc.imageSize.width, availH / doc.imageSize.height, 1.0)
+        guard doc.canvasSize.width > 0, doc.canvasSize.height > 0 else { return }
+        let scale = min(availW / doc.canvasSize.width, availH / doc.canvasSize.height, 1.0)
         fitScale = max(0.05, scale)
     }
 
@@ -539,6 +666,19 @@ struct EditorView: View {
                          at: CGPoint(x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 - 14 * fitScale),
                          anchor: .bottom)
 
+        case .step:
+            // 圆底数字。序号走 EditorRenderer.stepNumber（与导出共用一份几何与编号）
+            guard let p = shape.points.first else { return }
+            let r = EditorRenderer.stepBubbleRadius
+            let n = EditorRenderer.stepNumber(of: shape, in: doc.shapes)
+            context.fill(Path(ellipseIn: CGRect(x: p.x - r, y: p.y - r,
+                                                width: r * 2, height: r * 2)),
+                         with: .color(color))
+            let label = Text("\(n)")
+                .font(.system(size: EditorRenderer.stepFontSize * fitScale, weight: .bold))
+                .foregroundColor(.white)
+            context.draw(label, at: CGPoint(x: p.x, y: p.y), anchor: .center)
+
         case .colorPick:
             guard let p = shape.points.first else { return }
             let rect = CGRect(x: p.x - 12, y: p.y - 12, width: 24, height: 24)
@@ -579,9 +719,9 @@ struct EditorView: View {
 
             Divider().frame(height: 22)
 
-            // 颜色（有选中标注时直接改它）
+            // 颜色（有选中标注时直接改它）—— 与截图工具条同一份 6 色调色板
             HStack(spacing: 5) {
-                ForEach([RGBColor.red, .blue, .yellow, .green, .white, .black], id: \.hexString) { c in
+                ForEach(RGBColor.palette, id: \.hexString) { c in
                     Circle()
                         .fill(Color(nsColor: c.nsColor))
                         .frame(width: 16, height: 16)
@@ -631,6 +771,10 @@ struct EditorView: View {
                 }
                 Button { onOCR() } label: { Label("OCR", systemImage: "text.below.photo") }
                     .help("识别图中文字并复制")
+                Button {
+                    withAnimation { doc.beautify = doc.beautify == nil ? BeautifyOptions() : nil }
+                } label: { Label("美化", systemImage: "wand.and.stars") }
+                    .help("截图美化（背景 / 圆角 / 阴影 / 边距）")
                 Button { onPin() } label: { Label("贴图", systemImage: "pin") }
                     .help("把当前图钉到桌面")
                 Button { onSave() } label: { Label("保存", systemImage: "square.and.arrow.down") }

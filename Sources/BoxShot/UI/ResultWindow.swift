@@ -28,9 +28,11 @@ final class ResultWindowController: NSWindowController {
     func show(kind: ResultKind, copied: Bool = true) {
         guard let window else { return }
         switch kind {
-        case .text(let text):
+        case .text(let text, let markdown):
             window.title = copied ? "OCR 识别结果（已复制到剪贴板）" : "OCR 识别结果"
-            window.contentView = NSHostingView(rootView: ResultTextView(text: text, showCopy: copied))
+            window.contentView = NSHostingView(rootView: ResultTextView(text: text,
+                                                                        showCopy: copied,
+                                                                        markdown: markdown))
         case .payloads(let payloads):
             window.title = "解码结果（已复制到剪贴板）"
             window.contentView = NSHostingView(rootView: ResultPayloadView(payloads: payloads))
@@ -41,7 +43,8 @@ final class ResultWindowController: NSWindowController {
     }
 
     enum ResultKind {
-        case text(String)
+        /// `markdown`：OCR 顺手重排出的 Markdown 表格（非表格图就是 nil）
+        case text(String, markdown: String?)
         case payloads([String])
     }
 }
@@ -49,6 +52,7 @@ final class ResultWindowController: NSWindowController {
 private struct ResultTextView: View {
     let text: String
     var showCopy: Bool = true
+    var markdown: String? = nil
 
     var body: some View {
         VStack(spacing: 0) {
@@ -65,6 +69,12 @@ private struct ResultTextView: View {
                 if showCopy {
                     Button("复制") { Support.copyTextToClipboard(text) }
                         .keyboardShortcut("c", modifiers: .command)
+                }
+                // 图里是表格时 OCR 会顺带重排一份 Markdown（粘贴到备忘录 /
+                // Typora 直接成表）；不是表格就没有这个按钮
+                if let markdown {
+                    Button("复制为 Markdown") { Support.copyTextToClipboard(markdown) }
+                        .help("按表格结构重排并复制（可粘贴进支持 Markdown 的编辑器）")
                 }
                 Button("关闭") { NSApp.keyWindow?.close() }
                     .keyboardShortcut(.escape, modifiers: [])

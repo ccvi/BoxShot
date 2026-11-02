@@ -22,6 +22,7 @@ enum EditorTool: String, CaseIterable, Identifiable {
     case ellipse
     case line
     case arrow
+    case step    // 步骤标注：点击放圆底数字 ①②③，序号按数组顺序渲染（删了自动重排）
     case text
     case mosaic
     case blur
@@ -41,6 +42,7 @@ enum EditorTool: String, CaseIterable, Identifiable {
         case .ellipse:   return "circle"
         case .line:      return "line.diagonal"
         case .arrow:     return "arrow.up.right"
+        case .step:      return "1.circle"
         case .text:      return "textformat"
         case .mosaic:    return "squareshape.split.2x2"
         case .blur:      return "drop"
@@ -60,6 +62,7 @@ enum EditorTool: String, CaseIterable, Identifiable {
         case .ellipse:   return "椭圆"
         case .line:      return "直线"
         case .arrow:     return "箭头"
+        case .step:      return "步骤标注（点击放编号，自动递增）"
         case .text:      return "文字"
         case .mosaic:    return "马赛克"
         case .blur:      return "模糊"
@@ -69,10 +72,10 @@ enum EditorTool: String, CaseIterable, Identifiable {
         }
     }
 
-    /// 拖拽生成形状（false = 单击生效，如选择/文字/取色）
+    /// 拖拽生成形状（false = 单击生效，如选择/文字/取色/步骤标注）
     var isDragTool: Bool {
         switch self {
-        case .select, .text, .colorPick: return false
+        case .select, .text, .colorPick, .step: return false
         default: return true
         }
     }
@@ -127,6 +130,9 @@ struct AnnotationShape: Equatable {
         case .colorPick:
             guard let at = points.first else { return false }
             return hypot(p.x - at.x, p.y - at.y) <= 20
+        case .step:
+            guard let at = points.first else { return false }
+            return hypot(p.x - at.x, p.y - at.y) <= EditorRenderer.stepBubbleRadius + 6
         }
     }
 
@@ -157,6 +163,10 @@ struct AnnotationShape: Equatable {
         case .colorPick:
             guard let at = points.first else { return nil }
             return CGRect(x: at.x - 14, y: at.y - 14, width: 28 + 60, height: 28)
+        case .step:
+            guard let at = points.first else { return nil }
+            let r = EditorRenderer.stepBubbleRadius
+            return CGRect(x: at.x - r, y: at.y - r, width: r * 2, height: r * 2)
         }
     }
 
@@ -214,6 +224,46 @@ struct RGBColor: Equatable {
         String(format: "#%02X%02X%02X",
                Int(round(red * 255)), Int(round(green * 255)), Int(round(blue * 255)))
     }
+
+    // 截图工具条与编辑窗口**共用**的 6 色调色板（顺序 = 用户色卡顺序）。
+    // 以前编辑窗口另写一份 [.red,.blue,.yellow,.green,.white,.black]，
+    // 两处各自漂移：工具条刚统一完色卡，编辑器还是老六色 —— 2026-11-02
+    // 用户口径「编辑功能…跟截图的工具条颜色对应」。以后加色只改这一处。
+    static let palette: [RGBColor] = [.yellow, .green, .blue, .red, .orange, .purple]
+}
+
+// ── 截图美化（Xnapper 式：背景 + 圆角 + 阴影 + padding） ──────
+
+/// 挂在 EditorDocument 上的美化参数。nil = 关闭。
+/// 底图不动：美化是**渲染时**往底图外面套壳（导出 / 预览同一套几何），
+/// 不烧进图像，参数随时改随时还原。
+struct BeautifyOptions: Equatable {
+    var background: Background = .color(RGBColor.srgb(245, 245, 247))
+    /// 底图四周留白（图像像素）
+    var padding: CGFloat = 48
+    /// 底图圆角
+    var cornerRadius: CGFloat = 16
+    var shadow: Bool = true
+
+    /// 阴影参数固定不做 UI（参数越多越不会用）：blur 24 / 下移 8
+    static let shadowBlur: CGFloat = 24
+    static let shadowOffsetY: CGFloat = 8
+
+    enum Background: Equatable {
+        case color(RGBColor)
+        case gradient(RGBColor, RGBColor)
+    }
+
+    /// 纯色预设：6 色色卡 + 白 + 黑 + 苹果灰（跟调色板同一套色值来源）
+    static let solidPresets: [RGBColor] = RGBColor.palette
+        + [RGBColor.white, RGBColor.black, RGBColor.srgb(245, 245, 247)]
+
+    /// 渐变预设：蓝紫 / 橙黄 / 白灰（对角线）
+    static let gradientPresets: [(RGBColor, RGBColor)] = [
+        (RGBColor.blue, RGBColor.purple),
+        (RGBColor.yellow, RGBColor.orange),
+        (RGBColor.white, RGBColor.srgb(229, 231, 235)),
+    ]
 }
 
 // ── 效果图缓存 ───────────────────────────────────────────────
@@ -275,33 +325,107 @@ enum EditorRenderer {
     /// 不是随手定的；改大改小都会跟他的预期不一样。
     static let highlightDimAlpha: CGFloat = 0.6
 
-    /// 把底图 + 全部标注压成一张成品图（保存 / 复制 / 贴图都用它）
-    static func render(base: CGImage, shapes: [AnnotationShape], effects: EffectImages) -> CGImage? {
-        let width = base.width
-        let height = base.height
+    /// 把底图 + 全部标注压成一张成品图（保存 / 复制 / 贴图都用它）。
+    /// `beautify` 非 nil 时先套美化壳（背景 + 圆角底图 + 阴影 + padding），
+    /// 标注坐标仍是**底图像素坐标**，渲染时整体平移 padding。
+    static func render(base: CGImage, shapes: [AnnotationShape], effects: EffectImages,
+                       beautify: BeautifyOptions? = nil) -> CGImage? {
+        let pad = beautify?.padding ?? 0
+        let width = base.width + Int(pad) * 2
+        let height = base.height + Int(pad) * 2
         guard let ctx = CGContext(data: nil,
                                   width: width, height: height,
                                   bitsPerComponent: 8, bytesPerRow: 0,
                                   space: CGColorSpaceCreateDeviceRGB(),
                                   bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue) else { return nil }
 
+        if let b = beautify {
+            // 背景铺满整张画布（标准空间直接画）
+            let canvas = CGRect(x: 0, y: 0, width: width, height: height)
+            switch b.background {
+            case .color(let c):
+                ctx.setFillColor(c.cgColor)
+                ctx.fill(canvas)
+            case .gradient(let from, let to):
+                let space = CGColorSpaceCreateDeviceRGB()
+                if let gradient = CGGradient(colorsSpace: space,
+                                             colors: [from.cgColor, to.cgColor] as CFArray,
+                                             locations: [0, 1]) {
+                    // 对角线（左上 → 右下）：标准空间 y 向上，起点给左下角
+                    ctx.drawLinearGradient(gradient,
+                                           start: CGPoint(x: 0, y: CGFloat(height)),
+                                           end: CGPoint(x: CGFloat(width), y: 0),
+                                           options: [])
+                }
+            }
+            // 圆角底图 + 投影。先填一个不透明圆角矩形（阴影由它的形状投出），
+            // 关掉阴影后再把底图裁进同一个圆角矩形 —— 底图自身带透明区时
+            // 透出来的是白色，跟编辑器里棋盘底的观感一致。
+            let imgRect = CGRect(x: pad, y: pad,
+                                 width: CGFloat(base.width), height: CGFloat(base.height))
+            let rounded = CGPath(roundedRect: imgRect,
+                                 cornerWidth: b.cornerRadius, cornerHeight: b.cornerRadius,
+                                 transform: nil)
+            ctx.saveGState()
+            if b.shadow {
+                ctx.setShadow(offset: CGSize(width: 0, height: -BeautifyOptions.shadowOffsetY),
+                              blur: BeautifyOptions.shadowBlur)
+            }
+            ctx.addPath(rounded)
+            ctx.setFillColor(RGBColor.white.cgColor)
+            ctx.fillPath()
+            ctx.restoreGState()
+            ctx.saveGState()
+            ctx.addPath(rounded)
+            ctx.clip()
+            ctx.draw(base, in: imgRect)
+            ctx.restoreGState()
+        } else {
+            ctx.draw(base, in: CGRect(x: 0, y: 0, width: width, height: height))
+        }
+
         // 先在**未翻转**的标准空间画底图（此空间里 CGImage 方向才是正的），
         // 再翻成"左上原点向下"画标注——形状坐标按 y 向下存。
         // 顺序反了底图会整体上下颠倒（形状位置对、内容倒）。
-        ctx.draw(base, in: CGRect(x: 0, y: 0, width: width, height: height))
+        // 美化时标注坐标系的原点跟着挪到底图左上角（整体平移 padding）。
         ctx.translateBy(x: 0, y: CGFloat(height))
         ctx.scaleBy(x: 1, y: -1)
+        if beautify != nil { ctx.translateBy(x: pad, y: pad) }
 
-        drawShapes(shapes, in: ctx, effects: effects, canvasHeight: CGFloat(height))
+        // 🔴 这里传的是**底图高度**不是画布高度：drawCoreText / 高亮的画布矩形
+        // 都在"底图左上原点"的空间里工作（美化时原点已平移到 padding 处），
+        // 传整张画布的高会把 CoreText 文字画飞。
+        drawShapes(shapes, in: ctx, effects: effects, canvasHeight: CGFloat(base.height))
         return ctx.makeImage()
     }
 
-    /// 供原位编辑浮层复用：在"左上原点"的翻转上下文里画一批标注
+    /// 供原位编辑浮层复用：在"左上原点"的翻转上下文里画一批标注。
+    /// 步骤标注的序号在这里统一分配：按数组顺序数（渲染 = 预览 = 同一套），
+    /// 删掉中间一步后剩下的自动重排，不需要"重置序号"按钮。
     static func drawShapes(_ shapes: [AnnotationShape], in ctx: CGContext,
                            effects: EffectImages, canvasHeight: CGFloat) {
         for shape in shapes {
-            draw(shape: shape, in: ctx, effects: effects, canvasHeight: canvasHeight)
+            draw(shape: shape, in: ctx, effects: effects, canvasHeight: canvasHeight,
+                 stepNumber: shape.tool == .step ? stepNumber(of: shape, in: shapes) : 0)
         }
+    }
+
+    // ── 步骤标注几何（渲染与自检共用） ──
+
+    /// 圆底半径（图像像素）
+    static let stepBubbleRadius: CGFloat = 26
+    /// 数字字号
+    static let stepFontSize: CGFloat = 28
+
+    /// 某个步骤标注的序号：在 shapes 数组里排第几个 step（1 起）。
+    /// 预览（SwiftUI）与导出（CG）必须共用这一份，不然屏幕上和存下来对不上号。
+    static func stepNumber(of shape: AnnotationShape, in shapes: [AnnotationShape]) -> Int {
+        var count = 0
+        for item in shapes {
+            if item.tool == .step { count += 1 }
+            if item.id == shape.id { break }
+        }
+        return max(1, count)
     }
 
     /// 选中标注的虚线框（调用方已变换到图像像素空间）
@@ -316,7 +440,8 @@ enum EditorRenderer {
         ctx.restoreGState()
     }
 
-    private static func draw(shape: AnnotationShape, in ctx: CGContext, effects: EffectImages, canvasHeight: CGFloat) {
+    private static func draw(shape: AnnotationShape, in ctx: CGContext, effects: EffectImages,
+                             canvasHeight: CGFloat, stepNumber: Int = 0) {
         let color = shape.color
         let width = max(1, shape.lineWidth)
 
@@ -389,6 +514,23 @@ enum EditorRenderer {
             let stem = arrowStemEnd(from: a, to: b, width: width)
             ctx.move(to: a); ctx.addLine(to: stem); ctx.strokePath()
             drawArrowHead(from: a, to: b, width: width, in: ctx)
+
+        case .step:
+            // 圆底 + 白色数字。序号由 drawShapes 统一分配（数组顺序），
+            // 删除中间步骤自动重排；颜色跟当前画笔色。
+            guard let p = shape.points.first, stepNumber > 0 else { return }
+            let r = stepBubbleRadius
+            ctx.setFillColor(color.cgColor)
+            ctx.fillEllipse(in: CGRect(x: p.x - r, y: p.y - r, width: r * 2, height: r * 2))
+            let font = NSFont.systemFont(ofSize: stepFontSize, weight: .bold)
+            let line = NSAttributedString(string: "\(stepNumber)", attributes: [
+                .font: font, .foregroundColor: NSColor.white,
+            ])
+            let lineSize = line.size()
+            let box = CGRect(x: p.x - ceil(lineSize.width) / 2 - 2,
+                             y: p.y - ceil(lineSize.height) / 2 - 2,
+                             width: ceil(lineSize.width) + 4, height: ceil(lineSize.height) + 4)
+            drawCoreText(line, in: box, canvasHeight: canvasHeight, ctx: ctx)
 
         case .text:
             drawText(shape.text, at: shape.points.first ?? .zero,

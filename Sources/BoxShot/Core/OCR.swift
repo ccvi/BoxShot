@@ -24,7 +24,7 @@ enum OCREngine {
     }
 
     static func recognizeText(in image: CGImage, keepLineBreaks: Bool, lineOverlap: Double) async throws -> String {
-        let observations = try await recognize(image: image)
+        let observations = try await recognizeObservations(in: image)
 
         guard keepLineBreaks else {
             return observations.map(\.text).joined(separator: " ")
@@ -32,6 +32,12 @@ enum OCREngine {
 
         let lines = groupIntoLines(observations, overlapThreshold: lineOverlap)
         return lines.joined(separator: "\n")
+    }
+
+    /// 识别并保留**每个词的包围盒**（归一化 0-1，左上原点）。
+    /// 行聚类、表格重排都在 observations 上做，Vision 只跑这一次。
+    static func recognizeObservations(in image: CGImage) async throws -> [TextObservation] {
+        try await recognize(image: image)
     }
 
     private static func recognize(image: CGImage) async throws -> [TextObservation] {
@@ -103,11 +109,17 @@ enum OCREngine {
         }
     }
 
-    /// 把逐词 observation 聚成文本行。
+    /// 聚出来的行：格子带横向范围（表格分列要用），midY 用于圈定表格纵向范围
+    struct OCRRow {
+        var cells: [(minX: Double, maxX: Double, text: String)]
+        var midY: Double
+    }
+
+    /// 把逐词 observation 聚成文本行（带格子信息）。
     /// 判据：纵向中线差距 < 行高的 60%，且横向区间与已有行的重叠率 > 阈值。
-    static func groupIntoLines(_ observations: [TextObservation], overlapThreshold: Double) -> [String] {
+    static func groupedRows(_ observations: [TextObservation], overlapThreshold: Double) -> [OCRRow] {
         struct Line {
-            var items: [(x: Double, text: String)]
+            var cells: [(minX: Double, maxX: Double, text: String)]
             var minY: Double
             var maxY: Double
             var minX: Double
@@ -136,7 +148,7 @@ enum OCREngine {
                 let overlap = max(0, overlapEnd - overlapStart)
                 let overlapRatio = overlap / max(min(box.width, line.maxX - line.minX), 0.0001)
                 if verticalClose || (verticalNear && overlapRatio > overlapThreshold) {
-                    lines[index].items.append((box.minX, obs.text))
+                    lines[index].cells.append((box.minX, box.maxX, obs.text))
                     lines[index].minY = min(line.minY, box.minY)
                     lines[index].maxY = max(line.maxY, box.maxY)
                     lines[index].minX = min(line.minX, box.minX)
@@ -146,7 +158,7 @@ enum OCREngine {
                 }
             }
             if !merged {
-                lines.append(Line(items: [(box.minX, obs.text)],
+                lines.append(Line(cells: [(box.minX, box.maxX, obs.text)],
                                   minY: box.minY, maxY: box.maxY,
                                   minX: box.minX, maxX: box.maxX))
             }
@@ -155,11 +167,83 @@ enum OCREngine {
         return lines
             .sorted { ($0.minY + $0.maxY) / 2 < ($1.minY + $1.maxY) / 2 }
             .map { line in
-                line.items
-                    .sorted { $0.x < $1.x }
-                    .map(\.text)
-                    .joined(separator: " ")
+                OCRRow(cells: line.cells.sorted { $0.minX < $1.minX },
+                       midY: (line.minY + line.maxY) / 2)
             }
+    }
+
+    /// 把逐词 observation 聚成文本行。
+    static func groupIntoLines(_ observations: [TextObservation], overlapThreshold: Double) -> [String] {
+        groupedRows(observations, overlapThreshold: overlapThreshold)
+            .map { $0.cells.map(\.text).joined(separator: " ") }
+    }
+
+    // ── 表格 → Markdown ──
+
+    /// 尝试把 OCR 结果重排成 Markdown 表格；不像表格就返回 nil（调用方回落纯文本）。
+    ///
+    /// 思路：行聚类沿用 groupedRows；分列靠**列缝检测**——
+    /// 收集多列行里"单元格之间的空白带"，横向求交后，
+    /// 出现在 ≥ 一半多列行里的空白带才算列边界（空单元格天然被跳过）。
+    /// 结构太散（行太少 / 列太多 / 缝对不上）就放弃，别硬拼。
+    static func tableMarkdown(from observations: [TextObservation]) -> String? {
+        let rows = groupedRows(observations, overlapThreshold: 0.5)
+        let multi = rows.filter { $0.cells.count >= 2 }
+        // 至少两行、至少两行有多列，且多列行占多数——否则大概率只是排版松散的段落
+        guard rows.count >= 2, multi.count >= 2,
+              Double(multi.count) / Double(rows.count) >= 0.5 else { return nil }
+
+        // 只取表格纵向范围内的行（表上方的标题、下方的备注别混进来）
+        let top = multi.map(\.midY).min() ?? 0
+        let bottom = multi.map(\.midY).max() ?? 1
+        let body = rows.filter { $0.midY >= top && $0.midY <= bottom }
+
+        struct Gap { var lo: Double; var hi: Double; var count: Int }
+        var merged: [Gap] = []
+        for row in multi {
+            for i in 1..<row.cells.count {
+                let lo = row.cells[i - 1].maxX
+                let hi = row.cells[i].minX
+                guard hi - lo > 0.012 else { continue }  // 太窄是字距，不是列缝
+                if let idx = merged.firstIndex(where: { $0.lo < hi && lo < $0.hi }) {
+                    merged[idx].lo = max(merged[idx].lo, lo)
+                    merged[idx].hi = min(merged[idx].hi, hi)
+                    merged[idx].count += 1
+                } else {
+                    merged.append(Gap(lo: lo, hi: hi, count: 1))
+                }
+            }
+        }
+        let needed = max(2, Int(ceil(Double(multi.count) * 0.5)))
+        let separators = merged
+            .filter { $0.count >= needed && $0.hi > $0.lo }
+            .map { ($0.lo + $0.hi) / 2 }
+            .sorted()
+        guard !separators.isEmpty else { return nil }
+        let columnCount = separators.count + 1
+        guard columnCount >= 2, columnCount <= 10 else { return nil }
+
+        // 每行按列缝分格；同列撞上两个词（聚类误差）就拼一格
+        var grid = body.map { row -> [String] in
+            var cells = Array(repeating: "", count: columnCount)
+            for cell in row.cells {
+                let center = (cell.minX + cell.maxX) / 2
+                let column = min(separators.filter { center > $0 }.count, columnCount - 1)
+                cells[column] = cells[column].isEmpty ? cell.text : cells[column] + " " + cell.text
+            }
+            return cells
+        }
+        // 掐掉两边全空的列（列缝偏移时会出现）
+        let used = (0..<columnCount).filter { column in grid.contains { !$0[column].isEmpty } }
+        guard let first = used.first, let last = used.last, last > first else { return nil }
+        grid = grid.map { Array($0[first...last]) }
+
+        var markdown = "|" + grid[0].map { " \($0) |" }.joined() + "\n"
+        markdown += "|" + String(repeating: " --- |", count: grid[0].count) + "\n"
+        for row in grid.dropFirst() {
+            markdown += "|" + row.map { " \($0) |" }.joined() + "\n"
+        }
+        return markdown
     }
 
     // ── QR / 条形码 ──

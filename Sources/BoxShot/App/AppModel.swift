@@ -336,22 +336,30 @@ final class AppModel: ObservableObject {
     func runOCR(image: CGImage) {
         Task { @MainActor in
             do {
-                let text = try await OCREngine.recognizeText(in: image,
-                                                             keepLineBreaks: prefs.value.ocrKeepLineBreaks,
-                                                             lineOverlap: prefs.value.ocrLineOverlap)
-                appendOCRResult(text)
+                // Vision 只跑一次；行聚类出纯文本，顺带尝试重排成 Markdown 表格
+                let observations = try await OCREngine.recognizeObservations(in: image)
+                let markdown = OCREngine.tableMarkdown(from: observations)
+                let text: String
+                if prefs.value.ocrKeepLineBreaks {
+                    text = OCREngine.groupIntoLines(observations,
+                                                    overlapThreshold: prefs.value.ocrLineOverlap)
+                        .joined(separator: "\n")
+                } else {
+                    text = observations.map(\.text).joined(separator: " ")
+                }
+                appendOCRResult(text, markdown: markdown)
             } catch {
                 presentError("OCR 识别失败：\(error.localizedDescription)")
             }
         }
     }
 
-    private func appendOCRResult(_ text: String) {
+    private func appendOCRResult(_ text: String, markdown: String? = nil) {
         // 结果窗口始终复用同一个（新结果替换旧内容），连续识别不丢上一段
         let controller = resultWindow ?? ResultWindowController()
         resultWindow = controller
         guard !text.isEmpty else {
-            controller.show(kind: .text("（没有识别到文字）"), copied: false)
+            controller.show(kind: .text("（没有识别到文字）", markdown: nil), copied: false)
             return
         }
         if prefs.value.ocrIncremental {
@@ -361,7 +369,7 @@ final class AppModel: ObservableObject {
             Support.copyTextToClipboard(text)
         }
         playFeedbackSound()
-        controller.show(kind: .text(text), copied: true)
+        controller.show(kind: .text(text, markdown: markdown), copied: true)
     }
 
     /// 解码。`completion` 回传结果，让浮层能就地闪一句「已复制 / 没认出来」——
@@ -377,7 +385,7 @@ final class AppModel: ObservableObject {
                     // 改成开结果窗（已提到浮层之上）说清楚"没认出来"。
                     let empty = resultWindow ?? ResultWindowController()
                     resultWindow = empty
-                    empty.show(kind: .text("没有识别到 QR / 条形码\n\n可以试着把码截大一点，\n或者确认码没有被遮挡。"),
+                    empty.show(kind: .text("没有识别到 QR / 条形码\n\n可以试着把码截大一点，\n或者确认码没有被遮挡。", markdown: nil),
                                copied: false)
                     return
                 }
