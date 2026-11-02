@@ -341,7 +341,11 @@ private struct RecordPane: View {
                 .labelsHidden()
                 .frame(width: 150)
                 .disabled(!prefs.value.recordCamera)
-                Text(prefs.value.recordCamera ? "" : "先勾选下面的摄像头取景框")
+                // 把当前的边长点数显示出来：三档是绝对值，用户设了 170 就该
+                // 能在界面上看到"确实是 170"，而不是靠肉眼看大小猜
+                Text(prefs.value.recordCamera
+                     ? "当前 \(Int(prefs.value.recordCameraSize.side)) pt"
+                     : "先勾选下面的摄像头取景框")
                     .font(.footnote).foregroundStyle(.secondary)
             }
             HStack {
