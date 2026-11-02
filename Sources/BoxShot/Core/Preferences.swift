@@ -47,9 +47,16 @@ enum RecordFileFormat: String, Codable, CaseIterable, Identifiable {
     var supportsAudio: Bool { self != .gif }
 }
 
+/// MOV / MP4 的帧率档位。
+///
+/// 24 / 25 是影视与 PAL 的老口径（用户给的参考图里就有），48 / 50 / 60 给高帧率素材。
+/// 引擎侧的换算见 `Recorder`：`minimumFrameInterval` 用 `min(60, fps)`、
+/// `AVVideoExpectedSourceFrameRateKey` 用 `max(10, fps)`，这两头都能吃下 48/50/60。
+let recordFPSOptions: [Int] = [10, 15, 24, 25, 30, 48, 50, 60]
+
 /// 录制时右下角摄像头取景框的大小。
 ///
-/// 用户口径（1.0.9 修订）：直接给边长点数 —— 大 170 / 中 150 / 小 140。
+/// 用户口径：直接给边长点数 —— 大 200 / 中 180 / 小 150（1.0.12 由 170/150/140 上调）。
 /// 早前是按选区短边算倍数，用户要的是"我说多大就多大"，所以改成绝对值；
 /// 只在选区本身太小时才收一收（见 `CameraBubbleController.fittedSide`），
 /// 否则取景框会把被录的内容整块盖住。
@@ -69,9 +76,9 @@ enum CameraBubbleSize: String, Codable, CaseIterable, Identifiable {
     /// 取景框（圆形直径 / 圆角矩形宽度）的边长，单位 pt
     var side: CGFloat {
         switch self {
-        case .large:  return 170
-        case .medium: return 150
-        case .small:  return 140
+        case .large:  return 200
+        case .medium: return 180
+        case .small:  return 150
         }
     }
 }

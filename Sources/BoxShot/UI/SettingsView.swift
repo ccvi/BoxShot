@@ -364,54 +364,74 @@ private struct RecordPane: View {
     @ObservedObject var model: AppModel
     @ObservedObject var prefs: PreferencesStore
 
+    /// 标签列 / 控件列宽度：**所有行共用**，红框里那几个控件的左边缘才会齐。
+    /// 🔴 坑在 `.frame(width:)` 默认是**居中**对齐：每个 Picker 自然宽度不同，
+    /// 塞进同一个宽度后各自居中，左边缘就各不相同（用户看到的"没对齐"）。
+    /// 必须显式 `alignment: .leading`。
+    private let labelWidth: CGFloat = 90
+    private let controlWidth: CGFloat = 150
+
+    /// 标签列与控件列之间的间距 —— 「没有标签」的那些行（勾选框）要空出同样的距离，
+    /// 否则会正好左移 8pt。实测过：`.padding(.leading, labelWidth)` 比控件列左 8pt。
+    private let gap: CGFloat = 8
+
+    /// 一行：定宽标签（右对齐）+ 定宽控件（左对齐）+ 可选的行尾说明
+    private func row(_ title: String, _ content: some View, trailing: String? = nil) -> some View {
+        HStack(spacing: gap) {
+            Text(title).frame(width: labelWidth, alignment: .trailing)
+            content.frame(width: controlWidth, alignment: .leading)
+            if let trailing {
+                Text(trailing).font(.footnote).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    /// 没有标签的行（勾选框 / 说明）：左边补一块和标签列等宽的空白，
+    /// 让它跟有标签那几行的控件落在同一列上。
+    private func bareRow(_ content: some View) -> some View {
+        HStack(spacing: gap) {
+            Color.clear.frame(width: labelWidth, height: 1)
+            content
+            Spacer(minLength: 0)
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Text("声音").frame(width: 90, alignment: .trailing)
+            row("声音",
                 Picker("", selection: prefs.binding(\.recordAudio)) {
                     ForEach(RecordAudioSource.allCases) { source in
                         Text(source.title).tag(source)
                     }
                 }
-                .labelsHidden()
-                .frame(width: 140)
-            }
-            HStack {
-                Text("帧率").frame(width: 90, alignment: .trailing)
+                .labelsHidden())
+            row("帧率",
                 Picker("", selection: prefs.binding(\.recordFPS)) {
-                    Text("24").tag(24)
-                    Text("30").tag(30)
-                    Text("60").tag(60)
+                    // 名单在 Preferences 顶层（自检要验它），这里不要另抄一份
+                    ForEach(recordFPSOptions, id: \.self) { fps in
+                        Text("\(fps)").tag(fps)
+                    }
                 }
                 .labelsHidden()
-                .frame(width: 90)
-            }
-            HStack {
-                Text("格式").frame(width: 90, alignment: .trailing)
+                .disabled(prefs.value.recordFormat == .gif))
+            row("格式",
                 Picker("", selection: prefs.binding(\.recordFormat)) {
                     ForEach(RecordFileFormat.allCases) { format in
                         Text(format.title).tag(format)
                     }
                 }
-                .labelsHidden()
-                .frame(width: 100)
-                Text(prefs.value.recordFormat == .gif ? "动图：无声音、无画中画" : "")
-                    .font(.footnote).foregroundStyle(.secondary)
-            }
-            HStack {
-                Text("质量").frame(width: 90, alignment: .trailing)
+                .labelsHidden(),
+                trailing: prefs.value.recordFormat == .gif ? "动图：无声音、无画中画" : nil)
+            row("质量",
                 Picker("", selection: prefs.binding(\.recordQuality)) {
                     ForEach(RecordQuality.allCases) { quality in
                         Text(quality.title).tag(quality)
                     }
                 }
-                .labelsHidden()
-                .frame(width: 100)
-            }
-            // 取景框大小就放在「质量」下面（用户指定位置）：
-            // 大 / 中（默认）/ 小，中比小大 10%，大比中大 10%
-            HStack {
-                Text("取景框大小").frame(width: 90, alignment: .trailing)
+                .labelsHidden())
+            // 取景框大小就放在「质量」下面（用户指定位置）：大 / 中（默认）/ 小
+            row("取景框大小",
                 Picker("", selection: prefs.binding(\.recordCameraSize)) {
                     ForEach(CameraBubbleSize.allCases) { size in
                         Text(size.title).tag(size)
@@ -419,35 +439,25 @@ private struct RecordPane: View {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-                .frame(width: 150)
-                .disabled(!prefs.value.recordCamera)
-                // 把当前的边长点数显示出来：三档是绝对值，用户设了 170 就该
-                // 能在界面上看到"确实是 170"，而不是靠肉眼看大小猜
-                Text(prefs.value.recordCamera
-                     ? "当前 \(Int(prefs.value.recordCameraSize.side)) pt"
-                     : "先勾选下面的摄像头取景框")
-                    .font(.footnote).foregroundStyle(.secondary)
-            }
-            HStack {
-                Text("").frame(width: 90)
+                .disabled(!prefs.value.recordCamera),
+                // 把当前边长点数显示出来：三档是绝对值，设了 200 就该在界面上
+                // 看到"确实是 200"，而不是靠肉眼看大小猜
+                trailing: prefs.value.recordCamera
+                    ? "当前 \(Int(prefs.value.recordCameraSize.side)) pt"
+                    : "先勾选下面的摄像头取景框")
+            bareRow(
                 Toggle("录制时显示摄像头取景框（画面右下角，圆形 / 圆角矩形，右键切换）",
-                       isOn: prefs.binding(\.recordCamera))
-            }
-            HStack {
-                Text("GIF 帧率").frame(width: 90, alignment: .trailing)
+                       isOn: prefs.binding(\.recordCamera)))
+            row("GIF 帧率",
                 Picker("", selection: prefs.binding(\.recordGIFPS)) {
                     Text("5").tag(5)
                     Text("10").tag(10)
                     Text("15").tag(15)
                 }
                 .labelsHidden()
-                .frame(width: 90)
-                .disabled(prefs.value.recordFormat != .gif)
-            }
-            Toggle("录制中显示鼠标指针", isOn: prefs.binding(\.recordShowCursor))
-                .padding(.leading, 90)
-            Toggle("录制完成后在 Finder 中显示文件", isOn: prefs.binding(\.recordRevealInFinder))
-                .padding(.leading, 90)
+                .disabled(prefs.value.recordFormat != .gif))
+            bareRow(Toggle("录制中显示鼠标指针", isOn: prefs.binding(\.recordShowCursor)))
+            bareRow(Toggle("录制完成后在 Finder 中显示文件", isOn: prefs.binding(\.recordRevealInFinder)))
             Text("输出 MP4 / MOV（H.264 + AAC），默认保存到桌面。首次录制需要授权「屏幕录制」与「麦克风」。")
                 .font(.callout).foregroundStyle(.secondary)
         }

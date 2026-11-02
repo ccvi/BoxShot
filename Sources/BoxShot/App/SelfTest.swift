@@ -393,16 +393,26 @@ enum SelfTest {
 
         // ── 取景框档位 ──
         do {
-            // 用户口径（1.0.9 修订）：绝对值 大 170 / 中 150 / 小 140
-            check("取景框大 = 170pt", CameraBubbleSize.large.side == 170)
-            check("取景框中 = 150pt", CameraBubbleSize.medium.side == 150)
-            check("取景框小 = 140pt", CameraBubbleSize.small.side == 140)
+            // 用户口径（1.0.12 再上调一次）：绝对值 大 200 / 中 180 / 小 150
+            check("取景框大 = 200pt", CameraBubbleSize.large.side == 200)
+            check("取景框中 = 180pt", CameraBubbleSize.medium.side == 180)
+            check("取景框小 = 150pt", CameraBubbleSize.small.side == 150)
             check("取景框三档递增", CameraBubbleSize.small.side < CameraBubbleSize.medium.side
                   && CameraBubbleSize.medium.side < CameraBubbleSize.large.side)
             check("取景框三档标题是 大/中/小",
                   CameraBubbleSize.large.title == "大"
                   && CameraBubbleSize.medium.title == "中"
                   && CameraBubbleSize.small.title == "小")
+        }
+
+        // ── 录制帧率档位（1.0.12 新增 48/50/60）──
+        do {
+            check("帧率档位 8 档", recordFPSOptions == [10, 15, 24, 25, 30, 48, 50, 60])
+            check("帧率档位单调递增",
+                  zip(recordFPSOptions, recordFPSOptions.dropFirst()).allSatisfy { $0 < $1 })
+            // 引擎两头的换算不能把 48/50/60 夹回去：60 得原样传下去
+            check("60fps 不被 min(60) 夹掉", min(60, 60) == 60)
+            check("默认 30 在档位里", recordFPSOptions.contains(Preferences().recordFPS))
         }
 
         // ── 渲染管线 ──

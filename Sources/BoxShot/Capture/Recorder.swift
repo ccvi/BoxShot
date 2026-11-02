@@ -169,7 +169,11 @@ final class RecorderController: NSObject {
             self.writer = writer
 
             // ── 视频输入（码率按质量档：像素 × 帧率 × 系数）──
-            let bitrate = Int(Double(pixelW * pixelH) * Double(max(10, fps)) * quality.bitrateFactor)
+            // 60fps 是 1.0.12 才开放的高帧率档，全屏 5K 下「像素×帧率×0.12」
+            // 能算出 100 Mbps 以上，编码器直接拒绝 → 录出来是 0 字节。
+            // 封顶 80 Mbps（H.264 的现实上限，再高也吃不下）。
+            let rawBitrate = Int(Double(pixelW * pixelH) * Double(max(10, fps)) * quality.bitrateFactor)
+            let bitrate = min(rawBitrate, 80_000_000)
             // 🔴 码率**必须**藏在 AVVideoCompressionPropertiesKey 里面。
             // 放在 outputSettings 顶层是老的写法，macOS 26 直接抛
             // NSInvalidArgumentException：
