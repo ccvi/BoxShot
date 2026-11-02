@@ -299,21 +299,25 @@ final class OverlayEditorController: NSObject {
 
     // ── 工具栏 ──────────────────────────────────────────────
 
-    // ── 工具条尺寸：1.0.11 用户口径「调小 30%」────────────────
+    // ── 工具条尺寸 ─────────────────────────────────────────
     //
-    // 一个倍率管全部：按钮框、图标字号、圆角、间距、内边距、颜色圆点、
-    // 分隔线高度全从 `toolbarScale` 推出来。以前这些数散在各处硬编码，
-    // 想整体缩小只能一个一个改，漏掉一个（比如只改按钮不改内边距）就变成
-    // "按钮小了但工具条还是那么高"。
+    // 一个倍率管全部：图标字号、圆角、间距、内边距、颜色圆点、分隔线高度
+    // 全从 `toolbarScale` 推出来。以前这些数散在各处硬编码，想整体缩小只能
+    // 一个一个改，漏掉一个（比如只改按钮不改内边距）就变成"按钮小了但工具条
+    // 还是那么高"。
+    //
+    // 🔴 1.0.11 的教训：用户说「工具条那个控制颜色的小圆按钮缩小 30%」，
+    // 我先把整个工具条缩了 —— 他说的是**那颗圆点**，工具条本身要原尺寸。
+    // 所以倍率留在 1.0 当下手开关，真正动的是 `colorAnchorSide`。
 
-    /// 工具条整体倍率（1.0.11：调小 30%）
-    static let toolbarScale: CGFloat = 0.7
+    /// 工具条整体倍率（1.0 = 原尺寸；用户 1.0.11 口径：工具条恢复原样）
+    static let toolbarScale: CGFloat = 1.0
     /// 图标字号（原 19）。
     /// 🔴 **不要给工具条按钮加显式宽高约束**：这类"空标题 + 图片"的按钮
     /// 内禀尺寸来自图片本身，只缩字号整排按钮就会按同一比例缩小。
-    /// 反倒以前写的 `frame = 40×38` 从来没生效过（NSStackView 只认
-    /// intrinsicContentSize）：1.0.11 实测旧工具条是 **523×32**，按 40×38 缩放
-    /// 会算成 596×39 —— 比原来还大。
+    /// 反倒原来写的 `frame = 40×38` 从来没生效过（NSStackView 只认
+    /// intrinsicContentSize）：1.0.11 实测原尺寸是 **523×32**，按 40×38 去缩放
+    /// 会算错。
     static let toolbarIconPointSize: CGFloat = 19 * toolbarScale
     /// 按钮选中态底色圆角（原 6）
     static let toolbarButtonCornerRadius: CGFloat = 6 * toolbarScale
@@ -326,9 +330,11 @@ final class OverlayEditorController: NSObject {
     static let toolbarDividerHeight: CGFloat = 26 * toolbarScale
     /// 工具条容器圆角（原 14）
     static let toolbarContainerCornerRadius: CGFloat = 14 * toolbarScale
-    /// 「当前颜色」那颗圆点的直径（原 30）。它只有 layer 底色、没有图片，
-    /// 内禀尺寸是 0 —— 显式约束不能省，这里跟着倍率一起缩。
-    static let colorAnchorSide: CGFloat = 30 * toolbarScale
+    /// 「当前颜色」那颗圆点的直径：**30 的 70% = 21**。
+    /// 用户 1.0.11 原话「工具条那个控制颜色的小圆按钮缩小 30%」—— 只缩这颗，
+    /// 工具条别的一律不动。它只有 layer 底色、没有图片，内禀尺寸是 0，
+    /// 显式约束不能省（不然会被 NSStackView 压成 0 宽、整个圆点看不见）。
+    static let colorAnchorSide: CGFloat = 30 * 0.7
 
     private func buildToolbarPanel() -> NSPanel {
         let stack = NSStackView()

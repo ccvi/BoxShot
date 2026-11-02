@@ -306,24 +306,26 @@ enum SelfTest {
             check("工具条按框中线居中", abs((p5.x + size.width / 2) - centered.midX) < 0.5)
         }
 
-        // ── 工具条整体倍率（1.0.11 用户口径「调小 30%」）──
+        // ── 工具条尺寸（1.0.11：工具条保持原尺寸，只缩「当前颜色」那颗圆点）──
         do {
-            check("工具条倍率 0.7", abs(OverlayEditorController.toolbarScale - 0.7) < 0.001)
-            check("图标字号跟着缩到 13.3", abs(OverlayEditorController.toolbarIconPointSize - 13.3) < 0.01)
-            // 这几条盯的是"有没有漏改"：只缩字号不缩内边距/间距/圆角，
-            // 结果就是"按钮小了、工具条还是那么高"，肉眼很难当场发现。
-            check("内边距 / 间距 / 圆角都从同一个倍率推出来",
-                  abs(OverlayEditorController.toolbarInsetV - 9 * 0.7) < 0.01
-                    && abs(OverlayEditorController.toolbarInsetH - 10 * 0.7) < 0.01
-                    && abs(OverlayEditorController.toolbarSpacing - 2 * 0.7) < 0.01
-                    && abs(OverlayEditorController.toolbarButtonCornerRadius - 6 * 0.7) < 0.01
-                    && abs(OverlayEditorController.toolbarContainerCornerRadius - 14 * 0.7) < 0.01)
-            check("工具条分隔线跟着缩到 18.2",
-                  abs(OverlayEditorController.toolbarDividerHeight - 26 * 0.7) < 0.01)
-            check("工具条上的颜色圆点也缩到 21",
+            check("工具条保持原尺寸（倍率 1.0）",
+                  abs(OverlayEditorController.toolbarScale - 1.0) < 0.001)
+            check("图标字号还是 19（没跟着缩）",
+                  abs(OverlayEditorController.toolbarIconPointSize - 19) < 0.01)
+            // 这几条盯的是"倍率是不是真的只作用在圆点上"：
+            // 内边距 / 间距 / 圆角 / 分隔线一旦跟着变，就是又误伤了整个工具条。
+            check("内边距 / 间距 / 圆角 / 容器圆角都回到原值",
+                  abs(OverlayEditorController.toolbarInsetV - 9) < 0.01
+                    && abs(OverlayEditorController.toolbarInsetH - 10) < 0.01
+                    && abs(OverlayEditorController.toolbarSpacing - 2) < 0.01
+                    && abs(OverlayEditorController.toolbarButtonCornerRadius - 6) < 0.01
+                    && abs(OverlayEditorController.toolbarContainerCornerRadius - 14) < 0.01)
+            check("工具条分隔线高度回到 26",
+                  abs(OverlayEditorController.toolbarDividerHeight - 26) < 0.01)
+            check("「当前颜色」圆点缩到 21（30 的 70%）",
                   abs(OverlayEditorController.colorAnchorSide - 21) < 0.01)
-            check("颜色圆点小于原来的色块直径（不会反过来比色块大）",
-                  OverlayEditorController.swatchSide < OverlayEditorController.colorAnchorSide)
+            check("颜色圆点确实比原来小 30%",
+                  abs(OverlayEditorController.colorAnchorSide / 30 - 0.7) < 0.001)
         }
 
         // ── 颜色面板落位（1.0.10：贴在工具条下面，6 个颜色）──
