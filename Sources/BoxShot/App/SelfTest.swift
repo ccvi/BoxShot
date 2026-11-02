@@ -348,6 +348,9 @@ enum SelfTest {
                   abs(OverlayEditorController.toolbarScale - 1.0) < 0.001)
             check("图标字号还是 19（没跟着缩）",
                   abs(OverlayEditorController.toolbarIconPointSize - 19) < 0.01)
+            check("文字工具按钮直接显示「文字」（textformat 字形在中文环境渲染成「格式」）",
+                  EditorTool.text.toolbarLabel == "文字"
+                    && EditorTool.pen.toolbarLabel == nil)
             // 这几条盯的是"倍率是不是真的只作用在圆点上"：
             // 内边距 / 间距 / 分隔线一旦跟着变，就是又误伤了整个工具条。
             // 容器圆角 2026-11-02 用户口径从 14 改成 10（与颜色面板一致）。

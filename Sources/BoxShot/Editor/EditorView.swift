@@ -703,11 +703,22 @@ struct EditorView: View {
                     Button {
                         doc.tool = tool
                     } label: {
-                        Image(systemName: tool.symbol)
-                            .font(.system(size: 14))
-                            .frame(width: 30, height: 28)
-                            .background(doc.tool == tool ? Color.accentColor.opacity(0.18) : .clear)
-                            .cornerRadius(6)
+                        Group {
+                            // 文字工具直接显示「文字」两个字（textformat 字形
+                            // 在中文环境渲染成「格式」，用户口径改掉）
+                            if let label = tool.toolbarLabel {
+                                Text(label)
+                                    .font(.system(size: 11, weight: .medium))
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.7)
+                            } else {
+                                Image(systemName: tool.symbol)
+                                    .font(.system(size: 14))
+                            }
+                        }
+                        .frame(width: 30, height: 28)
+                        .background(doc.tool == tool ? Color.accentColor.opacity(0.18) : .clear)
+                        .cornerRadius(6)
                     }
                     .buttonStyle(.plain)
                     .help(tool.title)

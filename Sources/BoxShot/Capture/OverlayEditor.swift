@@ -355,8 +355,17 @@ final class OverlayEditorController: NSObject {
         let toolOrder: [EditorTool] = [.select, .arrow, .pen, .rect, .ellipse, .line,
                                        .text, .marker, .mosaic, .blur, .measure, .colorPick]
         for tool in toolOrder {
-            let button = toolbarButton(symbol: tool.symbol, title: tool.title) { [weak self] in
-                self?.selectTool(tool)
+            let button: NSButton
+            if let label = tool.toolbarLabel {
+                // 文字工具：图标位显示「文字」两个字（textformat 字形
+                // 在中文环境渲染成「格式」，用户口径 2026-11-02 改掉）
+                button = toolbarTextButton(label, title: tool.title) { [weak self] in
+                    self?.selectTool(tool)
+                }
+            } else {
+                button = toolbarButton(symbol: tool.symbol, title: tool.title) { [weak self] in
+                    self?.selectTool(tool)
+                }
             }
             toolButtons[tool] = button
             stack.addArrangedSubview(button)
@@ -609,6 +618,25 @@ final class OverlayEditorController: NSObject {
 
     private func toolbarButton(symbol: String, title: String, action: @escaping () -> Void) -> NSButton {
         toolbarButtonWithSender(symbol: symbol, title: title) { _ in action() }
+    }
+
+    /// 文字标签按钮（文字工具用）：图标位放两个字。选中高亮与其他按钮
+    /// 同一套 layer 底色（refresh() 只认 toolButtons 里的 layer）。
+    private func toolbarTextButton(_ text: String, title: String, action: @escaping () -> Void) -> NSButton {
+        let button = FirstMouseButton(title: text, target: nil, action: nil)
+        button.bezelStyle = .regularSquare
+        button.isBordered = false
+        button.wantsLayer = true
+        button.layer?.cornerRadius = Self.toolbarButtonCornerRadius
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: Self.toolbarIconPointSize * 0.62, weight: .medium),
+            .foregroundColor: NSColor.labelColor,
+        ]
+        button.attributedTitle = NSAttributedString(string: text, attributes: attributes)
+        button.toolTip = title
+        button.setButtonType(.momentaryChange)
+        button.onAction = { [weak button] in if let button { action() } }
+        return button
     }
 
     private func toolbarButtonWithSender(symbol: String, title: String,

@@ -79,6 +79,18 @@ enum EditorTool: String, CaseIterable, Identifiable {
         default: return true
         }
     }
+
+    /// 工具条按钮上的**文字标签**（nil = 用 symbol 图标）。
+    /// 文字工具以前用 SF Symbol「textformat」，在中文环境的 macOS 上
+    /// 这个字形渲染出来就是「格式」两个字（2026-11-02 用户样张口径：
+    /// 「工具条的文字：格式 改为 文字」）—— 改成直接显示文字标签，
+    /// 浮层工具条与编辑窗口工具条共用这一份。
+    var toolbarLabel: String? {
+        switch self {
+        case .text: return "文字"
+        default: return nil
+        }
+    }
 }
 
 struct AnnotationShape: Equatable {
