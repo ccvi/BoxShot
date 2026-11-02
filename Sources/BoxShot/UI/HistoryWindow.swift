@@ -1,4 +1,5 @@
 import AppKit
+import Quartz
 import SwiftUI
 
 // ============================================================
@@ -11,10 +12,18 @@ import SwiftUI
 // 20 张 4K 截图全解压进内存就是几百 MB，面板一开风扇就响。
 // ============================================================
 
+/// 选中项。放 ObservableObject 里而不是视图 @State：
+/// 空格预览要挂在窗口控制器上，控制器得读得到当前选中的是哪张。
+final class HistorySelection: ObservableObject {
+    @Published var selectedID: UUID?
+}
+
 @MainActor
-final class HistoryWindowController: NSWindowController, NSWindowDelegate {
+final class HistoryWindowController: NSWindowController, NSWindowDelegate, QLPreviewPanelDataSource {
 
     private weak var model: AppModel?
+    let selection = HistorySelection()
+    private var keyMonitor: Any?
 
     init(model: AppModel) {
         self.model = model
@@ -30,6 +39,7 @@ final class HistoryWindowController: NSWindowController, NSWindowDelegate {
         let root = ShotHistoryView(
             model: model,
             store: ShotHistoryStore.shared,
+            selection: selection,
             onOpen: { [weak self] item in self?.open(item) },
             onCopy: { [weak self] item in self?.copy(item) },
             onPin: { [weak self] item in self?.pin(item) },
@@ -48,9 +58,57 @@ final class HistoryWindowController: NSWindowController, NSWindowDelegate {
     func show() {
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        installKeyMonitor()
+    }
+
+    // ── 空格预览（QuickLook，Finder 同款手感） ──────────────
+
+    /// 选中项在 store.items 里的下标；没选中返回 nil（空格不做任何事）
+    private var currentIndex: Int? {
+        guard let selectedID = selection.selectedID else { return nil }
+        return ShotHistoryStore.shared.items.firstIndex { $0.id == selectedID }
+    }
+
+    /// 只拦两个地方的空格：历史窗口上的（打开预览）、QL 面板上的（关闭预览）。
+    /// 其他窗口的空格原样放行。QL 面板属于本进程，本地监听能收到它的事件。
+    private func installKeyMonitor() {
+        guard keyMonitor == nil else { return }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, event.keyCode == 49 else { return event }
+            // Swift 里 QLPreviewPanel.shared() 返回可选
+            guard let panel = QLPreviewPanel.shared() else { return event }
+            if panel.isVisible, event.window === panel {
+                panel.orderOut(nil)
+                return nil
+            }
+            guard event.window === self.window, let index = self.currentIndex else { return event }
+            panel.dataSource = self
+            panel.makeKeyAndOrderFront(nil)
+            panel.currentPreviewItemIndex = index
+            return nil
+        }
+    }
+
+    private func removeKeyMonitor() {
+        if let keyMonitor {
+            NSEvent.removeMonitor(keyMonitor)
+            self.keyMonitor = nil
+        }
+    }
+
+    // ── QLPreviewPanelDataSource ──
+
+    func numberOfPreviewItems(in panel: QLPreviewPanel!) -> Int {
+        ShotHistoryStore.shared.items.count
+    }
+
+    func previewPanel(_ panel: QLPreviewPanel!, previewItemAt index: Int) -> QLPreviewItem {
+        let item = ShotHistoryStore.shared.items[index]
+        return HistoryPreviewItem(url: ShotHistoryStore.shared.url(for: item))
     }
 
     func windowWillClose(_ notification: Notification) {
+        removeKeyMonitor()
         onClose?()
     }
 
@@ -80,13 +138,16 @@ struct ShotHistoryView: View {
 
     let model: AppModel
     @ObservedObject var store: ShotHistoryStore
+    @ObservedObject var selection: HistorySelection
+
+    /// 读取别名：视图里大量只读判断沿用旧名
+    private var selectedID: UUID? { selection.selectedID }
 
     var onOpen: (ShotHistoryItem) -> Void
     var onCopy: (ShotHistoryItem) -> Void
     var onPin: (ShotHistoryItem) -> Void
     var onReveal: (ShotHistoryItem) -> Void
 
-    @State private var selectedID: UUID?
     /// 全部图片的磁盘总大小（后台算，随条目数变化重算）
     @State private var totalSizeText: String = ""
 
@@ -106,9 +167,9 @@ struct ShotHistoryView: View {
                             HistoryCell(item: item,
                                         url: store.url(for: item),
                                         isSelected: item.id == selectedID)
-                                .onTapGesture { selectedID = item.id }
+                                .onTapGesture { selection.selectedID = item.id }
                                 .simultaneousGesture(TapGesture(count: 2).onEnded {
-                                    selectedID = item.id
+                                    selection.selectedID = item.id
                                     onOpen(item)
                                 })
                                 .contextMenu {
@@ -119,7 +180,7 @@ struct ShotHistoryView: View {
                                     Divider()
                                     Button("删除", role: .destructive) {
                                         store.delete(item)
-                                        if selectedID == item.id { selectedID = nil }
+                                        if selectedID == item.id { selection.selectedID = nil }
                                     }
                                 }
                         }
@@ -194,17 +255,24 @@ struct ShotHistoryView: View {
             Button("删除", role: .destructive) {
                 if let item = selectedItem {
                     store.delete(item)
-                    selectedID = nil
+                    selection.selectedID = nil
                 }
             }
             .disabled(selectedItem == nil)
             Divider().frame(height: 18)
-            Button("清空全部", role: .destructive) { store.clear(); selectedID = nil }
+            Button("清空全部", role: .destructive) { store.clear(); selection.selectedID = nil }
                 .disabled(store.items.isEmpty)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
     }
+}
+
+/// QuickLook 的预览项：就是历史目录里那张图的文件 URL
+private final class HistoryPreviewItem: NSObject, QLPreviewItem {
+    let url: URL
+    init(url: URL) { self.url = url }
+    var previewItemURL: URL? { url }
 }
 
 private struct HistoryCell: View {
