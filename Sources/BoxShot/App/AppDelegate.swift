@@ -278,24 +278,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.runRecordDiagnostics()
             }
         }
-        // 诊断入口：--show-camerawindow 直接把摄像头录制取景窗开出来（看布局用）
-        let camWindowTrigger = "/tmp/boxshot-camerawindow.trigger"
-        if CommandLine.arguments.contains("--show-camerawindow")
-            || FileManager.default.fileExists(atPath: camWindowTrigger) {
-            try? FileManager.default.removeItem(atPath: camWindowTrigger)
+        // 诊断入口：--show-fixedframe 直接摆出「摄像头录制」的固定录制框（看布局用）
+        let fixedFrameTrigger = "/tmp/boxshot-fixedframe.trigger"
+        if CommandLine.arguments.contains("--show-fixedframe")
+            || FileManager.default.fileExists(atPath: fixedFrameTrigger) {
+            try? FileManager.default.removeItem(atPath: fixedFrameTrigger)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak self] in
                 self?.model.perform(.recordCamera)
-            }
-        }
-        // 诊断入口：--camrectest 只录摄像头跑 2 秒，确认能落出有时长的文件。
-        // 摄像头录制和屏幕录制的差别只在"视频从哪来"，但共用 writer 与暂停时间轴，
-        // 这条能把写入侧单独拎出来验（结果写 /tmp/boxshot-camrectest.log）。
-        let camRecTrigger = "/tmp/boxshot-camrectest.trigger"
-        if CommandLine.arguments.contains("--camrectest")
-            || FileManager.default.fileExists(atPath: camRecTrigger) {
-            try? FileManager.default.removeItem(atPath: camRecTrigger)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
-                self?.runCameraRecordDiagnostics()
             }
         }
     }
@@ -337,55 +326,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             log("准备停止")
             recorder.stop(reason: .user)
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
-                log("诊断结束")
-                exit(0)
-            }
-        }
-    }
-
-    // ── 诊断：仅摄像头录制（--camrectest） ──────────────────
-
-    private var camTestRecorder: RecorderController?
-
-    private func runCameraRecordDiagnostics() {
-        let logURL = URL(fileURLWithPath: "/tmp/boxshot-camrectest.log")
-        try? "".write(to: logURL, atomically: true, encoding: .utf8)
-        func log(_ text: String) {
-            NSLog("[BoxShot][camrectest] %@", text)
-            guard let handle = try? FileHandle(forWritingTo: logURL) else { return }
-            handle.seekToEndOfFile()
-            handle.write("\(text)\n".data(using: .utf8)!)
-            try? handle.close()
-        }
-
-        log("摄像头授权 = \(AVCaptureDevice.authorizationStatus(for: .video).rawValue)（3 = 已授权）")
-        let recorder = RecorderController()
-        recorder.revealInFinderOnFinish = false
-        recorder.finishedSoundName = ""
-        recorder.onError = { log("引擎报错：\($0)") }
-        recorder.onWarning = { log("提醒：\($0)") }
-        recorder.onStateChange = { log("状态 recording=\($0)") }
-        camTestRecorder = recorder
-
-        do {
-            try recorder.startCameraOnlyRecording(audio: .none, fps: 30,
-                                                  format: .mov, quality: .medium, showsHUD: false)
-        } catch {
-            log("启动抛错：\(error.localizedDescription)")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { exit(0) }
-            return
-        }
-        let url = recorder.outputURL
-        log("输出 → \(url?.path ?? "nil")")
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-            log("准备停止")
-            recorder.stop(reason: .user)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
-                if let url {
-                    let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
-                    log("文件大小 = \(size ?? 0) 字节")
-                }
                 log("诊断结束")
                 exit(0)
             }

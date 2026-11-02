@@ -443,17 +443,6 @@ private struct RecordPane: View {
                 trailing: prefs.value.recordCamera
                     ? "当前 \(Int(prefs.value.recordCameraSize.side)) pt"
                     : "先勾选下面的摄像头取景框")
-            // 「摄像头录制」独立取景窗的大小（大 600 / 中 550 / 小 500）：
-            // 和上面那个画中画小窗不是一回事，所以单列一行
-            row("录制窗口",
-                Picker("", selection: prefs.binding(\.cameraWindowSize)) {
-                    ForEach(CameraBubbleSize.allCases) { size in
-                        Text(size.title).tag(size)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden(),
-                trailing: "当前 \(Int(prefs.value.cameraWindowSize.windowSide)) pt")
             bareRow(
                 Toggle("录制时显示摄像头取景框（画面右下角，单击切换圆形 / 圆角矩形）",
                        isOn: prefs.binding(\.recordCamera)))

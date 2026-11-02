@@ -19,7 +19,6 @@ final class AppModel: ObservableObject {
     private var measureOverlay: MeasureOverlay?
     private var scrollController: ScrollCaptureController?
     private var recordToolbar: RecordToolbarController?
-    private var cameraRecorder: CameraRecorderWindowController?
     let pinManager = PinManager()
     private var resultWindow: ResultWindowController?
     private var historyWindow: HistoryWindowController?
@@ -46,7 +45,6 @@ final class AppModel: ObservableObject {
 
     func shutdown() {
         recordToolbar?.close(stopRecording: true)
-        cameraRecorder?.close()
     }
 
     // ── 动作路由 ─────────────────────────────────────────────
@@ -76,7 +74,7 @@ final class AppModel: ObservableObject {
         case .recordFullscreen:
             startRecording(fullscreen: true)
         case .recordCamera:
-            toggleCameraRecording()
+            startFixedFrameRecording()
         case .pinClipboard:
             pinFromClipboard()
         case .openSettings:
@@ -529,9 +527,6 @@ final class AppModel: ObservableObject {
     /// 区域模式选区后虚线框钉住；全屏模式直接出工具条，按"记录"才真正开录。
     private func startRecording(fullscreen: Bool) {
         guard ScreenCapture.ensurePermission() else { return }
-        // 摄像头取景窗先收掉：它也是本进程的窗口，留在屏上会被录进画面，
-        // 而且它占着摄像头会话（屏幕录制虽然不用摄像头，但没必要留着）。
-        cameraRecorder?.close()
         if let existing = recordToolbar {
             // 已经有一根工具条：录制中 = 菜单项就是"停止"；
             // 没在录 = 先把它收掉，然后照常重新选区，而不是什么都不做。
@@ -555,7 +550,8 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func showRecordToolbar(displayID: CGDirectDisplayID, region: CGRect?) {
+    private func showRecordToolbar(displayID: CGDirectDisplayID, region: CGRect?,
+                                   autoCamera: Bool = false) {
         let controller = RecordToolbarController(model: self)
         recordToolbar = controller
         controller.onClosed = { [weak self, weak controller] in
@@ -566,23 +562,54 @@ final class AppModel: ObservableObject {
         controller.onRecordingChange = { [weak self] recording in
             self?.isRecording = recording
         }
-        controller.begin(displayID: displayID, region: region)
+        controller.begin(displayID: displayID, region: region, autoCamera: autoCamera)
     }
 
-    /// 摄像头录制入口（菜单「摄像头录制」）：再点一次收起来
-    private func toggleCameraRecording() {
-        if let existing = cameraRecorder {
-            existing.close()
-            return
+    // ── 摄像头录制：固定录制框 + 录屏 ──────────────────────
+
+    /// 「摄像头录制」= 屏幕上先摆一个固定录制框，框里照常录屏，摄像头取景框放大后
+    /// 居中摆在框里。
+    ///
+    /// 用户口径（1.0.20 第二次改）：「我要录制系统声音，那你不如固定一个框出来，
+    /// 加录屏，把摄像头放大到大 600 / 中 550 / 小 500（pt），在那个录制框里居中。」
+    ///
+    /// 为什么不再"只录摄像头"：系统声音只有 ScreenCaptureKit 才有，纯摄像头录制
+    /// 天然没有音轨。做成框内录屏就自动带上系统声音；而取景框是屏幕上真实的悬浮窗，
+    /// 落在框里就会被 SC 一起拍进成片 —— 屏幕上是啥样，视频里就是啥样。
+    private func startFixedFrameRecording() {
+        guard ScreenCapture.ensurePermission() else { return }
+        if let existing = recordToolbar {
+            let wasRecording = isRecording
+            existing.close(stopRecording: true)
+            if wasRecording { return }
         }
-        let controller = CameraRecorderWindowController(model: self)
-        cameraRecorder = controller
-        controller.onClosed = { [weak self, weak controller] in
-            if let controller, self?.cameraRecorder === controller {
-                self?.cameraRecorder = nil
-            }
+        discardActiveSelector()
+        let screen = ScreenCapture.activeScreen()
+        let displayID = ScreenCapture.display(for: screen)
+        let frame = Self.fixedRecordFrame(on: screen)
+        let local = ScreenCapture.displayLocalRect(fromAppKit: frame, displayID: displayID)
+        NSLog("[BoxShot] 固定录制框 AppKit=(%.0f,%.0f %.0f×%.0f) 显示器局部=(%.0f,%.0f %.0f×%.0f)",
+              frame.minX, frame.minY, frame.width, frame.height,
+              local.minX, local.minY, local.width, local.height)
+        showRecordToolbar(displayID: displayID, region: local, autoCamera: true)
+    }
+
+    /// 固定录制框：屏幕可用区里最大的 16:9（四周各留 6%），居中。
+    /// 做成纯函数让自检盯住"16:9 / 居中 / 不出界"这三件事。
+    static func fixedRecordFrame(on screen: NSScreen) -> CGRect {
+        let visible = screen.visibleFrame
+        let maxW = visible.width * 0.88
+        let maxH = visible.height * 0.88
+        var w = maxW
+        var h = (w * 9 / 16).rounded()
+        if h > maxH {
+            h = maxH.rounded()
+            w = (h * 16 / 9).rounded()
         }
-        controller.show()
+        w = w.rounded()
+        return CGRect(x: (visible.midX - w / 2).rounded(),
+                      y: (visible.midY - h / 2).rounded(),
+                      width: w, height: h)
     }
 
     func toggleRecording() {

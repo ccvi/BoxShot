@@ -7,7 +7,7 @@ import AppKit
 //   [✕关闭] [全屏] [重选区域] | [●记录/■停止 + 计时] | [🎙麦克风] [🔊系统声音] [📷摄像头] | [选项▾]
 // 全屏录制：同样的工具条，无虚线框。
 //
-// 摄像头取景框是独立的圆形 / 圆角矩形小窗（CameraBubble），贴着选区右下角，
+// 摄像头取景框是独立的圆形 / 圆角矩形小窗（CameraBubble），摆在录制框正中，
 // 所见即所得地进录像；单击（或右键）在圆形 ⇄ 圆角矩形之间切换，✕ 或工具条按钮关闭。
 //
 // 选项弹层：帧率、格式 MOV/MP4、质量、取景框大小（切换实时生效）、显示光标。
@@ -50,7 +50,8 @@ final class RecordToolbarController: NSObject {
         self.model = model
     }
 
-    func begin(displayID: CGDirectDisplayID, region: CGRect?) {
+    /// `autoCamera` = 进来就把摄像头取景框打开（「摄像头录制」的固定框用它）
+    func begin(displayID: CGDirectDisplayID, region: CGRect?, autoCamera: Bool = false) {
         self.displayID = displayID
         self.region = region
         if let region {
@@ -58,6 +59,9 @@ final class RecordToolbarController: NSObject {
         }
         showToolbar()
         installEscMonitor()
+        if autoCamera, cameraBubble?.isVisible != true {
+            toggleCameraBubble()
+        }
     }
 
     private var selectionFrameAppKit: CGRect? {

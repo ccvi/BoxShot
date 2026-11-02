@@ -57,19 +57,6 @@ final class RecorderController: NSObject {
     private var captureSession: AVCaptureSession?
     private var ciContext: CIContext?
 
-    // ── 仅摄像头录制（1.0.18） ───────────────────────────────
-    //
-    // 视频源换成 AVCaptureVideoDataOutput（不建 SCStream），其余管线不变：
-    // writer / 音频输入 / 暂停时间轴补偿全部复用，成片的封装与行为两边一致。
-    // `cameraOnly` 在建好会话、startRunning 之前置位，采集回调据此分流。
-    private var cameraOnly = false
-    /// 摄像头数据输出（预览与录制共用同一个会话，这个引用用来接/断 delegate）
-    private var videoDataOutput: AVCaptureVideoDataOutput?
-    private var micAudioOutput: AVCaptureAudioDataOutput?
-    /// 输出画幅（摄像头原生尺寸，向下取偶数）
-    private var cameraPixelSize = CGSize(width: 1280, height: 720)
-    /// 输出是否水平镜像（自拍直觉：预览是镜像的，录出来也得是镜像的）
-    private var mirrorCameraOutput = true
 
     /// 摄像头最近一帧（摄像头自己的 delegate queue 写，视频帧队列读）。
     /// 用 NSLock 保护：两边的回调频率都高，读写竞争真实存在。
@@ -273,190 +260,7 @@ final class RecorderController: NSObject {
         }
     }
 
-    // ── 启动（仅摄像头） ─────────────────────────────────────
-
-    /// 取景窗（CameraRecorderWindow）要在里面挂预览层：先把设备 + 输出准备好，
-    /// 但**不建 writer**（用户还没点"开始录制"）。
-    ///
-    /// 🔴 预览和录制必须共用同一个 AVCaptureSession：同一台摄像头开两份会话会
-    /// 互相抢硬件，典型症状是"预览有画面、录出来全黑"或反过来。
-    /// 所以这里建好，`startCameraOnlyRecording` 复用。
-    func prepareCameraOnlyPreview() -> AVCaptureSession? {
-        if let captureSession { return captureSession }
-        guard AVCaptureDevice.authorizationStatus(for: .video) == .authorized else { return nil }
-        guard let session = makeCameraSession() else { return nil }
-        captureSession = session
-        DispatchQueue.global(qos: .userInitiated).async { session.startRunning() }
-        return session
-    }
-
-    /// 关掉摄像头会话（取景窗关闭时调用）。
-    /// 录制还在收尾也照样停：writer 已经拿到自己的引用，停流只意味着"不再有新帧"。
-    func shutdownCameraSession() {
-        guard let session = captureSession else { return }
-        captureSession = nil
-        videoDataOutput?.setSampleBufferDelegate(nil, queue: nil)
-        videoDataOutput = nil
-        micAudioOutput?.setSampleBufferDelegate(nil, queue: nil)
-        micAudioOutput = nil
-        DispatchQueue.global(qos: .userInitiated).async {
-            if session.isRunning { session.stopRunning() }
-        }
-    }
-
-    /// 只录摄像头：屏幕上什么都不抓，画面全来自摄像头。
-    ///
-    /// 用户口径（1.0.18）："就只录制摄像头"。所以这里**不建 SCStream**，
-    /// 也就不需要「屏幕录制」授权，只要摄像头（选麦克风时再加一个麦克风）。
-    ///
-    /// 视频输出尺寸取摄像头原生画幅（向下取偶数），不缩放：720p 摄像头出 720p，
-    /// 1080p 出 1080p。
-    func startCameraOnlyRecording(audio: RecordAudioSource, fps: Int,
-                                  format: RecordFileFormat = .mov,
-                                  quality: RecordQuality = .high,
-                                  showsHUD: Bool = true) throws {
-        guard writer == nil, stream == nil else {
-            throw NSError(domain: "BoxShot", code: 3, userInfo: [
-                NSLocalizedDescriptionKey: "上一次录制还在收尾，请稍等一秒再试",
-            ])
-        }
-        guard AVCaptureDevice.authorizationStatus(for: .video) == .authorized else {
-            throw NSError(domain: "BoxShot", code: 4, userInfo: [
-                NSLocalizedDescriptionKey: "没有摄像头权限，请在「系统设置 → 隐私与安全性 → 摄像头」里勾选 BoxShot",
-            ])
-        }
-        // 复用预览会话；取景窗没开就直接录也照样能建
-        guard let session = captureSession ?? makeCameraSession() else {
-            throw NSError(domain: "BoxShot", code: 5, userInfo: [
-                NSLocalizedDescriptionKey: "找不到可用的摄像头",
-            ])
-        }
-        captureSession = session
-
-        // 麦克风按录制时的设置现挂（运行中的 session 支持重新配置）
-        let micAttached = (audio == .mic) ? attachMic(to: session) : false
-        if audio == .system {
-            // 系统声音只能靠 ScreenCaptureKit 拿，纯摄像头录制没有 ——
-            // 别静默录个无声文件，说清楚
-            DispatchQueue.main.async { self.onWarning?("仅摄像头录制不含系统声音，本次录制无声") }
-        } else if audio == .mic, !micAttached {
-            DispatchQueue.main.async { self.onWarning?("找不到可用麦克风，本次录制无声") }
-        }
-
-        self.showsHUD = showsHUD
-        let url = Support.uniqueFileURL(in: Support.defaultSaveDirectory,
-                                        name: Support.shotFileName(prefix: "boxshot-cam",
-                                                                   ext: format.fileExtension))
-        outputURL = url
-
-        let pixelW = Int(cameraPixelSize.width)
-        let pixelH = Int(cameraPixelSize.height)
-
-        let writer = try AVAssetWriter(outputURL: url, fileType: format == .mp4 ? .mp4 : .mov)
-        self.writer = writer
-
-        let videoSettings = Self.videoOutputSettings(pixelW: pixelW, pixelH: pixelH,
-                                                     fps: fps, quality: quality)
-        let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
-        videoInput.expectsMediaDataInRealTime = true
-        let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: videoInput,
-            sourcePixelBufferAttributes: [
-                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
-                kCVPixelBufferWidthKey as String: pixelW,
-                kCVPixelBufferHeightKey as String: pixelH,
-            ])
-        if writer.canAdd(videoInput) { writer.add(videoInput) }
-        self.videoInput = videoInput
-        self.videoAdaptor = adaptor
-
-        if micAttached {
-            let input = AVAssetWriterInput(mediaType: .audio, outputSettings: Self.audioOutputSettings)
-            input.expectsMediaDataInRealTime = true
-            if writer.canAdd(input) { writer.add(input) }
-            self.micAudioInput = input
-        }
-
-        // 每帧都要走 CI 做等比填充 + 镜像，CIContext 必须建
-        ciContext = CIContext(options: [:])
-
-        guard writer.startWriting() else {
-            throw writer.error ?? NSError(domain: "BoxShot", code: 1,
-                                          userInfo: [NSLocalizedDescriptionKey: "无法创建录制文件"])
-        }
-
-        cameraOnly = true
-        // 预览阶段不接帧（省得每帧白跑一次 CI）；开录时才把输出接到自己身上
-        videoDataOutput?.setSampleBufferDelegate(self, queue: DispatchQueue(label: "boxshot.camera.record"))
-
-        DispatchQueue.global(qos: .userInitiated).async {
-            if !session.isRunning { session.startRunning() }
-            NSLog("[BoxShot] 摄像头录制已开始 \(pixelW)×\(pixelH) fps=\(max(10, fps)) → \(url.lastPathComponent)")
-            DispatchQueue.main.async {
-                self.showHUD()
-                self.notifyState(true)
-            }
-        }
-    }
-
-    /// 建会话：前摄 + 视频数据输出（不含麦克风、不启动）。
-    private func makeCameraSession() -> AVCaptureSession? {
-        let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front)
-            ?? AVCaptureDevice.default(for: .video)
-        guard let device, let videoDeviceInput = try? AVCaptureDeviceInput(device: device) else { return nil }
-
-        let session = AVCaptureSession()
-        session.beginConfiguration()
-        session.sessionPreset = .high
-        guard session.canAddInput(videoDeviceInput) else {
-            session.commitConfiguration()
-            return nil
-        }
-        session.addInput(videoDeviceInput)
-
-        let output = AVCaptureVideoDataOutput()
-        output.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
-        // 编码跟不上时宁可丢帧，也不要攒一整条队（攒着会让画面越来越滞后）
-        output.alwaysDiscardsLateVideoFrames = true
-        guard session.canAddOutput(output) else {
-            session.commitConfiguration()
-            return nil
-        }
-        session.addOutput(output)
-        session.commitConfiguration()
-
-        videoDataOutput = output
-        // 画幅在提交配置之后才定下来，这里量一次存住
-        let dims = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
-        let pixelW = dims.width >= 2 ? max(2, Int(dims.width) & ~1) : 1280
-        let pixelH = dims.height >= 2 ? max(2, Int(dims.height) & ~1) : 720
-        cameraPixelSize = CGSize(width: pixelW, height: pixelH)
-        return session
-    }
-
-    /// 给运行中的会话挂麦克风（已经挂过就返回 true）
-    private func attachMic(to session: AVCaptureSession) -> Bool {
-        // 同一次取景窗里的第 2 次录制：输出已经挂在会话上了，但上次录完
-        // 把 delegate 摘掉了（见 teardownPipeline），这里要接回来 ——
-        // 不接回来就是"第二次录制没有声音"，而且一点报错都没有。
-        if let existing = micAudioOutput {
-            existing.setSampleBufferDelegate(self, queue: DispatchQueue(label: "boxshot.mic"))
-            return true
-        }
-        guard let mic = AVCaptureDevice.default(for: .audio),
-              let micInput = try? AVCaptureDeviceInput(device: mic) else { return false }
-        session.beginConfiguration()
-        defer { session.commitConfiguration() }
-        guard session.canAddInput(micInput) else { return false }
-        session.addInput(micInput)
-        let output = AVCaptureAudioDataOutput()
-        output.setSampleBufferDelegate(self, queue: DispatchQueue(label: "boxshot.mic"))
-        guard session.canAddOutput(output) else { return false }
-        session.addOutput(output)
-        micAudioOutput = output
-        return true
-    }
-
-    /// H.264 视频输出设置（屏幕录制 / 摄像头录制共用，避免两份漂移）。
+    /// H.264 视频输出设置（只有这一个来源，别在调用处另抄一份）。
     ///
     /// 🔴 码率**必须**藏在 AVVideoCompressionPropertiesKey 里面：放顶层是老的写法，
     /// macOS 26 直接抛 NSInvalidArgumentException，Swift 的 try/catch 接不住 →
@@ -478,7 +282,7 @@ final class RecorderController: NSObject {
         ]
     }
 
-    /// AAC 48k 立体声（两条录制路径共用）
+    /// AAC 48k 立体声
     private static let audioOutputSettings: [String: Any] = [
         AVFormatIDKey: kAudioFormatMPEG4AAC,
         AVSampleRateKey: 48000,
@@ -494,11 +298,6 @@ final class RecorderController: NSObject {
 
         let streamRef = stream
         let writerRef = writer
-        // 摄像头录制没有 stream，采集会话是唯一还在供帧的源头。
-        // 🔴 但摄像头录完**不能**停会话：取景窗还要继续预览（停掉就黑屏），
-        // 关窗时由 `shutdownCameraSession` 统一处理。屏幕录制则必须停。
-        let sessionRef = captureSession
-        let stopSession = !cameraOnly
         let url = outputURL
         let hadOutput = hasOutput
 
@@ -507,10 +306,6 @@ final class RecorderController: NSObject {
             try? await streamRef?.stopCapture()
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
                 DispatchQueue.global().async {
-                    // stopRunning 是阻塞调用（要等硬件真的停），必须在后台队列
-                    if stopSession, let sessionRef, sessionRef.isRunning {
-                        sessionRef.stopRunning()
-                    }
                     if let writer = writerRef {
                         let semaphore = DispatchSemaphore(value: 0)
                         writer.finishWriting { semaphore.signal() }
@@ -537,17 +332,8 @@ final class RecorderController: NSObject {
     }
 
     private func teardownPipeline() {
-        if cameraOnly {
-            // 摄像头录制：会话留着继续给取景窗供预览，只把回调从自己身上摘掉。
-            // 🔴 不能在这里停会话 —— 一停，窗口里的预览就黑屏了。
-            videoDataOutput?.setSampleBufferDelegate(nil, queue: nil)
-            micAudioOutput?.setSampleBufferDelegate(nil, queue: nil)
-        } else {
-            captureSession?.stopRunning()
-            captureSession = nil
-            videoDataOutput = nil
-            micAudioOutput = nil
-        }
+        captureSession?.stopRunning()
+        captureSession = nil
         stream = nil
         writer = nil
         videoInput = nil
@@ -556,8 +342,6 @@ final class RecorderController: NSObject {
         micAudioInput = nil
         cameraLock.lock(); cameraCIImage = nil; cameraLock.unlock()
         cameraActive = false
-        cameraOnly = false
-        cameraPixelSize = CGSize(width: 1280, height: 720)
         ciContext = nil
         sessionStarted = false
         isStopping = false
@@ -706,70 +490,6 @@ extension RecorderController: SCStreamOutput {
         }
     }
 
-    // ── 摄像头帧（仅摄像头录制） ──
-
-    /// 每帧都要重编时间戳（暂停补偿）+ 走 CI 做等比填充与镜像，所以不能像
-    /// 屏幕录制那样零拷贝直通 sampleBuffer。
-    private func handleCameraOnlyFrame(_ sampleBuffer: CMSampleBuffer) {
-        guard CMSampleBufferDataIsReady(sampleBuffer),
-              let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-
-        // 时间轴：与屏幕录制完全同一套（暂停期间整帧丢弃，恢复后减掉空隙）
-        stateLock.lock()
-        let pausedNow = paused
-        if awaitingResumeGap, let pausePoint = pausedAt {
-            pausedTotal = CMTimeAdd(pausedTotal, CMTimeSubtract(pts, pausePoint))
-            awaitingResumeGap = false
-            pausedAt = nil
-        }
-        if !pausedNow { lastVideoPTS = pts }
-        let shift = pausedTotal
-        stateLock.unlock()
-
-        if pausedNow { return }
-
-        if !loggedFirstFrame {
-            loggedFirstFrame = true
-            NSLog("[BoxShot] 摄像头录制收到首帧")
-        }
-
-        guard let writer, let videoInput, let videoAdaptor else { return }
-        let adjusted = shift > .zero ? CMTimeSubtract(pts, shift) : pts
-        if !sessionStarted {
-            writer.startSession(atSourceTime: adjusted)
-            sessionStarted = true
-        }
-        guard videoInput.isReadyForMoreMediaData else { return }
-        hasOutput = true
-        appendCameraFrame(pixelBuffer, pts: adjusted, adaptor: videoAdaptor)
-    }
-
-    /// 画幅换算：等比填充（短边不留黑边，多出来的裁掉）+ 可选水平镜像。
-    private func appendCameraFrame(_ pixelBuffer: CVPixelBuffer, pts: CMTime,
-                                   adaptor: AVAssetWriterInputPixelBufferAdaptor) {
-        guard let ciContext, let pool = adaptor.pixelBufferPool else { return }
-        let target = CGRect(origin: .zero, size: cameraPixelSize)
-        let image = CIImage(cvPixelBuffer: pixelBuffer)
-        let extent = image.extent
-        guard extent.width > 1, extent.height > 1 else { return }
-
-        let scale = max(target.width / extent.width, target.height / extent.height)
-        // 🔴 顺序不能反：先缩放镜像（x 取负），再把**变换后**的整体平移到画幅中心。
-        var transformed = image.transformed(by: CGAffineTransform(
-            scaleX: mirrorCameraOutput ? -scale : scale, y: scale))
-        transformed = transformed.transformed(by: CGAffineTransform(
-            translationX: target.midX - transformed.extent.midX,
-            y: target.midY - transformed.extent.midY))
-
-        var out: CVPixelBuffer?
-        CVPixelBufferPoolCreatePixelBuffer(nil, pool, &out)
-        guard let out else { return }
-        ciContext.render(transformed, to: out, bounds: target,
-                         colorSpace: CGColorSpaceCreateDeviceRGB())
-        adaptor.append(out, withPresentationTime: pts)
-    }
-
     // ── 音频帧 ──
 
     private func handleAudioBuffer(_ sampleBuffer: CMSampleBuffer) {
@@ -854,11 +574,6 @@ extension RecorderController: AVCaptureVideoDataOutputSampleBufferDelegate, AVCa
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         guard !isStopping else { return }
         if output is AVCaptureVideoDataOutput {
-            // 仅摄像头录制：这路帧本身就是成片画面，直接进 writer
-            if cameraOnly {
-                handleCameraOnlyFrame(sampleBuffer)
-                return
-            }
             // 屏幕录制的画中画：只缓存最近一帧，等视频帧到货时合成
             if let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) {
                 cameraLock.lock()

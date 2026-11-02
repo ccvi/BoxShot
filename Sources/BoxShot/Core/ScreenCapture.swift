@@ -189,6 +189,19 @@ enum ScreenCapture {
                       width: rect.width, height: rect.height)
     }
 
+    /// AppKit 全局坐标（主屏左下原点）→ 该显示器的局部坐标（左上原点）。
+    ///
+    /// `SCStreamConfiguration.sourceRect` 与选区都吃这套坐标，固定录制框要反过来算：
+    /// NSScreen.visibleFrame 是 AppKit 全局坐标，直接当 sourceRect 用会上下颠倒。
+    static func displayLocalRect(fromAppKit rect: CGRect, displayID: CGDirectDisplayID) -> CGRect {
+        guard let screen = NSScreen.screens.first(where: { display(for: $0) == displayID }) else { return rect }
+        let frame = screen.frame
+        let x = rect.minX - frame.minX
+        let yFromBottom = rect.minY - frame.minY
+        let yFromTop = frame.height - yFromBottom - rect.height
+        return CGRect(x: x, y: yFromTop, width: rect.width, height: rect.height)
+    }
+
     // ── 缩放 ──
 
     static func scaleFactor(for displayID: CGDirectDisplayID) -> CGFloat {

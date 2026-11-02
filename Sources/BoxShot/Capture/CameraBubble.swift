@@ -53,7 +53,7 @@ final class CameraBubbleController {
     /// 否则摄像头的画面根本进不了成片（详见 Recorder.keepVisibleWindowNumbers）
     var windowNumber: Int { panel?.windowNumber ?? 0 }
 
-    /// anchor 是选区在 AppKit 全局坐标里的框；取景框贴它的右下角内侧。
+    /// anchor 是录制框在 AppKit 全局坐标里的框；取景框摆在框**正中**。
     func show(anchor: CGRect) {
         lastAnchor = anchor
         if let panel {
@@ -103,26 +103,36 @@ final class CameraBubbleController {
 
     // ── 位置 ────────────────────────────────────────────────
 
-    /// 取景框边长 = 设置里的档位（大 200 / 中 180 / 小 150 pt）。
+    /// 取景框边长 = 设置里的档位（大 600 / 中 550 / 小 500 pt）。
     ///
-    /// 只在选区**短边的一半**放不下时才收一收：170pt 的圆压在 300×200 的选区上
-    /// 会把被录的内容盖掉大半，那时按 45% 短边收（最小 96pt）。正常大小的选区
-    /// 完全按设置的数值来 —— 用户要的是"我设 170 就是 170"。
-    private func fittedSide(for anchor: CGRect) -> CGFloat {
-        min(size.side, max(96, min(anchor.width, anchor.height) * 0.45))
+    /// 只在录制框**实在放不下**时才收：按帧短边的 80% 收（最小 96pt）。
+    /// 用户口径是"我设 600 就是 600"，所以上限给得比早前的 45% 宽得多 ——
+    /// 45% 那套是"小窗别挡着被录内容"，现在是"人像要够大"，诉求反过来了。
+    /// 真的把小窗塞进 300×200 的选区时，80% 仍然是 160pt，不会撑破。
+    static func fittedSide(wanted: CGFloat, anchor: CGRect) -> CGFloat {
+        min(wanted, max(96, min(anchor.width, anchor.height) * 0.8))
     }
 
+    private func fittedSide(for anchor: CGRect) -> CGFloat {
+        Self.fittedSide(wanted: size.side, anchor: anchor)
+    }
+
+    /// 取景框在录制框里**居中**（用户要求；早前是贴右下角）
     private func position(_ panel: NSPanel, anchor: CGRect) {
-        let inset: CGFloat = 18
         var size = panel.frame.size
         size.width = fittedSide(for: anchor)
         size.height = (shape == .circle) ? size.width : size.width * 0.75
         if abs(panel.frame.width - size.width) > 0.5 || abs(panel.frame.height - size.height) > 0.5 {
             panel.setContentSize(size)
         }
-        let x = anchor.maxX - size.width - inset
-        let y = anchor.minY + inset
+        let x = anchor.midX - size.width / 2
+        let y = anchor.midY - size.height / 2
         panel.setFrameOrigin(NSPoint(x: x, y: y))
+        // 落位诊断：坐标是 AppKit 全局（左下原点），和录制框同一个坐标系。
+        // 「取景框怎么没在框中间」这类问题，只有把两个矩形打出来才对得上账。
+        NSLog("[BoxShot] 取景框落位 框=(%.0f,%.0f %.0f×%.0f) 取景框=%.0f×%.0f → (%.0f,%.0f)",
+              anchor.minX, anchor.minY, anchor.width, anchor.height,
+              size.width, size.height, x, y)
     }
 
     // ── 采集 ────────────────────────────────────────────────
