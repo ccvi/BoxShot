@@ -65,6 +65,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.showDiagnosticHistory()
             }
         }
+        // 诊断入口：--memreport 打印内存占用与当前持有的大对象清单（对账用）。
+        // 「不截图了内存怎么不降」先跑这个，再决定动哪里。
+        let memTrigger = "/tmp/boxshot-memreport.trigger"
+        if CommandLine.arguments.contains("--memreport")
+            || FileManager.default.fileExists(atPath: memTrigger) {
+            try? FileManager.default.removeItem(atPath: memTrigger)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                guard let self else { return }
+                NSLog("[BoxShot][memreport]\n%@", self.model.memReport())
+            }
+        }
         // 诊断入口：--scrolltest 直接开一次滚动截图（固定选区，不需要人拖），
         // 用来核对常驻缩略图面板的位置 / 尺寸 / 实时刷新。
         let scrollTrigger = "/tmp/boxshot-scrolltest.trigger"

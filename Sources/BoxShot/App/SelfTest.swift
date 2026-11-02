@@ -521,6 +521,14 @@ enum SelfTest {
                 .init(text: "第二段", bounds: CGRect(x: 0.1, y: 0.3, width: 0.5, height: 0.04)),
             ]
             check("普通文本不硬拼表格", OCREngine.tableMarkdown(from: paragraph) == nil)
+            // 行级包围盒（贴图「选择文字」用）：同行词合并成一个行框，纵向含整行
+            let lineBoxes = OCREngine.lineBoxes(from: obs)
+            check("行级包围盒数量 = 行数（标题 + 两行表格）", lineBoxes.count == 3)
+            check("行框横向含住整行全部词",
+                  abs(lineBoxes[1].bounds.minX - 0.10) < 0.001
+                    && abs(lineBoxes[1].bounds.maxX - 0.72) < 0.001)
+            check("行框纵向含住行的完整高度",
+                  lineBoxes[1].bounds.height >= 0.04)
         }
 
         // ── 取景框档位 ──

@@ -552,6 +552,11 @@ final class ScrollCaptureController: NSObject {
         pendingGrab = false
         monitors.forEach { NSEvent.removeMonitor($0) }
         monitors.removeAll()
+        // 🔴 拼接画布和尾帧是整个会话里最大的两块内存（长截图的画布可达上百 MB）。
+        // finish() 的 image 参数已经把结果带走，这里不留手 ——
+        // 不然 controller 虽然 dealloc 了，分配器手里的"刚释放的大页"还是又脏又占。
+        accumulated = nil
+        lastFrame = nil
     }
 
     private func closePanels() {

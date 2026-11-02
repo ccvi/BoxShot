@@ -42,9 +42,16 @@ final class HistoryWindowController: NSWindowController, NSWindowDelegate {
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
+    /// 关掉就放手：控制器 + 已解码的缩略图不该在窗口关了之后还常驻内存
+    var onClose: (() -> Void)?
+
     func show() {
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        onClose?()
     }
 
     private func url(for item: ShotHistoryItem) -> URL? {

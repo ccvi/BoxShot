@@ -328,6 +328,11 @@ final class AppModel: ObservableObject {
     func showShotHistory() {
         let controller = historyWindow ?? HistoryWindowController(model: self)
         historyWindow = controller
+        controller.onClose = { [weak self, weak controller] in
+            if let controller, self?.historyWindow === controller {
+                self?.historyWindow = nil
+            }
+        }
         controller.show()
     }
 
@@ -354,10 +359,21 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func appendOCRResult(_ text: String, markdown: String? = nil) {
-        // 结果窗口始终复用同一个（新结果替换旧内容），连续识别不丢上一段
+    /// 结果窗口复用 + 关闭时放手（不常驻）
+    private func reuseResultWindow() -> ResultWindowController {
         let controller = resultWindow ?? ResultWindowController()
         resultWindow = controller
+        controller.onClose = { [weak self, weak controller] in
+            if let controller, self?.resultWindow === controller {
+                self?.resultWindow = nil
+            }
+        }
+        return controller
+    }
+
+    private func appendOCRResult(_ text: String, markdown: String? = nil) {
+        // 结果窗口始终复用同一个（新结果替换旧内容），连续识别不丢上一段
+        let controller = reuseResultWindow()
         guard !text.isEmpty else {
             controller.show(kind: .text("（没有识别到文字）", markdown: nil), copied: false)
             return
@@ -383,8 +399,7 @@ final class AppModel: ObservableObject {
                     // 🔴 这里原来是 `presentError`（NSAlert.runModal）：浮层还在屏幕上，
                     // 模态框既可能被挡、又把交互卡住，观感就是"点了没反应"。
                     // 改成开结果窗（已提到浮层之上）说清楚"没认出来"。
-                    let empty = resultWindow ?? ResultWindowController()
-                    resultWindow = empty
+                    let empty = reuseResultWindow()
                     empty.show(kind: .text("没有识别到 QR / 条形码\n\n可以试着把码截大一点，\n或者确认码没有被遮挡。", markdown: nil),
                                copied: false)
                     return
@@ -397,13 +412,46 @@ final class AppModel: ObservableObject {
                    let url = URL(string: first) {
                     NSWorkspace.shared.open(url)
                 }
-                let controller = resultWindow ?? ResultWindowController()
-                resultWindow = controller
+                let controller = reuseResultWindow()
                 controller.show(kind: .payloads(payloads), copied: true)
             } catch {
                 presentError("解码失败：\(error.localizedDescription)")
             }
         }
+    }
+
+    // ── 内存诊断 ────────────────────────────────────────────
+
+    /// 当前进程的物理足迹（phys_footprint，和活动监视器「内存」列同口径）
+    static func currentFootprint() -> Int64 {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
+        let kr = withUnsafeMutablePointer(to: &info) { pointer in
+            pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        guard kr == KERN_SUCCESS else { return -1 }
+        return Int64(info.phys_footprint)
+    }
+
+    /// 内存占用自检：footprint + 当前持有的大对象清单。
+    /// 触发：启动参数 --memreport 或标记文件 /tmp/boxshot-memreport.trigger。
+    /// 「不截图了内存怎么不降」这类问题，先拿这份清单对账，别靠猜。
+    func memReport() -> String {
+        func presence(_ object: AnyObject?) -> String { object == nil ? "无" : "在！" }
+        var lines: [String] = []
+        lines.append("footprint: \(ByteCountFormatter.string(fromByteCount: Self.currentFootprint(), countStyle: .memory))")
+        lines.append("原位标注浮层: \(presence(overlayEditor))")
+        lines.append("独立编辑窗口: \(presence(editorController))")
+        lines.append("历史面板: \(presence(historyWindow))")
+        lines.append("识别结果窗: \(presence(resultWindow))")
+        lines.append("滚动截图会话: \(presence(scrollController))")
+        lines.append("录制工具条: \(presence(recordToolbar))")
+        lines.append("区域选择: \(presence(regionSelector))")
+        lines.append("测量遮罩: \(presence(measureOverlay))")
+        lines.append("贴图: \(pinManager.stats())")
+        return lines.joined(separator: "\n")
     }
 
     // ── 贴图 ────────────────────────────────────────────────

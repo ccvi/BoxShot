@@ -78,6 +78,17 @@ final class PinManager {
 
     // ── 批量 ──
 
+    /// 内存诊断用：贴图数量 + 位图总占用（4 字节/像素的原始口径）
+    func stats() -> String {
+        var totalPixels = 0
+        for pin in pins {
+            let image = pin.pinnedImage
+            totalPixels += image.width * image.height
+        }
+        let megabytes = Double(totalPixels) * 4 / 1_048_576
+        return "\(pins.count) 张 · 位图约 \(String(format: "%.0f", megabytes)) MB"
+    }
+
     func toggleAllVisible() {
         allHidden.toggle()
         for pin in pins {
@@ -247,6 +258,10 @@ final class PinWindow: NSPanel {
     var pinnedImage: CGImage { image }
     /// 文本贴图的原文。非 nil 时内容视图换成可选中的 NSTextView（用户要求"贴图上的文字可以选择"）
     let text: String?
+    /// 图片贴图 OCR 出来的全文（异步识别完成后回填）。非 nil 时右键菜单多一条「复制图中文字」。
+    var ocrTranscript: String?
+    /// 图片贴图装上 OCR 选字层后置 true：窗口要能成为 key window，⌘C 才复制得出去
+    var textInteractionEnabled = false
     private var scale: CGFloat
     var flippedH = false
     var flippedV = false
@@ -410,9 +425,10 @@ final class PinWindow: NSPanel {
                                     scale: Double(scale), v: 2, text: text)
     }
 
-    // 贴图不是标准可激活窗口；但文本贴图必须能成为 key window，
-    // 否则 NSTextView 拿不到 first responder —— 选得出来却 ⌘C 复制不了。
-    override var canBecomeKey: Bool { text != nil }
+    // 贴图不是标准可激活窗口；但文本贴图 / 装了 OCR 选字层的图片贴图必须能
+    // 成为 key window，否则 NSTextView 拿不到 first responder ——
+    // 选得出来却 ⌘C 复制不了。
+    override var canBecomeKey: Bool { text != nil || textInteractionEnabled }
 }
 
 // ── 贴图内容视图：拖拽 / 缩放 / 双击 / 右键 / 悬停置顶按钮 ──
@@ -568,6 +584,10 @@ class PinSurfaceView: NSView {
         if let text = window_.text, !text.isEmpty {
             menu.addItem(withTitle: "复制全部文字", action: #selector(copyAllText), keyEquivalent: "").target = self
         }
+        // 图片贴图：后台 OCR 完成后给一条「复制图中文字」（2026-11-02 用户口径：贴图要能选文字）
+        if let transcript = window_.ocrTranscript, !transcript.isEmpty {
+            menu.addItem(withTitle: "复制图中文字", action: #selector(copyOCRText), keyEquivalent: "").target = self
+        }
         menu.addItem(withTitle: "关闭贴图", action: #selector(closePin), keyEquivalent: "").target = self
         return menu
     }
@@ -579,6 +599,9 @@ class PinSurfaceView: NSView {
     @objc private func copyAllText() {
         if let text = window_.text { Support.copyTextToClipboard(text) }
     }
+    @objc private func copyOCRText() {
+        if let transcript = window_.ocrTranscript { Support.copyTextToClipboard(transcript) }
+    }
     @objc private func closePin() { window_.close() }
 }
 
@@ -587,6 +610,10 @@ class PinSurfaceView: NSView {
 final class PinContentView: PinSurfaceView {
 
     private let image: CGImage
+    /// OCR 行包围盒（归一化）。装好选字层后 layout() 按镜像/缩放重排这些框。
+    private var ocrLineBounds: [CGRect] = []
+    private var lineViews: [PinSelectableTextView] = []
+    private var ocrTask: Task<Void, Never>?
 
     init(image: CGImage, window: PinWindow) {
         self.image = image
@@ -594,6 +621,93 @@ final class PinContentView: PinSurfaceView {
         frame = NSRect(origin: .zero,
                        size: NSSize(width: CGFloat(image.width) / (NSScreen.main?.backingScaleFactor ?? 2),
                                     height: CGFloat(image.height) / (NSScreen.main?.backingScaleFactor ?? 2)))
+        startOCRLiveText()
+    }
+
+    /// 后台识别图里的文字，装一层**透明的可选中文本视图**（Live Text 式）：
+    /// 平时完全隐形、点上去是拖拽贴图，按住拖就是选字，⌘C 复制；
+    /// 右键菜单另有「复制图中文字」全选复制。
+    private func startOCRLiveText() {
+        // 太小的图（图标之类）没有识别价值，省一次 Vision 调用
+        guard image.width * image.height >= 40_000 else { return }
+        ocrTask = Task { [weak self] in
+            let lines = (try? await OCREngine.lineBoxes(in: image)) ?? []
+            guard !lines.isEmpty else { return }
+            let transcript = lines.map(\.text).joined(separator: "\n")
+            await MainActor.run {
+                // 🔴 init 时 window 还是 nil（contentView 尚未装上），
+                // 必须在这里现取，不能在 Task 开头捕获
+                guard let self, let pinWindow = self.window as? PinWindow,
+                      self.lineViews.isEmpty else { return }
+                pinWindow.ocrTranscript = transcript
+                self.ocrLineBounds = lines.map(\.bounds)
+                for line in lines {
+                    self.addSubview(self.makeLineView(text: line.text, frame: .zero))
+                }
+                self.lineViews = self.subviews.compactMap { $0 as? PinSelectableTextView }
+                // 置顶按钮压回最上层（选字层盖满整幅图）
+                if let button = self.subviews.first(where: { $0 is NSButton }) {
+                    self.addSubview(button, positioned: .above, relativeTo: nil)
+                }
+                pinWindow.textInteractionEnabled = true
+                self.needsLayout = true
+            }
+        }
+    }
+
+    private func makeLineView(text: String, frame: NSRect) -> PinSelectableTextView {
+        let view = PinSelectableTextView(frame: frame)
+        view.window_ = window_
+        view.isEditable = false
+        view.isSelectable = true
+        view.isRichText = false
+        view.drawsBackground = false
+        view.textContainerInset = .zero
+        view.textContainer?.lineFragmentPadding = 0
+        view.isVerticallyResizable = false
+        view.isHorizontallyResizable = false
+        // 字号跟行框走：文字本身画成透明（图就是显示层），
+        // 只有选中的高亮块可见 —— 观感就是"在图上选文字"
+        let fontSize = max(9, frame.height * 0.8)
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineSpacing = 0
+        view.textStorage?.setAttributedString(NSAttributedString(string: text, attributes: [
+            .font: NSFont.systemFont(ofSize: fontSize),
+            .foregroundColor: NSColor.clear,
+            .paragraphStyle: paragraph,
+        ]))
+        return view
+    }
+
+    private func frameForLineBounds(_ box: CGRect) -> NSRect {
+        var x = CGFloat(box.minX) * bounds.width
+        var yTop = CGFloat(box.minY) * bounds.height
+        let w = CGFloat(box.width) * bounds.width
+        let h = CGFloat(box.height) * bounds.height
+        // 镜像状态跟 draw(_:) 的图片变换保持同一口径
+        if window_.flippedH { x = bounds.width - x - w }
+        if window_.flippedV { yTop = bounds.height - yTop - h }
+        return NSRect(x: x, y: yTop, width: w, height: h)
+    }
+
+    override func layout() {
+        super.layout()
+        // 选字层随窗口缩放/镜像重排（滚轮缩放改的是窗口尺寸，layout 会跟着跑）
+        guard ocrLineBounds.count == lineViews.count else { return }
+        for (index, view) in lineViews.enumerated() {
+            let lineFrame = frameForLineBounds(ocrLineBounds[index])
+            view.frame = lineFrame
+            // 行框高度变了，字号跟着调一次，选区几何才贴得住
+            if let storage = view.textStorage, storage.length > 0 {
+                let fontSize = max(9, lineFrame.height * 0.8)
+                storage.addAttribute(.font, value: NSFont.systemFont(ofSize: fontSize),
+                                     range: NSRange(location: 0, length: storage.length))
+            }
+        }
+    }
+
+    deinit {
+        ocrTask?.cancel()
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }

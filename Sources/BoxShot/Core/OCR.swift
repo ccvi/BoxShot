@@ -113,6 +113,32 @@ enum OCREngine {
     struct OCRRow {
         var cells: [(minX: Double, maxX: Double, text: String)]
         var midY: Double
+        var minY: Double = 0
+        var maxY: Double = 0
+    }
+
+    /// 行级包围盒（归一化 0-1，左上原点）——贴图「选择文字」用：
+    /// 每行一个透明可选中文本视图，框就摆在这个矩形上。
+    struct OCRLineBox {
+        var text: String
+        var bounds: CGRect
+    }
+
+    /// 识别 + 行聚类一步到位，返回每行的文字与包围盒。
+    static func lineBoxes(in image: CGImage) async throws -> [OCRLineBox] {
+        lineBoxes(from: try await recognizeObservations(in: image))
+    }
+
+    static func lineBoxes(from observations: [TextObservation]) -> [OCRLineBox] {
+        groupedRows(observations, overlapThreshold: 0.3).map { row in
+            let minX = row.cells.map(\.minX).min() ?? 0
+            let maxX = row.cells.map(\.maxX).max() ?? 0
+            let text = row.cells.map(\.text).joined(separator: " ")
+            return OCRLineBox(text: text,
+                              bounds: CGRect(x: minX, y: row.minY,
+                                             width: max(0.01, maxX - minX),
+                                             height: max(0.01, row.maxY - row.minY)))
+        }
     }
 
     /// 把逐词 observation 聚成文本行（带格子信息）。
@@ -168,7 +194,9 @@ enum OCREngine {
             .sorted { ($0.minY + $0.maxY) / 2 < ($1.minY + $1.maxY) / 2 }
             .map { line in
                 OCRRow(cells: line.cells.sorted { $0.minX < $1.minX },
-                       midY: (line.minY + line.maxY) / 2)
+                       midY: (line.minY + line.maxY) / 2,
+                       minY: line.minY,
+                       maxY: line.maxY)
             }
     }
 

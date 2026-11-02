@@ -6,7 +6,10 @@ import SwiftUI
 // ============================================================
 
 @MainActor
-final class ResultWindowController: NSWindowController {
+final class ResultWindowController: NSWindowController, NSWindowDelegate {
+
+    /// 关掉就放手（AppModel 把引用清掉）；下次识别会重新建一个
+    var onClose: (() -> Void)?
 
     init() {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 420),
@@ -21,9 +24,14 @@ final class ResultWindowController: NSWindowController {
         // 一直浮在最上层是可以接受的代价。
         window.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 1)
         super.init(window: window)
+        window.delegate = self
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
+
+    func windowWillClose(_ notification: Notification) {
+        onClose?()
+    }
 
     func show(kind: ResultKind, copied: Bool = true) {
         guard let window else { return }
