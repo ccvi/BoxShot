@@ -299,11 +299,43 @@ final class OverlayEditorController: NSObject {
 
     // ── 工具栏 ──────────────────────────────────────────────
 
+    // ── 工具条尺寸：1.0.11 用户口径「调小 30%」────────────────
+    //
+    // 一个倍率管全部：按钮框、图标字号、圆角、间距、内边距、颜色圆点、
+    // 分隔线高度全从 `toolbarScale` 推出来。以前这些数散在各处硬编码，
+    // 想整体缩小只能一个一个改，漏掉一个（比如只改按钮不改内边距）就变成
+    // "按钮小了但工具条还是那么高"。
+
+    /// 工具条整体倍率（1.0.11：调小 30%）
+    static let toolbarScale: CGFloat = 0.7
+    /// 图标字号（原 19）。
+    /// 🔴 **不要给工具条按钮加显式宽高约束**：这类"空标题 + 图片"的按钮
+    /// 内禀尺寸来自图片本身，只缩字号整排按钮就会按同一比例缩小。
+    /// 反倒以前写的 `frame = 40×38` 从来没生效过（NSStackView 只认
+    /// intrinsicContentSize）：1.0.11 实测旧工具条是 **523×32**，按 40×38 缩放
+    /// 会算成 596×39 —— 比原来还大。
+    static let toolbarIconPointSize: CGFloat = 19 * toolbarScale
+    /// 按钮选中态底色圆角（原 6）
+    static let toolbarButtonCornerRadius: CGFloat = 6 * toolbarScale
+    /// 按钮之间的间距（原 2）
+    static let toolbarSpacing: CGFloat = 2 * toolbarScale
+    /// 工具条内边距（原 上下 9 / 左右 10）
+    static let toolbarInsetV: CGFloat = 9 * toolbarScale
+    static let toolbarInsetH: CGFloat = 10 * toolbarScale
+    /// 工具条上那条竖分隔线的高度（原 26）
+    static let toolbarDividerHeight: CGFloat = 26 * toolbarScale
+    /// 工具条容器圆角（原 14）
+    static let toolbarContainerCornerRadius: CGFloat = 14 * toolbarScale
+    /// 「当前颜色」那颗圆点的直径（原 30）。它只有 layer 底色、没有图片，
+    /// 内禀尺寸是 0 —— 显式约束不能省，这里跟着倍率一起缩。
+    static let colorAnchorSide: CGFloat = 30 * toolbarScale
+
     private func buildToolbarPanel() -> NSPanel {
         let stack = NSStackView()
         stack.orientation = .horizontal
-        stack.spacing = 2
-        stack.edgeInsets = NSEdgeInsets(top: 9, left: 10, bottom: 9, right: 10)
+        stack.spacing = Self.toolbarSpacing
+        stack.edgeInsets = NSEdgeInsets(top: Self.toolbarInsetV, left: Self.toolbarInsetH,
+                                       bottom: Self.toolbarInsetV, right: Self.toolbarInsetH)
 
         // 图标顺序按用户给的参考图排：选择 → 箭头 → 画笔 → 矩形 → 椭圆 → 直线 →
         // 文字 → 马克笔 → 马赛克 → 模糊 → 测距 → 取色，然后是裁剪。
@@ -318,12 +350,12 @@ final class OverlayEditorController: NSObject {
             toolButtons[tool] = button
             stack.addArrangedSubview(button)
         }
-        stack.addArrangedSubview(divider())
+        stack.addArrangedSubview(divider(Self.toolbarDividerHeight))
 
         // 颜色圆点：点开是 6 色 + 3 档粗细
         let colorAnchor = colorDotAnchorButton()
         stack.addArrangedSubview(colorAnchor)
-        stack.addArrangedSubview(divider())
+        stack.addArrangedSubview(divider(Self.toolbarDividerHeight))
 
         stack.addArrangedSubview(toolbarButton(symbol: "arrow.uturn.backward", title: "撤销 ⌘Z") { [weak self] in
             self?.doc.undo(); self?.refresh()
@@ -344,7 +376,7 @@ final class OverlayEditorController: NSObject {
         stack.addArrangedSubview(toolbarButtonWithSender(symbol: "ellipsis", title: "更多（OCR / 贴图）") { [weak self] sender in
             self?.showMorePopover(anchor: sender)
         })
-        stack.addArrangedSubview(divider())
+        stack.addArrangedSubview(divider(Self.toolbarDividerHeight))
 
         stack.addArrangedSubview(toolbarButton(symbol: "doc.on.doc", title: "复制 ⌘C") { [weak self] in
             self?.copyToClipboard()
@@ -352,7 +384,7 @@ final class OverlayEditorController: NSObject {
         stack.addArrangedSubview(toolbarButton(symbol: "arrow.down.circle", title: "保存 ⌘S") { [weak self] in
             self?.save()
         })
-        stack.addArrangedSubview(divider())
+        stack.addArrangedSubview(divider(Self.toolbarDividerHeight))
 
         let close = toolbarButton(symbol: "xmark", title: "关闭（丢弃未保存的标注）") { [weak self] in self?.close() }
         close.contentTintColor = .systemRed
@@ -364,7 +396,7 @@ final class OverlayEditorController: NSObject {
         container.material = .hudWindow
         container.state = .active
         container.wantsLayer = true
-        container.layer?.cornerRadius = 14
+        container.layer?.cornerRadius = Self.toolbarContainerCornerRadius
         container.addSubview(stack)
         stack.frame = container.bounds
 
@@ -388,20 +420,21 @@ final class OverlayEditorController: NSObject {
         button.bezelStyle = .regularSquare
         button.isBordered = false
         button.wantsLayer = true
-        button.layer?.cornerRadius = 15   // 30×30 的圆
-        button.layer?.borderWidth = 1.5
+        button.layer?.cornerRadius = Self.colorAnchorSide / 2
+        button.layer?.borderWidth = 1.5 * Self.toolbarScale
         button.layer?.borderColor = NSColor.white.withAlphaComponent(0.75).cgColor
         button.toolTip = "颜色与粗细"
         button.setButtonType(.momentaryChange)
         button.onAction = { [weak self] in self?.toggleColorPanel() }
-        button.frame = NSRect(x: 0, y: 0, width: 30, height: 30)
+        button.frame = NSRect(origin: .zero, size: NSSize(width: Self.colorAnchorSide,
+                                                          height: Self.colorAnchorSide))
         // 🔴 和色块同一个坑：NSStackView 只看 intrinsicContentSize，
         // 这个按钮只有 layer 底色，没约束就被压成 0 宽 —— 工具条上
         // 那颗"当前颜色"圆点一直是**看不见**的（用户只能靠猜去点）。
         button.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            button.widthAnchor.constraint(equalToConstant: 30),
-            button.heightAnchor.constraint(equalToConstant: 30),
+            button.widthAnchor.constraint(equalToConstant: Self.colorAnchorSide),
+            button.heightAnchor.constraint(equalToConstant: Self.colorAnchorSide),
         ])
         colorAnchorButton = button
         updateColorAnchor()
@@ -484,12 +517,13 @@ final class OverlayEditorController: NSObject {
     }
 
     /// 色块直径（pt）：圆形，圆角取一半。
-    /// 1.0.10 用户口径「颜色圆形调小一点，小 20%」：26 × 0.8 = 20.8。
-    /// 写成 26*0.8 而不是直接写 20.8，是为了以后"再小 10%"能一眼看出基数是谁。
-    static let swatchSide: CGFloat = 26 * 0.8
+    /// 1.0.10 用户口径「颜色圆形调小一点，小 20%」：26 × 0.8。
+    /// 1.0.11 又「调小 10%」：再 × 0.9 = 18.72。
+    /// 写成连乘而不是直接写 18.72，是为了以后"再小 10%"能一眼看出基数是谁。
+    static let swatchSide: CGFloat = 26 * 0.8 * 0.9
 
     /// 颜色面板里那条分隔线的高度：跟着色块一起缩，否则会顶出一截
-    static let colorPanelDividerHeight: CGFloat = 20
+    static let colorPanelDividerHeight: CGFloat = 18
 
     /// 调色板：6 个颜色（1.0.10 用户口径「颜色 6 个颜色」，顺序按他给的色卡）。
     /// 抽成常量是为了自检能盯着数量 —— 以前是散在这里的数组字面量，
@@ -613,26 +647,26 @@ final class OverlayEditorController: NSObject {
         button.bezelStyle = .regularSquare
         button.isBordered = false
         button.wantsLayer = true
-        button.layer?.cornerRadius = 6
+        button.layer?.cornerRadius = Self.toolbarButtonCornerRadius
         button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)?
-            .withSymbolConfiguration(.init(pointSize: 19, weight: .medium))
+            .withSymbolConfiguration(.init(pointSize: Self.toolbarIconPointSize, weight: .medium))
         button.imageScaling = .scaleNone
         button.toolTip = title
         button.setButtonType(.momentaryChange)
         button.onAction = { [weak button] in if let button { action(button) } }
-        button.frame = NSRect(x: 0, y: 0, width: 40, height: 38)
+        // 不给宽高约束也不设 frame：尺寸由图标的内禀大小决定（见 toolbarIconPointSize 的说明）
         return button
     }
 
-    private func divider() -> NSView {
-        let view = NSView(frame: NSRect(x: 0, y: 0, width: 1, height: Self.colorPanelDividerHeight))
+    private func divider(_ height: CGFloat = OverlayEditorController.colorPanelDividerHeight) -> NSView {
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: 1, height: height))
         view.wantsLayer = true
         view.layer?.backgroundColor = NSColor.separatorColor.cgColor
         // 同上：裸 NSView 没有 intrinsicContentSize，在 NSStackView 里会被压成 0 宽
         view.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             view.widthAnchor.constraint(equalToConstant: 1),
-            view.heightAnchor.constraint(equalToConstant: Self.colorPanelDividerHeight),
+            view.heightAnchor.constraint(equalToConstant: height),
         ])
         return view
     }
@@ -703,18 +737,20 @@ final class OverlayEditorController: NSObject {
         button.bezelStyle = .regularSquare
         button.isBordered = false
         button.wantsLayer = true
-        button.layer?.cornerRadius = 5
+        button.layer?.cornerRadius = 3
         button.toolTip = "粗细 \(Int(width)) px"
         button.setButtonType(.momentaryChange)
-        // 画一条对应粗细的横线示意
-        let image = NSImage(size: NSSize(width: 20, height: 20))
+        // 示意线：跟色块同高，否则这几颗比色块高，面板会被它们撑住不跟着缩
+        let boxH = Self.swatchSide
+        let boxW = (Self.swatchSide * 1.3).rounded()
+        let image = NSImage(size: NSSize(width: boxW, height: boxH))
         image.lockFocus()
         if let ctx = NSGraphicsContext.current?.cgContext {
             ctx.setStrokeColor(NSColor.white.cgColor)
-            ctx.setLineWidth(min(11, max(2, width / 2)))
+            ctx.setLineWidth(min(boxH * 0.6, max(1.5, width / 2)))
             ctx.setLineCap(.round)
-            ctx.move(to: CGPoint(x: 2, y: 10))
-            ctx.addLine(to: CGPoint(x: 18, y: 10))
+            ctx.move(to: CGPoint(x: 2, y: boxH / 2))
+            ctx.addLine(to: CGPoint(x: boxW - 2, y: boxH / 2))
             ctx.strokePath()
         }
         image.unlockFocus()
@@ -723,11 +759,11 @@ final class OverlayEditorController: NSObject {
             self?.doc.applyToSelected(lineWidth: width)
             self?.refresh()
         }
-        button.frame = NSRect(x: 0, y: 0, width: 27, height: 32)
+        button.frame = NSRect(x: 0, y: 0, width: boxW, height: boxH)
         button.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            button.widthAnchor.constraint(equalToConstant: 27),
-            button.heightAnchor.constraint(equalToConstant: 32),
+            button.widthAnchor.constraint(equalToConstant: boxW),
+            button.heightAnchor.constraint(equalToConstant: boxH),
         ])
         return button
     }

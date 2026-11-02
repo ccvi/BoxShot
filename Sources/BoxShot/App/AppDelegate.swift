@@ -626,6 +626,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             doc.commit(AnnotationShape(tool: .highlight, points: [CGPoint(x: 150, y: 230), CGPoint(x: 520, y: 330)],
                                        color: .yellow, lineWidth: 0))
             overlay.refresh()
+            // 工具条尺寸是"整体倍率"推出来的，改倍率必须能一眼看到实际数值 ——
+            // 只靠肉眼对着截图比大小，30% 和 20% 是分不出来的。
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                let f = overlay.toolbarFrameForDiagnostics
+                NSLog("[BoxShot][toolbar] frame=%@", NSStringFromRect(f))
+            }
         }
     }
 

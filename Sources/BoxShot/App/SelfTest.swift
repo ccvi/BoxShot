@@ -306,6 +306,26 @@ enum SelfTest {
             check("工具条按框中线居中", abs((p5.x + size.width / 2) - centered.midX) < 0.5)
         }
 
+        // ── 工具条整体倍率（1.0.11 用户口径「调小 30%」）──
+        do {
+            check("工具条倍率 0.7", abs(OverlayEditorController.toolbarScale - 0.7) < 0.001)
+            check("图标字号跟着缩到 13.3", abs(OverlayEditorController.toolbarIconPointSize - 13.3) < 0.01)
+            // 这几条盯的是"有没有漏改"：只缩字号不缩内边距/间距/圆角，
+            // 结果就是"按钮小了、工具条还是那么高"，肉眼很难当场发现。
+            check("内边距 / 间距 / 圆角都从同一个倍率推出来",
+                  abs(OverlayEditorController.toolbarInsetV - 9 * 0.7) < 0.01
+                    && abs(OverlayEditorController.toolbarInsetH - 10 * 0.7) < 0.01
+                    && abs(OverlayEditorController.toolbarSpacing - 2 * 0.7) < 0.01
+                    && abs(OverlayEditorController.toolbarButtonCornerRadius - 6 * 0.7) < 0.01
+                    && abs(OverlayEditorController.toolbarContainerCornerRadius - 14 * 0.7) < 0.01)
+            check("工具条分隔线跟着缩到 18.2",
+                  abs(OverlayEditorController.toolbarDividerHeight - 26 * 0.7) < 0.01)
+            check("工具条上的颜色圆点也缩到 21",
+                  abs(OverlayEditorController.colorAnchorSide - 21) < 0.01)
+            check("颜色圆点小于原来的色块直径（不会反过来比色块大）",
+                  OverlayEditorController.swatchSide < OverlayEditorController.colorAnchorSide)
+        }
+
         // ── 颜色面板落位（1.0.10：贴在工具条下面，6 个颜色）──
         do {
             let visible = CGRect(x: 0, y: 0, width: 1710, height: 1077)
@@ -315,8 +335,10 @@ enum SelfTest {
                   OverlayEditorController.colorPalette.map { $0.hexString }
                     == ["#F8CE43", "#62C563", "#3887FB", "#EB4259", "#F3933D", "#BD3DDD"])
             check("色块是圆形（圆角取半径）", OverlayEditorController.swatchSide > 0)
-            // 用户口径「小 20%」：26 × 0.8 = 20.8。钉死数字，防止以后谁手滑又调回 26
-            check("色块直径是 20.8pt（26 的 80%）", abs(OverlayEditorController.swatchSide - 20.8) < 0.01)
+            // 用户口径：1.0.10「小 20%」→ 1.0.11「再小 10%」：26 × 0.8 × 0.9 = 18.72。
+            // 钉死数字，防止以后谁手滑又调回 26
+            check("色块直径 18.72pt（26 的 80% 再 90%）",
+                  abs(OverlayEditorController.swatchSide - 18.72) < 0.01)
             check("分隔线跟着色块一起缩（不高于色块）",
                   OverlayEditorController.colorPanelDividerHeight <= OverlayEditorController.swatchSide)
 
