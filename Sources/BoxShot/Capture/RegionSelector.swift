@@ -7,11 +7,11 @@ import AppKit
 //   · 半透明暗幕，拖拽出选区后选区外保持暗、选区内透亮
 //   · 移动鼠标时高亮所在窗口（CGWindowList 几何命中，智能识别窗口）
 //   · 轻点（不拖）= 选中高亮窗口；拖拽 = 自定义区域
-//   · Esc 只撤销当前选区（**不结束流程**），右键才是取消整个截图
+//   · Esc / 右键 = 强制结束整个截图流程（不截图、不弹窗）
 //
-// 为什么 Esc 不再退出：用户要求「截图没完成，或没主动点击取消，都不能结束
-// 截图」。Esc 是打字时最容易被误触的键，让它当出口等于随机丢图；右键取消
-// 不可能误触，而且画面上一直有提示，不会把人困住。
+// 关于 Esc 的反复：1.0.6 是"Esc 退出"，1.0.7 因为怕误触改成"只撤选区"，
+// 1.0.9 用户明确要求"全局按 Esc 强制结束截屏"，于是恢复成一次到底。
+// 两次右键/Esc 都保留 —— 出口多一个总比被困住好，画面上也一直有提示。
 //
 // 为什么盖单屏不盖全部屏：1.0.0 先把单屏做到稳；跨屏拼接留给后续版本。
 // 为什么要独立 NSWindow 而不是 NSOverlayContentView：窗口级别用
@@ -369,19 +369,12 @@ final class RegionSelector: NSObject {
         override func keyDown(with event: NSEvent) {
             let step: CGFloat = event.modifierFlags.contains(.shift) ? 10 : 1
             switch event.keyCode {
-            case 53: // Esc：只撤掉当前选区，**不结束截图流程**
-                // 🔴 用户明确要求：「截图没完成，或没主动点击取消，都不能结束截图」。
-                // 以前第二下 Esc 会把整条流程取消掉，手一抖截到一半就没了。
-                // 现在无论按几下都只做"撤销选区"；真的要退出走右键 / 右键菜单。
-                if selection != nil || phase != .idle {
-                    selection = nil
-                    phase = .idle
-                    dragStart = nil
-                    dragCurrent = nil
-                    isDragging = false
-                    activeHandle = nil
-                    needsDisplay = true
-                }
+            case 53: // Esc：强制结束整个截图流程（用户 1.0.9 要求）
+                // 历史：1.0.6 是"Esc 直接退出"，1.0.7 改成"只撤选区不退流程"，
+                // 用户明确反馈"全局按 Esc 强制结束截屏没生效"，所以恢复成一次到底。
+                // 注意 Esc 是主动取消：这里**不截图、不弹窗**，直接收起遮罩回 idle。
+                let selectorRef = selector
+                MainActor.assumeIsolated { selectorRef?.cancel() }
             case 36: // Return：确认选区（没有选区时确认高亮窗口）
                 if let sel = selection {
                     confirm(rect: sel)
@@ -472,7 +465,7 @@ final class RegionSelector: NSObject {
                     ctx.fillEllipse(in: dot)
                     ctx.strokeEllipse(in: dot)
                 }
-                drawHint("单击选区内 / 回车 开始 · 拖手柄调整 · 方向键微调（⇧ ×10）· Esc 撤销选区 · 右键取消",
+                drawHint("单击选区内 / 回车 开始 · 拖手柄调整 · 方向键微调（⇧ ×10）· Esc 或右键取消截图",
                          above: rect, ctx: ctx)
             }
         }

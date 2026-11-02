@@ -107,6 +107,14 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 「操作完成」的提示音：开关和音效名都在设置里，调用方只管喊一声。
+    /// 散落在各控制器里的 `if prefs.playSound { … }` 就是为了这点事，
+    /// 集中之后改提示音只要动这里一处。
+    func playFeedbackSound() {
+        guard prefs.value.playSound else { return }
+        Support.playFeedbackSound(named: prefs.value.feedbackSound)
+    }
+
     // ── 截图管线 ─────────────────────────────────────────────
 
     private enum Pipeline {
@@ -221,7 +229,7 @@ final class AppModel: ObservableObject {
     /// 截好的图按 pending 设定分流：直接复制 / OCR / QR / 原位浮层
     private func routeCapturedImage(_ image: CGImage, overlayFrame frame: CGRect? = nil,
                                     fullDisplay: OverlayEditorController.FullDisplay? = nil) {
-        if prefs.value.playSound { Support.playFeedbackSound() }
+        playFeedbackSound()
         // 历史先记：不管后面是弹浮层还是直接复制，这张图都得留痕
         ShotHistoryStore.shared.record(image, limit: prefs.value.maxShotHistory)
         switch pendingPipeline {
@@ -315,7 +323,7 @@ final class AppModel: ObservableObject {
         } else {
             Support.copyTextToClipboard(text)
         }
-        if prefs.value.playSound { Support.playFeedbackSound() }
+        playFeedbackSound()
         controller.show(kind: .text(text), copied: true)
     }
 
@@ -328,7 +336,7 @@ final class AppModel: ObservableObject {
                     return
                 }
                 Support.copyTextToClipboard(payloads.joined(separator: "\n"))
-                if prefs.value.playSound { Support.playFeedbackSound() }
+                playFeedbackSound()
                 if prefs.value.ocrAutoOpenLink,
                    first.lowercased().hasPrefix("http://") || first.lowercased().hasPrefix("https://"),
                    let url = URL(string: first) {
@@ -347,7 +355,7 @@ final class AppModel: ObservableObject {
 
     func pinFromClipboard() {
         if pinManager.pinFromClipboard(opacity: prefs.value.pinOpacity, shadow: prefs.value.pinShadow) {
-            if prefs.value.playSound { Support.playFeedbackSound() }
+            playFeedbackSound()
         } else {
             presentError("剪贴板里没有可贴图的内容（支持图片 / 文本 / HTML）")
         }
@@ -359,7 +367,7 @@ final class AppModel: ObservableObject {
 
     func pinFile(at url: URL) {
         if pinManager.pinFile(at: url, opacity: prefs.value.pinOpacity, shadow: prefs.value.pinShadow) {
-            if prefs.value.playSound { Support.playFeedbackSound() }
+            playFeedbackSound()
         } else {
             presentError("这个文件贴不了图（支持图片 / 文本 / HTML）")
         }
@@ -476,9 +484,11 @@ extension AppModel: RegionSelectionDelegate {
             regionMode = .capture
             beginScrollCapture(displayID: displayID, region: rect)
         }
+        releaseSelector(selector)
     }
 
-    private func beginScrollCapture(displayID: CGDirectDisplayID, region: CGRect) {
+    /// 内部可见：诊断入口（--scrolltest）要直接开一次滚动截图
+    func beginScrollCapture(displayID: CGDirectDisplayID, region: CGRect) {
         let controller = ScrollCaptureController(model: self)
         scrollController = controller
         controller.onFinish = { [weak self] image in
@@ -501,9 +511,21 @@ extension AppModel: RegionSelectionDelegate {
                 self.presentError("窗口截图失败：\(error.localizedDescription)")
             }
         }
+        releaseSelector(selector)
     }
 
     func regionSelectorDidCancel(_ selector: RegionSelector) {
-        // 空实现：遮罩已在 cancel() 里收掉
+        // 遮罩已经在 cancel() 里收掉了，这里只放引用。
+        // 🔴 推迟一轮 runloop：这次取消是从遮罩自己的 keyDown 里调进来的，
+        // 当场把 selector 析构掉，等于在自己的方法栈上自杀。
+        releaseSelector(selector)
+    }
+
+    /// 延后清掉选区遮罩的强引用（原因见上）
+    private func releaseSelector(_ selector: RegionSelector) {
+        DispatchQueue.main.async { [weak self, weak selector] in
+            guard let self, let selector, self.regionSelector === selector else { return }
+            self.regionSelector = nil
+        }
     }
 }

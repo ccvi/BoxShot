@@ -117,9 +117,9 @@ final class StatusItemController: NSObject {
         model.showShotHistory()
     }
 
-    func showSettings() {
+    func showSettings(tab: Int = 0) {
         if settingsWindow == nil {
-            settingsWindow = SettingsWindowController(model: model)
+            settingsWindow = SettingsWindowController(model: model, initialTab: tab)
         }
         settingsWindow?.show()
     }

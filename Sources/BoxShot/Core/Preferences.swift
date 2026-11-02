@@ -47,6 +47,34 @@ enum RecordFileFormat: String, Codable, CaseIterable, Identifiable {
     var supportsAudio: Bool { self != .gif }
 }
 
+/// 录制时右下角摄像头取景框的大小。
+///
+/// 三档是"相对倍数"而不是三组绝对值：取景框本身的基准边长要跟着选区大小走
+/// （选区只有 300pt 宽时固定 200pt 的圆会挡掉半个画面），所以只能定相对档位。
+/// 用户口径：现在的观感算「小」，「中」比「小」大 10%，「大」比「中」大 10%。
+enum CameraBubbleSize: String, Codable, CaseIterable, Identifiable {
+    case large
+    case medium
+    case small
+
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .large:  return "大"
+        case .medium: return "中"
+        case .small:  return "小"
+        }
+    }
+    /// 相对「小」的倍数
+    var scale: CGFloat {
+        switch self {
+        case .small:  return 1.0
+        case .medium: return 1.1
+        case .large:  return 1.21      // 1.1 × 1.1：大一档再大 10%
+        }
+    }
+}
+
 /// 录制质量（映射 H.264 平均码率系数）
 enum RecordQuality: String, Codable, CaseIterable, Identifiable {
     case high
@@ -77,6 +105,8 @@ struct Preferences: Codable, Equatable {
     /// 菜单栏应用默认不占 Dock；贴图多的时候用户可能想让 Dock 图标回来
     var hideDockIcon: Bool = true
     var playSound: Bool = true          // 操作完成提示音
+    /// 提示音音效名（系统音效，见 SoundFeedback.options）
+    var feedbackSound: String = SoundFeedback.defaultName
     var showCrosshair: Bool = true      // 选区时显示放大取色十字线
 
     // ── 截图 ──
@@ -114,6 +144,7 @@ struct Preferences: Codable, Equatable {
     // ── 录制 ──
     var recordAudio: RecordAudioSource = .mic
     var recordCamera: Bool = false     // 摄像头画中画
+    var recordCameraSize: CameraBubbleSize = .medium
     var recordFPS: Int = 30
     var recordShowCursor: Bool = true
     var recordFormat: RecordFileFormat = .mp4
@@ -138,6 +169,10 @@ struct Preferences: Codable, Equatable {
         launchAtLogin = try c.decodeIfPresent(Bool.self, forKey: .launchAtLogin) ?? f.launchAtLogin
         hideDockIcon = try c.decodeIfPresent(Bool.self, forKey: .hideDockIcon) ?? f.hideDockIcon
         playSound = try c.decodeIfPresent(Bool.self, forKey: .playSound) ?? f.playSound
+        // 存量配置里可能记着已经下线的音效名（或别人机器上的名字），
+        // 落回默认 —— 否则设置页的 Picker 会显示成空白
+        let storedSound = try c.decodeIfPresent(String.self, forKey: .feedbackSound) ?? f.feedbackSound
+        feedbackSound = SoundFeedback.availableNames.contains(storedSound) ? storedSound : f.feedbackSound
         showCrosshair = try c.decodeIfPresent(Bool.self, forKey: .showCrosshair) ?? f.showCrosshair
         shotFormat = try c.decodeIfPresent(ShotFormat.self, forKey: .shotFormat) ?? f.shotFormat
         jpgQuality = try c.decodeIfPresent(Double.self, forKey: .jpgQuality) ?? f.jpgQuality
@@ -158,6 +193,7 @@ struct Preferences: Codable, Equatable {
         measureShowTips = try c.decodeIfPresent(Bool.self, forKey: .measureShowTips) ?? f.measureShowTips
         recordAudio = try c.decodeIfPresent(RecordAudioSource.self, forKey: .recordAudio) ?? f.recordAudio
         recordCamera = try c.decodeIfPresent(Bool.self, forKey: .recordCamera) ?? f.recordCamera
+        recordCameraSize = try c.decodeIfPresent(CameraBubbleSize.self, forKey: .recordCameraSize) ?? f.recordCameraSize
         recordFPS = try c.decodeIfPresent(Int.self, forKey: .recordFPS) ?? f.recordFPS
         recordShowCursor = try c.decodeIfPresent(Bool.self, forKey: .recordShowCursor) ?? f.recordShowCursor
         recordFormat = try c.decodeIfPresent(RecordFileFormat.self, forKey: .recordFormat) ?? f.recordFormat
@@ -171,13 +207,13 @@ struct Preferences: Codable, Equatable {
     init() {}
 
     enum CodingKeys: String, CodingKey {
-        case launchAtLogin, hideDockIcon, playSound, showCrosshair
+        case launchAtLogin, hideDockIcon, playSound, feedbackSound, showCrosshair
         case shotFormat, jpgQuality, openEditorAfterShot, windowHighlight, saveDirectory, autoSave, downscaleRetina
         case maxShotHistory
         case pinDoubleClick, pinOpacity, pinShadow, maxPinHistory
         case ocrKeepLineBreaks, ocrLineOverlap, ocrIncremental, ocrAutoOpenLink
         case measureShowTips
-        case recordAudio, recordCamera, recordFPS, recordShowCursor
+        case recordAudio, recordCamera, recordCameraSize, recordFPS, recordShowCursor
         case recordFormat, recordQuality, recordRevealInFinder, recordGIFPS
         case shortcuts
     }
@@ -203,6 +239,13 @@ final class PreferencesStore: ObservableObject {
     @Published var value: Preferences {
         didSet {
             guard value != oldValue else { return }
+            // 「自动保存」勾上了但没有保存目录 = 等于没开（以前的实现就是
+            // `guard let dirPath` 直接 return，用户看到的是"打开了却什么都不发生"）。
+            // 这里当场补成桌面，界面上也跟着显示出来，不留"看着开了其实空转"的状态。
+            if value.autoSave, (value.saveDirectory ?? "").isEmpty {
+                value.saveDirectory = Support.defaultSaveDirectory.path
+                return
+            }
             save()
             didChange?(oldValue, value)
         }

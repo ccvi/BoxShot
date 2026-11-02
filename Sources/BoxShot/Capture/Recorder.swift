@@ -36,6 +36,9 @@ final class RecorderController: NSObject {
     var onWarning: (@MainActor (String) -> Void)?
     /// 录制完成后在 Finder 里定位文件（默认关，由工具条按设置传入）
     var revealInFinderOnFinish = false
+    /// 录制完成提示音（音效名由工具条按设置传入；关掉提示音时传空串）。
+    /// 这里以前无条件播 Glass —— 设置里关掉提示音，录完还是会"叮"一声。
+    var finishedSoundName: String = ""
 
     private var stream: SCStream?
     private var writer: AVAssetWriter?
@@ -319,7 +322,7 @@ final class RecorderController: NSObject {
                 self.teardownPipeline()
                 self.notifyState(false)
                 if reason == .user && hadOutput, let url {
-                    Support.playFeedbackSound()
+                    Support.playFeedbackSound(named: self.finishedSoundName)
                     NSLog("[BoxShot] 录制完成：\(url.path)")
                     // 文件别"人间蒸发"：按设置在 Finder 里定位
                     if self.revealInFinderOnFinish {

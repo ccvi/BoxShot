@@ -49,8 +49,14 @@ enum Support {
 
     /// Retina 截图缩回 1x（"缩小到 1x 再输出"设置用）
     static func downscaleTo1x(_ image: CGImage) -> CGImage? {
-        let w = max(1, image.width / 2)
-        let h = max(1, image.height / 2)
+        scaled(image, to: CGSize(width: max(1, image.width / 2), height: max(1, image.height / 2)))
+    }
+
+    /// 等比/不等比缩放到指定像素尺寸（高质量插值）。
+    /// 改截图框时要用它把 2x 的裁剪结果缩到 1x 文档尺度。
+    static func scaled(_ image: CGImage, to size: CGSize) -> CGImage? {
+        let w = max(1, Int(size.width))
+        let h = max(1, Int(size.height))
         guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
                                   space: CGColorSpaceCreateDeviceRGB(),
                                   bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue) else { return nil }
@@ -78,8 +84,11 @@ enum Support {
 
     // ── 提示 ────────────────────────────────────────────────
 
-    static func playFeedbackSound() {
-        NSSound(named: "Glass")?.play()
+    /// 提示音统一走这里：具体音效由设置里的「提示音」决定（与 BoxPaste 同一套）。
+    /// 调用点很多在拿不到 AppModel 的地方（Recorder 的收尾线程等），
+    /// 所以名字由调用方传进来，不在这里回头去读全局设置。
+    static func playFeedbackSound(named name: String) {
+        SoundFeedback.play(name: name)
     }
 }
 

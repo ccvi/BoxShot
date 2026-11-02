@@ -189,8 +189,98 @@ enum SelfTest {
             // 带部分字段
             let partial = try JSONDecoder().decode(Preferences.self, from: Data(#"{"shotFormat":"jpg"}"#.bytes))
             check("部分配置解码补默认", partial.shotFormat == .jpg && partial.ocrKeepLineBreaks == true)
+            // 提示音：缺字段 / 名字已下线都要落回默认，否则设置页 Picker 显示空白
+            check("提示音默认是 Glass", empty.feedbackSound == "Glass")
+            let badSound = try JSONDecoder().decode(Preferences.self,
+                                                    from: Data(#"{"feedbackSound":"Sosumi"}"#.bytes))
+            check("下线音效名回退默认", badSound.feedbackSound == "Glass")
+            let goodSound = try JSONDecoder().decode(Preferences.self,
+                                                     from: Data(#"{"feedbackSound":"Ping"}"#.bytes))
+            check("有效音效名读得回来", goodSound.feedbackSound == "Ping")
+            // 取景框大小：默认「中」，且三档名字都认
+            check("取景框大小默认中", empty.recordCameraSize == .medium)
+            let bigBubble = try JSONDecoder().decode(Preferences.self,
+                                                     from: Data(#"{"recordCameraSize":"large"}"#.bytes))
+            check("取景框大小读得回来", bigBubble.recordCameraSize == .large)
         } catch {
             check("偏好解码异常：\(error)", false)
+        }
+
+        // ── 提示音表 ──
+        do {
+            let names = SoundFeedback.options.map(\.name)
+            check("提示音有 8 档", names.count == 8)
+            check("提示音名字不重复", Set(names).count == names.count)
+            check("默认音效在可选列表里", names.contains(SoundFeedback.defaultName))
+        }
+
+        // ── 自动保存必须补上落盘目录 ──
+        do {
+            // 「自动保存」原来只在 saveDirectory 非空时才落盘，用户勾了开关却
+            // 什么都没发生 —— 症状就是"设置无效"。现在勾上就自动补桌面。
+            let suite = "com.pcxx.boxshot.selftest"
+            let defaults = UserDefaults(suiteName: suite)!
+            defaults.removePersistentDomain(forName: suite)
+            let store = PreferencesStore(defaults: defaults)
+            store.value.saveDirectory = nil
+            store.value.autoSave = true
+            check("勾自动保存会自动补落盘目录", (store.value.saveDirectory ?? "").isEmpty == false)
+            check("补的目录就是桌面", store.value.saveDirectory == Support.defaultSaveDirectory.path)
+            defaults.removePersistentDomain(forName: suite)
+        }
+
+        // ── 1x 模式下改截图框的换算 ──
+        do {
+            // 2x 屏正常截图：文档也是 2x → 比例 1
+            check("正常截图：文档尺度 = 1",
+                  OverlayEditorController.documentScale(selectionPixelScale: 2, fullDisplayPixelScale: 2) == 1)
+            // 开了 Retina 1x：文档 1x、整屏原图 2x → 0.5
+            check("Retina 1x：文档尺度 = 0.5",
+                  OverlayEditorController.documentScale(selectionPixelScale: 1, fullDisplayPixelScale: 2) == 0.5)
+            check("异常倍率不除零",
+                  OverlayEditorController.documentScale(selectionPixelScale: 1, fullDisplayPixelScale: 0) == 0)
+        }
+
+        // ── 滚动截图缩略图落位 ──
+        do {
+            let visible = CGRect(x: 0, y: 0, width: 1710, height: 1077)
+            let size = ScrollCaptureController.previewSize
+            check("缩略图尺寸 180×600", size.width == 180 && size.height == 600)
+
+            // 截图框在左半边 → 贴右边
+            let left = CGRect(x: 100, y: 400, width: 600, height: 400)
+            let p1 = ScrollCaptureController.previewOrigin(region: left, visible: visible, size: size)
+            check("右边有位置就放右边", p1.x == left.maxX + 12)
+
+            // 截图框贴右边缘 → 换左边
+            let right = CGRect(x: 1000, y: 400, width: 600, height: 400)
+            let p2 = ScrollCaptureController.previewOrigin(region: right, visible: visible, size: size)
+            check("右边放不下就放左边", p2.x == right.minX - 12 - size.width)
+            check("放左边时不压住选区", p2.x + size.width <= right.minX)
+
+            // 截图框顶边贴屏幕顶 → 缩略图不能超出可见区
+            let top = CGRect(x: 100, y: 900, width: 600, height: 170)
+            let p3 = ScrollCaptureController.previewOrigin(region: top, visible: visible, size: size)
+            check("顶边对齐后不超出屏幕", p3.y + size.height <= visible.maxY - 3)
+
+            // 截图框几乎占满整屏宽 → 左右上下都塞不下，只能贴屏幕右边缘
+            // （几何上无解：这种框本来就不该配滚动截图，压住的右边缘会被拍进画面）
+            let wide = CGRect(x: 20, y: 300, width: 1670, height: 500)
+            let p4 = ScrollCaptureController.previewOrigin(region: wide, visible: visible, size: size)
+            check("整屏宽的框：缩略图退到屏幕右边不越界",
+                  p4.x + size.width <= visible.maxX - 3 && p4.x >= visible.minX + 3)
+        }
+
+        // ── 取景框档位 ──
+        do {
+            // 用户口径：现在（小）是基准，中比小大 10%，大比中大 10%
+            check("取景框小 = 基准", abs(CameraBubbleSize.small.scale - 1.0) < 0.0001)
+            check("取景框中比小大 10%", abs(CameraBubbleSize.medium.scale / CameraBubbleSize.small.scale - 1.1) < 0.0001)
+            check("取景框大比中大 10%", abs(CameraBubbleSize.large.scale / CameraBubbleSize.medium.scale - 1.1) < 0.0001)
+            check("取景框三档标题是 大/中/小",
+                  CameraBubbleSize.large.title == "大"
+                  && CameraBubbleSize.medium.title == "中"
+                  && CameraBubbleSize.small.title == "小")
         }
 
         // ── 渲染管线 ──

@@ -10,7 +10,7 @@ final class SettingsWindowController: NSWindowController {
 
     private let model: AppModel
 
-    init(model: AppModel) {
+    init(model: AppModel, initialTab: Int = 0) {
         self.model = model
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 520),
                               styleMask: [.titled, .closable],
@@ -18,7 +18,7 @@ final class SettingsWindowController: NSWindowController {
         window.title = "BoxShot 设置"
         window.isReleasedWhenClosed = false
         super.init(window: window)
-        window.contentView = NSHostingView(rootView: SettingsRootView(model: model))
+        window.contentView = NSHostingView(rootView: SettingsRootView(model: model, initialTab: initialTab))
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -32,7 +32,12 @@ final class SettingsWindowController: NSWindowController {
 
 struct SettingsRootView: View {
     @ObservedObject var model: AppModel
-    @State private var tab = 0
+    @State private var tab: Int
+
+    init(model: AppModel, initialTab: Int = 0) {
+        self.model = model
+        _tab = State(initialValue: initialTab)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -54,11 +59,11 @@ struct SettingsRootView: View {
             ScrollView {
                 Group {
                     switch tab {
-                    case 0: GeneralPane(model: model)
-                    case 1: ShotPane(model: model)
-                    case 2: PinPane(model: model)
-                    case 3: OCRPane(model: model)
-                    case 4: RecordPane(model: model)
+                    case 0: GeneralPane(model: model, prefs: model.prefs)
+                    case 1: ShotPane(model: model, prefs: model.prefs)
+                    case 2: PinPane(model: model, prefs: model.prefs)
+                    case 3: OCRPane(model: model, prefs: model.prefs)
+                    case 4: RecordPane(model: model, prefs: model.prefs)
                     case 5: ShortcutsPane(model: model, prefs: model.prefs)
                     default: AboutPane()
                     }
@@ -75,24 +80,36 @@ struct SettingsRootView: View {
 
 private struct GeneralPane: View {
     @ObservedObject var model: AppModel
+    /// 🔴 面板必须**直接观察设置本身**。只观察 model 的话，改了设置这边不会重绘：
+    /// 勾选框看着回弹、Picker 选完还显示旧值 —— 用户看到的就是"设置无效"。
+    @ObservedObject var prefs: PreferencesStore
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
                 Text("启动设置").frame(width: 90, alignment: .trailing)
-                Toggle("开机自启动", isOn: model.prefs.binding(\.launchAtLogin))
+                Toggle("隐藏 Dock 图标（菜单栏常驻）", isOn: prefs.binding(\.hideDockIcon))
+            }
+            HStack {
+                Text("提示音").frame(width: 90, alignment: .trailing)
+                Toggle("操作完成播放提示音", isOn: prefs.binding(\.playSound))
             }
             HStack {
                 Text("").frame(width: 90)
-                Toggle("隐藏 Dock 图标（菜单栏常驻）", isOn: model.prefs.binding(\.hideDockIcon))
+                Picker("", selection: prefs.binding(\.feedbackSound)) {
+                    ForEach(SoundFeedback.options, id: \.name) { option in
+                        Text(option.title).tag(option.name)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 170)
+                .disabled(!prefs.value.playSound)
+                Button("试听") { SoundFeedback.preview(name: prefs.value.feedbackSound) }
+                    .disabled(!prefs.value.playSound)
             }
             HStack {
                 Text("").frame(width: 90)
-                Toggle("操作完成播放提示音", isOn: model.prefs.binding(\.playSound))
-            }
-            HStack {
-                Text("").frame(width: 90)
-                Toggle("选区时显示取色十字线", isOn: model.prefs.binding(\.showCrosshair))
+                Toggle("选区时显示取色十字线", isOn: prefs.binding(\.showCrosshair))
             }
         }
         .font(.body)
@@ -103,47 +120,64 @@ private struct GeneralPane: View {
 
 private struct ShotPane: View {
     @ObservedObject var model: AppModel
+    @ObservedObject var prefs: PreferencesStore
+
+    /// 「自动保存」真正会落到哪 —— 没设置目录时自动落到桌面（PreferencesStore 里补齐），
+    /// 这里把结果显示出来，免得用户以为开关是空的。
+    private var effectiveSaveDirectory: String {
+        let dir = prefs.value.saveDirectory ?? ""
+        return dir.isEmpty ? Support.defaultSaveDirectory.path : dir
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
                 Text("保存格式").frame(width: 90, alignment: .trailing)
-                Picker("", selection: model.prefs.binding(\.shotFormat)) {
+                Picker("", selection: prefs.binding(\.shotFormat)) {
                     ForEach(ShotFormat.allCases) { format in
                         Text(format.title).tag(format)
                     }
                 }
                 .labelsHidden()
                 .frame(width: 100)
+                Text(prefs.value.shotFormat == .jpg ? "有损压缩，质量见下" : "无损")
+                    .font(.footnote).foregroundStyle(.secondary)
             }
             HStack {
                 Text("JPG 质量").frame(width: 90, alignment: .trailing)
-                Slider(value: model.prefs.binding(\.jpgQuality), in: 0.5...1.0, step: 0.05)
+                Slider(value: prefs.binding(\.jpgQuality), in: 0.5...1.0, step: 0.05)
                     .frame(width: 200)
-                Text(String(format: "%.2f", model.prefs.value.jpgQuality))
+                    .disabled(prefs.value.shotFormat != .jpg)
+                Text(String(format: "%.2f", prefs.value.jpgQuality))
                     .monospacedDigit()
                     .frame(width: 40)
+                    .foregroundStyle(prefs.value.shotFormat == .jpg ? .primary : .secondary)
             }
-            Toggle("截图后弹出标注浮层（关闭 = 直接复制到剪贴板）", isOn: model.prefs.binding(\.openEditorAfterShot))
+            Toggle("截图后弹出标注浮层（关闭 = 直接复制到剪贴板）", isOn: prefs.binding(\.openEditorAfterShot))
                 .padding(.leading, 90)
-            Toggle("智能识别窗口（移动鼠标自动高亮）", isOn: model.prefs.binding(\.windowHighlight))
+            Toggle("智能识别窗口（移动鼠标自动高亮）", isOn: prefs.binding(\.windowHighlight))
                 .padding(.leading, 90)
-            Toggle("Retina 截图缩小到 1x 再输出", isOn: model.prefs.binding(\.downscaleRetina))
+            Toggle("Retina 截图缩小到 1x 再输出", isOn: prefs.binding(\.downscaleRetina))
                 .padding(.leading, 90)
             HStack {
                 Text("保存目录").frame(width: 90, alignment: .trailing)
                 Button("选择目录…") { chooseDirectory() }
-                if let dir = model.prefs.value.saveDirectory {
+                if let dir = prefs.value.saveDirectory {
                     Text(dir).font(.footnote).foregroundStyle(.secondary).lineLimit(1)
                 } else {
                     Text("每次保存时询问").font(.footnote).foregroundStyle(.secondary)
                 }
             }
-            Toggle("自动保存（浮层关闭即落盘；保存/滚动截图不再弹面板）", isOn: model.prefs.binding(\.autoSave))
+            Toggle("自动保存（浮层关闭即落盘；保存/滚动截图不再弹面板）", isOn: prefs.binding(\.autoSave))
                 .padding(.leading, 90)
+            if prefs.value.autoSave {
+                Text("落盘到：\(effectiveSaveDirectory)")
+                    .font(.footnote).foregroundStyle(.secondary)
+                    .padding(.leading, 112)
+            }
             HStack {
                 Text("截图历史").frame(width: 90, alignment: .trailing)
-                Picker("", selection: model.prefs.binding(\.maxShotHistory)) {
+                Picker("", selection: prefs.binding(\.maxShotHistory)) {
                     Text("不记录").tag(0)
                     Text("10 张").tag(10)
                     Text("20 张").tag(20)
@@ -152,7 +186,7 @@ private struct ShotPane: View {
                 .labelsHidden()
                 .frame(width: 120)
                 Button("打开历史面板") { model.showShotHistory() }
-                    .disabled(model.prefs.value.maxShotHistory == 0)
+                    .disabled(prefs.value.maxShotHistory == 0)
                 Spacer()
             }
         }
@@ -164,7 +198,7 @@ private struct ShotPane: View {
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         if panel.runModal() == .OK, let url = panel.url {
-            model.prefs.value.saveDirectory = url.path
+            prefs.value.saveDirectory = url.path
         }
     }
 }
@@ -173,12 +207,13 @@ private struct ShotPane: View {
 
 private struct PinPane: View {
     @ObservedObject var model: AppModel
+    @ObservedObject var prefs: PreferencesStore
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
                 Text("双击贴图").frame(width: 90, alignment: .trailing)
-                Picker("", selection: model.prefs.binding(\.pinDoubleClick)) {
+                Picker("", selection: prefs.binding(\.pinDoubleClick)) {
                     ForEach(PinDoubleClickAction.allCases) { action in
                         Text(action.title).tag(action)
                     }
@@ -188,20 +223,20 @@ private struct PinPane: View {
             }
             HStack {
                 Text("默认不透明度").frame(width: 90, alignment: .trailing)
-                Slider(value: model.prefs.binding(\.pinOpacity), in: 0.3...1.0, step: 0.05)
+                Slider(value: prefs.binding(\.pinOpacity), in: 0.3...1.0, step: 0.05)
                     .frame(width: 200)
-                Text(String(format: "%.2f", model.prefs.value.pinOpacity))
+                Text(String(format: "%.2f", prefs.value.pinOpacity))
                     .monospacedDigit()
                     .frame(width: 40)
             }
             HStack {
                 Text("").frame(width: 90)
-                Toggle("贴图窗口阴影", isOn: model.prefs.binding(\.pinShadow))
+                Toggle("贴图窗口阴影", isOn: prefs.binding(\.pinShadow))
             }
             HStack {
                 Text("历史记录数").frame(width: 90, alignment: .trailing)
-                Stepper(value: model.prefs.binding(\.maxPinHistory), in: 0...100) {
-                    Text("\(model.prefs.value.maxPinHistory)")
+                Stepper(value: prefs.binding(\.maxPinHistory), in: 0...100) {
+                    Text("\(prefs.value.maxPinHistory)")
                 }
                 Text("重启后恢复最近贴图")
                     .font(.footnote).foregroundStyle(.secondary)
@@ -218,22 +253,23 @@ private struct PinPane: View {
 
 private struct OCRPane: View {
     @ObservedObject var model: AppModel
+    @ObservedObject var prefs: PreferencesStore
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Toggle("保留文字换行", isOn: model.prefs.binding(\.ocrKeepLineBreaks))
+            Toggle("保留文字换行", isOn: prefs.binding(\.ocrKeepLineBreaks))
                 .padding(.leading, 90)
             HStack {
                 Text("换行重叠参数").frame(width: 90, alignment: .trailing)
-                Slider(value: model.prefs.binding(\.ocrLineOverlap), in: 0...0.6, step: 0.05)
+                Slider(value: prefs.binding(\.ocrLineOverlap), in: 0...0.6, step: 0.05)
                     .frame(width: 200)
-                Text(String(format: "%.2f", model.prefs.value.ocrLineOverlap))
+                Text(String(format: "%.2f", prefs.value.ocrLineOverlap))
                     .monospacedDigit()
                     .frame(width: 40)
             }
-            Toggle("增量累积识别（结果追加进剪贴板）", isOn: model.prefs.binding(\.ocrIncremental))
+            Toggle("增量累积识别（结果追加进剪贴板）", isOn: prefs.binding(\.ocrIncremental))
                 .padding(.leading, 90)
-            Toggle("自动打开 QR 识别出的链接", isOn: model.prefs.binding(\.ocrAutoOpenLink))
+            Toggle("自动打开 QR 识别出的链接", isOn: prefs.binding(\.ocrAutoOpenLink))
                 .padding(.leading, 90)
             Text("OCR 由系统 Vision 框架本地完成，图片不会上传。结果窗口全程复用，新识别替换旧内容。")
                 .font(.callout).foregroundStyle(.secondary)
@@ -246,12 +282,13 @@ private struct OCRPane: View {
 
 private struct RecordPane: View {
     @ObservedObject var model: AppModel
+    @ObservedObject var prefs: PreferencesStore
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
                 Text("声音").frame(width: 90, alignment: .trailing)
-                Picker("", selection: model.prefs.binding(\.recordAudio)) {
+                Picker("", selection: prefs.binding(\.recordAudio)) {
                     ForEach(RecordAudioSource.allCases) { source in
                         Text(source.title).tag(source)
                     }
@@ -260,13 +297,8 @@ private struct RecordPane: View {
                 .frame(width: 140)
             }
             HStack {
-                Text("").frame(width: 90)
-                Toggle("录制时显示摄像头取景框（画面右下角，圆形 / 圆角矩形，右键切换）",
-                       isOn: model.prefs.binding(\.recordCamera))
-            }
-            HStack {
                 Text("帧率").frame(width: 90, alignment: .trailing)
-                Picker("", selection: model.prefs.binding(\.recordFPS)) {
+                Picker("", selection: prefs.binding(\.recordFPS)) {
                     Text("24").tag(24)
                     Text("30").tag(30)
                     Text("60").tag(60)
@@ -276,30 +308,61 @@ private struct RecordPane: View {
             }
             HStack {
                 Text("格式").frame(width: 90, alignment: .trailing)
-                Picker("", selection: model.prefs.binding(\.recordFormat)) {
+                Picker("", selection: prefs.binding(\.recordFormat)) {
                     ForEach(RecordFileFormat.allCases) { format in
                         Text(format.title).tag(format)
                     }
                 }
                 .labelsHidden()
                 .frame(width: 100)
-                Text(model.prefs.value.recordFormat == .gif ? "动图：无声音、无画中画" : "")
+                Text(prefs.value.recordFormat == .gif ? "动图：无声音、无画中画" : "")
                     .font(.footnote).foregroundStyle(.secondary)
             }
             HStack {
+                Text("质量").frame(width: 90, alignment: .trailing)
+                Picker("", selection: prefs.binding(\.recordQuality)) {
+                    ForEach(RecordQuality.allCases) { quality in
+                        Text(quality.title).tag(quality)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 100)
+            }
+            // 取景框大小就放在「质量」下面（用户指定位置）：
+            // 大 / 中（默认）/ 小，中比小大 10%，大比中大 10%
+            HStack {
+                Text("取景框大小").frame(width: 90, alignment: .trailing)
+                Picker("", selection: prefs.binding(\.recordCameraSize)) {
+                    ForEach(CameraBubbleSize.allCases) { size in
+                        Text(size.title).tag(size)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 150)
+                .disabled(!prefs.value.recordCamera)
+                Text(prefs.value.recordCamera ? "" : "先勾选下面的摄像头取景框")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
+            HStack {
+                Text("").frame(width: 90)
+                Toggle("录制时显示摄像头取景框（画面右下角，圆形 / 圆角矩形，右键切换）",
+                       isOn: prefs.binding(\.recordCamera))
+            }
+            HStack {
                 Text("GIF 帧率").frame(width: 90, alignment: .trailing)
-                Picker("", selection: model.prefs.binding(\.recordGIFPS)) {
+                Picker("", selection: prefs.binding(\.recordGIFPS)) {
                     Text("5").tag(5)
                     Text("10").tag(10)
                     Text("15").tag(15)
                 }
                 .labelsHidden()
                 .frame(width: 90)
-                .disabled(model.prefs.value.recordFormat != .gif)
+                .disabled(prefs.value.recordFormat != .gif)
             }
-            Toggle("录制中显示鼠标指针", isOn: model.prefs.binding(\.recordShowCursor))
+            Toggle("录制中显示鼠标指针", isOn: prefs.binding(\.recordShowCursor))
                 .padding(.leading, 90)
-            Toggle("录制完成后在 Finder 中显示文件", isOn: model.prefs.binding(\.recordRevealInFinder))
+            Toggle("录制完成后在 Finder 中显示文件", isOn: prefs.binding(\.recordRevealInFinder))
                 .padding(.leading, 90)
             Text("输出 MP4 / MOV（H.264 + AAC），默认保存到桌面。首次录制需要授权「屏幕录制」与「麦克风」。")
                 .font(.callout).foregroundStyle(.secondary)

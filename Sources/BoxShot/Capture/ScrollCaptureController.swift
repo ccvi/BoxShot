@@ -48,10 +48,14 @@ final class ScrollCaptureController: NSObject {
     /// （用户实测症状就是"只截了一次"）。边滚边抓，步子才小。
     private let grabThrottle: TimeInterval = 0.2
     private var monitors: [Any] = []
-    /// 缩略图（实时预览）窗口：整段截下来就更新，别只画一次快照
-    private var previewWindow: NSWindow?
+    /// 缩略图（实时预览）面板：用户要求"强制打开、不能关闭"，
+    /// 所以它在 begin() 里就建好、跟着整个流程存在，连标题栏和关闭按钮都没有。
+    private var previewPanel: NSPanel?
     private var previewScroll: NSScrollView?
     private var previewImageView: NSImageView?
+    private var previewTitle: NSTextField?
+    /// 缩略图尺寸（用户指定）
+    static let previewSize = NSSize(width: 180, height: 600)
 
     init(model: AppModel?) {
         self.model = model
@@ -62,6 +66,7 @@ final class ScrollCaptureController: NSObject {
         self.region = region
         showFrame()
         showToolbar()
+        showPreview()
         startCapturing()
     }
 
@@ -125,7 +130,6 @@ final class ScrollCaptureController: NSObject {
             return button
         }
 
-        add("photo.on.rectangle", "缩略图", tint: .white, action: #selector(showThumbnail))
         add("xmark", "取消", tint: .systemRed)
         add("checkmark", "完成", tint: .systemGreen)
         stack.addArrangedSubview(makeDivider())
@@ -384,70 +388,101 @@ final class ScrollCaptureController: NSObject {
         }
     }
 
-    @objc private func showThumbnail() {
-        guard accumulated != nil else { return }
-        if let window = previewWindow {
-            window.makeKeyAndOrderFront(nil)
-            refreshPreview()
-            return
-        }
+    // ── 缩略图（常驻，不能关闭） ─────────────────────────────
 
-        let size = NSSize(width: 420, height: 560)
-        let window = NSWindow(contentRect: NSRect(origin: .zero, size: size),
-                              styleMask: [.titled, .closable, .resizable],
-                              backing: .buffered, defer: false)
-        window.title = "滚动截图预览"
-        window.isReleasedWhenClosed = false
-        window.level = .floating
+    /// 用户要求：滚动截图时缩略图**强制打开、不能关闭**，默认贴在截图框右边，
+    /// 右边没位置就换左边，大小固定 180 × 600。
+    ///
+    /// 所以它是个无边框面板：没有标题栏、没有关闭按钮，也不接收鼠标事件
+    /// （`ignoresMouseEvents`）—— 鼠标从它上面滚过去时，滚轮事件直接落到
+    /// 下面的页面，不会把用户"卡"在缩略图里。
+    private func showPreview() {
+        let size = Self.previewSize
+        let panel = NSPanel(contentRect: NSRect(origin: .zero, size: size),
+                            styleMask: [.borderless, .nonactivatingPanel],
+                            backing: .buffered, defer: false)
+        panel.level = .floating
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.isReleasedWhenClosed = false
+        panel.ignoresMouseEvents = true
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
 
-        let scroll = NSScrollView(frame: NSRect(origin: .zero, size: size))
+        let container = NSView(frame: NSRect(origin: .zero, size: size))
+        container.wantsLayer = true
+        container.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.82).cgColor
+        container.layer?.cornerRadius = 10
+        container.layer?.borderWidth = 1
+        container.layer?.borderColor = NSColor.white.withAlphaComponent(0.22).cgColor
+        container.layer?.masksToBounds = true
+
+        let header = NSTextField(labelWithString: "滚动截图预览")
+        header.font = .systemFont(ofSize: 11, weight: .semibold)
+        header.textColor = NSColor.white.withAlphaComponent(0.9)
+        header.frame = NSRect(x: 10, y: size.height - 22, width: size.width - 20, height: 16)
+        header.autoresizingMask = [.width, .minYMargin]
+        container.addSubview(header)
+
+        let scroll = NSScrollView(frame: NSRect(x: 1, y: 1, width: size.width - 2, height: size.height - 27))
         scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.drawsBackground = false
         scroll.autoresizingMask = [.width, .height]
-        scroll.drawsBackground = true
-        scroll.backgroundColor = .windowBackgroundColor
 
         let imageView = NSImageView()
         imageView.imageScaling = .scaleAxesIndependently   // 尺寸由我们自己按宽度算
         imageView.wantsLayer = true
         scroll.documentView = imageView
-        window.contentView = scroll
+        container.addSubview(scroll)
 
-        previewWindow = window
+        panel.contentView = container
+        previewPanel = panel
         previewScroll = scroll
         previewImageView = imageView
+        previewTitle = header
 
-        // 🔴 别放屏幕正中：抓帧会把本应用的窗口一起拍进去（见 ScreenCapture 的注释），
-        // 预览窗口压在选区上就等于每帧都拍到它自己。
-        window.setFrameOrigin(safePreviewOrigin(for: size))
-        window.makeKeyAndOrderFront(nil)
+        panel.setFrameOrigin(previewOrigin(for: size))
+        panel.orderFront(nil)
         refreshPreview()
     }
 
-    /// 预览窗口的位置：优先选区右侧，放不下换左侧，再不行贴屏幕边上，
-    /// 保证**不和选区相交**（避免被自己拍进画面）
-    private func safePreviewOrigin(for size: NSSize) -> NSPoint {
-        let region = selectionFrameAppKit
+    /// 缩略图落位：优先截图框右侧，右边放不下换左侧，都放不下就贴屏幕边缘。
+    /// 关键约束是**不能被自己的取景框拍到**（重合了每帧都会把缩略图录进画面）。
+    private func previewOrigin(for size: NSSize) -> NSPoint {
         guard let screen = framePanel?.screen ?? NSScreen.main else { return .zero }
-        let visible = screen.visibleFrame
-        let gap: CGFloat = 16
-        let candidates = [
-            NSPoint(x: region.maxX + gap, y: region.maxY - size.height),
-            NSPoint(x: region.minX - gap - size.width, y: region.maxY - size.height),
-            NSPoint(x: visible.maxX - size.width - 8, y: visible.maxY - size.height - 8),
-            NSPoint(x: visible.minX + 8, y: visible.minY + 8),
-        ]
-        for point in candidates {
-            let rect = CGRect(origin: point, size: size)
-            if !rect.intersects(region.insetBy(dx: -4, dy: -4)) { return point }
-        }
-        return candidates[2]
+        return Self.previewOrigin(region: selectionFrameAppKit,
+                                  visible: screen.visibleFrame, size: size)
     }
 
-    /// 把最新的累积图刷进预览窗口（按宽度铺满、滚到最新的一段）
+    /// 纯几何部分抽成 static：不依赖面板状态，自检能直接喂数字验。
+    static func previewOrigin(region: CGRect, visible: CGRect, size: NSSize) -> NSPoint {
+        let gap: CGFloat = 12
+        // 竖直方向：顶边对齐截图框顶边，再夹进可见区域
+        func clampedY() -> CGFloat {
+            min(max(region.maxY - size.height, visible.minY + 4), visible.maxY - size.height - 4)
+        }
+        let rightX = region.maxX + gap
+        if rightX + size.width <= visible.maxX - 4 {
+            return NSPoint(x: rightX, y: clampedY())
+        }
+        let leftX = region.minX - gap - size.width
+        if leftX >= visible.minX + 4 {
+            return NSPoint(x: leftX, y: clampedY())
+        }
+        // 两边都不够（截图框几乎占满整屏宽）：贴右边，并尽量躲开选区
+        let x = min(max(rightX, visible.minX + 4), visible.maxX - size.width - 4)
+        let fallbackY = (region.minY - gap - size.height >= visible.minY + 4)
+            ? region.minY - gap - size.height      // 挪到框的下方
+            : clampedY()
+        return NSPoint(x: x, y: fallbackY)
+    }
+
+    /// 把最新的累积图刷进预览（按宽度铺满、滚到最新的一段）
     private func refreshPreview() {
         guard let image = accumulated, let imageView = previewImageView,
               let scroll = previewScroll else { return }
-        previewWindow?.title = "滚动截图预览（\(image.width) × \(image.height)）"
+        previewTitle?.stringValue = "滚动截图预览 \(image.width)×\(image.height)"
 
         let viewWidth = max(80, scroll.contentView.bounds.width)
         let scale = viewWidth / CGFloat(image.width)
@@ -494,7 +529,7 @@ final class ScrollCaptureController: NSObject {
         do {
             try data.write(to: url)
             frameView?.status = "已保存：\(url.lastPathComponent)"
-            if prefs.playSound { Support.playFeedbackSound() }
+            if prefs.playSound { Support.playFeedbackSound(named: prefs.feedbackSound) }
         } catch {
             // 曾经 try? 静默吞错，写盘失败用户毫无感知
             frameView?.status = "保存失败：\(error.localizedDescription)"
@@ -507,7 +542,7 @@ final class ScrollCaptureController: NSObject {
         Support.copyImageToClipboard(image)
         frameView?.status = "已复制到剪贴板"
         frameView?.needsDisplay = true
-        if model?.prefs.value.playSound == true { Support.playFeedbackSound() }
+        model?.playFeedbackSound()
     }
 
     private func finish(with image: CGImage?) {
@@ -526,10 +561,11 @@ final class ScrollCaptureController: NSObject {
     }
 
     private func closePanels() {
-        previewWindow?.orderOut(nil)
-        previewWindow = nil
+        previewPanel?.orderOut(nil)
+        previewPanel = nil
         previewScroll = nil
         previewImageView = nil
+        previewTitle = nil
         framePanel?.orderOut(nil)
         toolbarPanel?.orderOut(nil)
         framePanel = nil

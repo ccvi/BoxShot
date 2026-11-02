@@ -75,7 +75,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
     private func copyToClipboard() {
         guard let image = renderedImage() else { return }
         Support.copyImageToClipboard(image)
-        if appModel?.prefs.value.playSound == true { Support.playFeedbackSound() }
+        appModel?.playFeedbackSound()
     }
 
     private func save() {
@@ -106,7 +106,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
         }
         do {
             try data.write(to: url)
-            if appModel?.prefs.value.playSound == true { Support.playFeedbackSound() }
+            appModel?.playFeedbackSound()
         } catch {
             presentError("保存失败：\(error.localizedDescription)")
         }

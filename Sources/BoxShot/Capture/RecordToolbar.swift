@@ -213,7 +213,7 @@ final class RecordToolbarController: NSObject {
             refreshCameraButton()
             return
         }
-        let bubble = CameraBubbleController()
+        let bubble = CameraBubbleController(size: model?.prefs.value.recordCameraSize ?? .medium)
         bubble.onClose = { [weak self] in
             self?.cameraBubble = nil
             self?.refreshCameraButton()
@@ -286,6 +286,8 @@ final class RecordToolbarController: NSObject {
         let prefs = model.prefs.value
         let controller = RecorderController()
         controller.revealInFinderOnFinish = prefs.recordRevealInFinder
+        // 提示音开关与音效都跟随设置；关掉就传空串，引擎那边就不响
+        controller.finishedSoundName = prefs.playSound ? prefs.feedbackSound : ""
         controller.onStateChange = { [weak self] recording in
             guard let self, recording else { return }
             self.startingUp = false

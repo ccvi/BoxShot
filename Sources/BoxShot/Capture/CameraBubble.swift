@@ -32,6 +32,12 @@ final class CameraBubbleController {
     private var session: AVCaptureSession?
     private(set) var shape: BubbleShape = .circle
     private var lastAnchor: CGRect = .zero
+    /// 取景框大小档位（设置 → 录制 → 取景框大小）
+    private let size: CameraBubbleSize
+
+    init(size: CameraBubbleSize) {
+        self.size = size
+    }
 
     var isVisible: Bool { panel != nil }
 
@@ -85,10 +91,14 @@ final class CameraBubbleController {
 
     // ── 位置 ────────────────────────────────────────────────
 
-    /// 圆形要方框，圆角矩形可以宽一点；都以选区短边的 1/4 为上限，别把画面挡没了
+    /// 基础边长 = 选区短边的 1/4（夹在 96…200pt），再按设置里的档位放大。
+    ///
+    /// 刻意用"相对档位"而不是三组绝对值：选区本身可能只有 300pt 宽，
+    /// 固定 200pt 的圆会挡掉半个画面。档位只负责在小/中/大之间挪 10%，
+    /// 基准仍然跟着选区走。用户口径：现在的观感 = 小。
     private func fittedSide(for anchor: CGRect) -> CGFloat {
-        let limit = max(96, min(anchor.width, anchor.height) / 4)
-        return min(200, limit)
+        let base = min(200, max(96, min(anchor.width, anchor.height) / 4))
+        return base * size.scale
     }
 
     private func position(_ panel: NSPanel, anchor: CGRect) {

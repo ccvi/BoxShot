@@ -178,6 +178,16 @@ final class OverlayEditorController: NSObject {
                height: frame.height * pixelScale).integral
     }
 
+    /// 文档像素 ÷ 整屏原图像素。正常是 1；开了「Retina 缩小到 1x」时是 0.5。
+    ///
+    /// 以前这里写的是 `guard 两者相等 else { return }` —— 也就是 1x 模式下
+    /// **拖手柄静默没反应**。用户既开了 1x 又要改尺寸就会以为是坏功能。
+    /// 现在按这个比例把裁剪结果缩到文档尺度、把标注位移换算成文档单位。
+    static func documentScale(selectionPixelScale: CGFloat, fullDisplayPixelScale: CGFloat) -> CGFloat {
+        guard fullDisplayPixelScale > 0 else { return 0 }
+        return selectionPixelScale / fullDisplayPixelScale
+    }
+
     /// 用户拖手柄把截图框改成了 newFrame（AppKit 全局坐标）。
     /// 做法和裁剪一致：从整屏原图里按新框重新切一份，标注跟着平移，然后
     /// "关掉自己、按新尺寸重开" —— 坐标换算永远只有一套，不会留下半个旧状态。
@@ -186,8 +196,9 @@ final class OverlayEditorController: NSObject {
         let target = newFrame.intersection(full.frameAppKit).integral
         guard target.width >= 40, target.height >= 40 else { return }
 
-        // 视图点 ≈ 文档像素时才能平移标注；「缩小到 1x」下两边倍率不同，宁可不改
-        guard abs(selectionPixelScale - full.pixelScale) < 0.01 else { return }
+        let docScale = Self.documentScale(selectionPixelScale: selectionPixelScale,
+                                          fullDisplayPixelScale: full.pixelScale)
+        guard docScale > 0.05 else { return }
 
         func pixelRect(_ r: CGRect) -> CGRect {
             Self.pixelRect(for: r, displayFrame: full.frameAppKit, pixelScale: full.pixelScale)
@@ -195,10 +206,21 @@ final class OverlayEditorController: NSObject {
         let newPX = pixelRect(target)
         let oldPX = pixelRect(selectionFrame)
         guard newPX != oldPX else { return }
-        guard let cropped = full.image.cropping(to: newPX) else { return }
+        guard let raw = full.image.cropping(to: newPX) else { return }
+        // 1x 模式：剪出来的是 2x 像素，得再缩到文档尺度，否则重开后图会被放大一倍
+        let cropped: CGImage
+        if abs(docScale - 1) > 0.01 {
+            let w = max(1, Int((CGFloat(newPX.width) * docScale).rounded()))
+            let h = max(1, Int((CGFloat(newPX.height) * docScale).rounded()))
+            guard let scaled = Support.scaled(raw, to: CGSize(width: w, height: h)) else { return }
+            cropped = scaled
+        } else {
+            cropped = raw
+        }
 
-        let dx = oldPX.minX - newPX.minX
-        let dy = oldPX.minY - newPX.minY
+        // 标注在文档坐标里，位移也要按文档尺度换算
+        let dx = (oldPX.minX - newPX.minX) * docScale
+        let dy = (oldPX.minY - newPX.minY) * docScale
         let moved = doc.shapes.map { $0.translated(dx: dx, dy: dy) }
 
         // 🔴 这里会把自己连面板一起拆掉，而此刻正站在自己的 mouseUp 里。
@@ -572,7 +594,7 @@ final class OverlayEditorController: NSObject {
     func copyToClipboard() {
         guard let image = renderedImage() else { return }
         Support.copyImageToClipboard(image)
-        if model?.prefs.value.playSound == true { Support.playFeedbackSound() }
+        model?.playFeedbackSound()
         contentView?.flashStatus("已复制到剪贴板")
     }
 
@@ -595,11 +617,16 @@ final class OverlayEditorController: NSObject {
     }
 
     private func write(image: CGImage, format: ShotFormat, quality: Double, to url: URL) {
-        guard let data = ImageEncode.data(image, format: format, jpgQuality: quality) else { return }
+        // 编码失败以前是静默 return：用户点「保存」什么都不发生，也看不到任何提示，
+        // 看起来就像"保存格式这个设置没用"。宁可报一句，也别当无事发生。
+        guard let data = ImageEncode.data(image, format: format, jpgQuality: quality) else {
+            contentView?.flashStatus("\(format.title) 编码失败，换 PNG 再试")
+            return
+        }
         do {
             try data.write(to: url)
             didPersist = true
-            if model?.prefs.value.playSound == true { Support.playFeedbackSound() }
+            model?.playFeedbackSound()
             contentView?.flashStatus("已保存：\(url.lastPathComponent)")
         } catch {
             contentView?.flashStatus("保存失败：\(error.localizedDescription)")
@@ -633,13 +660,13 @@ final class OverlayEditorController: NSObject {
             if self.contentView?.isEditingText == true { return event }
             let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             switch event.keyCode {
-            case 53: // Esc：只撤"正在进行的动作"，不关浮层
-                // 🔴 用户明确要求「没主动点取消就不能结束截图」。Esc 以前直接
-                // close() 丢弃整张标注好的图，手一抖就白干了。现在：待确认的裁剪
-                // → 撤裁剪；正在画/正在拖 → 撤这一笔；什么都没有 → 什么都不做。
-                // 关浮层只有 ✕ 按钮（和 ⌘W 之类显式关闭）。
+            case 53: // Esc：强制结束截屏（用户 1.0.9 要求「全局 Esc 都能结束」）
+                // 分两步是为了别把"手一抖"变成"白干"：先撤掉正在进行的动作
+                // （待确认的裁剪 / 正在画的那一笔），再按一次才关浮层。
+                // 关的时候走 close()：自动保存开着就照常落盘，不算丢图。
                 if self.cancelCropIfPending() { return nil }
-                _ = self.contentView?.cancelDraft()
+                if self.contentView?.cancelDraft() == true { return nil }
+                self.close()
                 return nil
             case 36, 76: // ⏎ / 小键盘 Enter：应用裁剪
                 if self.applyCropIfPending() { return nil }
@@ -668,9 +695,9 @@ final class OverlayEditorController: NSObject {
         })
 
         // 🔴 这里**故意不监听框外点击**。
-        // 以前点一下浮层外面就直接关闭并丢标注 —— 用户点一下别处（或者只是
-        // 切个窗口）辛苦标的就没了，属于"没主动取消却被结束"。
-        // 现在只有 ✕ 能关（Esc 也降级成"撤当前动作"了）；浮层是 .floating 层，不会自己跑掉。
+        // 点一下浮层外面就关掉并丢标注，用户只是切个窗口辛苦标的就没了 ——
+        // 那属于"没主动取消却被结束"。出口只留两个：✕ 按钮、Esc（一次撤动作、
+        // 一次关浮层），都是明确意图。
     }
 }
 

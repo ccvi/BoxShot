@@ -60,7 +60,7 @@ final class HistoryWindowController: NSWindowController, NSWindowDelegate {
     private func copy(_ item: ShotHistoryItem) {
         guard let image = ShotHistoryStore.shared.image(for: item) else { return }
         Support.copyImageToClipboard(image)
-        if model?.prefs.value.playSound == true { Support.playFeedbackSound() }
+        model?.playFeedbackSound()
     }
 
     private func pin(_ item: ShotHistoryItem) {

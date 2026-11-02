@@ -19,6 +19,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(model.prefs.value.hideDockIcon ? .accessory : .regular)
 
+        // 「开机自启动」已按用户要求从设置里整项去掉（1.0.9）。
+        // 存量机器上可能已经写过 LaunchAgent，这里清一次 —— 否则会留下一个
+        // 界面里根本关不掉的自动启动项。
+        if LoginItem.isEnabled {
+            try? LoginItem.setEnabled(false)
+            model.prefs.value.launchAtLogin = false
+        }
+
         // LSUIElement 应用没有系统菜单栏，文本框就按不出 ⌘C/⌘V——最小主菜单必备
         buildMainMenu()
 
@@ -45,6 +53,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.contains("--show-history") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
                 self?.showDiagnosticHistory()
+            }
+        }
+        // 诊断入口：--scrolltest 直接开一次滚动截图（固定选区，不需要人拖），
+        // 用来核对常驻缩略图面板的位置 / 尺寸 / 实时刷新。
+        let scrollTrigger = "/tmp/boxshot-scrolltest.trigger"
+        if CommandLine.arguments.contains("--scrolltest")
+            || FileManager.default.fileExists(atPath: scrollTrigger) {
+            try? FileManager.default.removeItem(atPath: scrollTrigger)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                guard let self else { return }
+                let displayID = ScreenCapture.display(for: ScreenCapture.activeScreen())
+                self.model.beginScrollCapture(displayID: displayID,
+                                              region: CGRect(x: 120, y: 120, width: 900, height: 620))
+            }
+        }
+        // 诊断入口：--show-settings 直接弹设置窗口，用来核对各页控件是否
+        // 排对了、值是否真的跟着设置走（改完设置页最好截一张看一眼）。
+        // 触发文件里可以写一个页号（0 通用 / 1 截图 / 2 贴图 / 3 OCR / 4 录制 /
+        // 5 快捷键 / 6 关于），方便直接落到要核对的页。
+        let settingsTrigger = "/tmp/boxshot-showsettings.trigger"
+        if CommandLine.arguments.contains("--show-settings")
+            || FileManager.default.fileExists(atPath: settingsTrigger) {
+            let tab = Int((try? String(contentsOfFile: settingsTrigger, encoding: .utf8))?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 0
+            try? FileManager.default.removeItem(atPath: settingsTrigger)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                self?.statusItem.showSettings(tab: tab)
             }
         }
         // 诊断入口：--recordtest 不开界面、直接跑一遍录制引擎（3 秒）。
