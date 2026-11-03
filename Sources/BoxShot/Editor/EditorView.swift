@@ -106,8 +106,7 @@ final class EditorDocument: ObservableObject {
     }
 
     /// 拖动结束：压一个撤销点（撤销 = 回到拖动前位置）
-    func endMoveSelected() {
-        defer { moveOrigin = nil }
+    func endMoveSelected() {        defer { moveOrigin = nil }
         guard let origin = moveOrigin,
               let idx = shapes.firstIndex(where: { $0.id == origin.id }) else { return }
         var previous = shapes
@@ -131,6 +130,35 @@ final class EditorDocument: ObservableObject {
         pushUndo(shapes)
         if let color { shapes[idx].color = color }
         if let lineWidth { shapes[idx].lineWidth = lineWidth }
+    }
+
+    // ── 文字原地编辑（所见即所得）───────────────────────────
+    //
+    // 用户要的是"边打字边看到最终效果，确认后还能点回来改"。所以打字期间
+    // 文字真实存在于 shapes 里（选中框 / 包围盒 / 渲染都跟着走），只是画字的
+    // 那一步交给浮层上的 NSTextView，渲染器跳过这一条（见 OverlayEditor 的 draw）。
+    //
+    // 🔴 打字时**绝不能**走 commit()：每敲一个字压一个撤销点，两行字能把栈刷满，
+    // 而且 undoLimit 一截断，之前所有的编辑历史就全丢了。所以拆成三步：
+    // setLiveText（不压栈）→ commitEdit（整段编辑只压一个点）/ rollback（取消）。
+
+    /// 实时改文字（不压撤销点）
+    func setLiveText(_ text: String, for id: UUID) {
+        guard let idx = shapes.firstIndex(where: { $0.id == id }) else { return }
+        shapes[idx].text = text
+    }
+
+    /// 编辑结束：把「编辑前那份」压成一个撤销点。
+    /// 只有真的变了才压 —— 点进去又原样退出来不该留下一步空撤销。
+    func commitEdit(from snapshot: [AnnotationShape]) {
+        guard snapshot != shapes else { return }
+        pushUndo(snapshot)
+    }
+
+    /// 取消编辑：整体回滚到编辑前（连"刚新建的那条空文字"一起撤掉）
+    func rollback(to snapshot: [AnnotationShape]) {
+        shapes = snapshot
+        redoStack.removeAll()
     }
 
     // ── 裁剪 ────────────────────────────────────────────────

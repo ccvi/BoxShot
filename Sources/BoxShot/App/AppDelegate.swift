@@ -217,6 +217,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             runArrowDiagnostics()
             return
         }
+        // 诊断入口：--textedit 验「文字输入时看到的就是最终效果」
+        // （截图逐像素比「打字中」与「回车确认后」两张图，见函数注释）
+        let textEditTrigger = "/tmp/boxshot-textedit.trigger"
+        if CommandLine.arguments.contains("--textedit")
+            || FileManager.default.fileExists(atPath: textEditTrigger) {
+            try? FileManager.default.removeItem(atPath: textEditTrigger)
+            runTextEditDiagnostics()
+            return
+        }
         // 诊断入口：--show-settings 直接弹设置窗口，用来核对各页控件是否
         // 排对了、值是否真的跟着设置走（改完设置页最好截一张看一眼）。
         // 触发文件里可以写一个页号（0 通用 / 1 截图 / 2 贴图 / 3 OCR / 4 录制 /
@@ -1005,6 +1014,225 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         NSLog("[BoxShot][arrowtest] 已写到 /tmp/boxshot-arrow.png %d×%d", w, h)
         exit(0)
+    }
+
+    // ── 文字原地编辑（所见即所得）───────────────────────────
+    //
+    // 用户口径「输入时就直接显示最终效果，输完确认，之后还可以点击修改」。
+    // 这件事只有端到端截图能证：编辑器框和 `displayBounds` 数值一致（那是构造
+    // 出来的，必然一致）并不代表字落在同一个位置 —— CoreText 的 CTFrameDraw
+    // 和 NSTextView 的行基线是两套算法，差一两像素就是用户按回车那一瞬间
+    // "文字跳一下"。所以这里比的是**两张真截图**。
+
+    /// 诊断入口：`--textedit` 开浮层 → 文字工具点 (80,70) → 自动"打字" →
+    /// 截 A（打字中）→ 回车确认 → 截 B（最终效果）→ 比黑像素包围盒。
+    /// 两张 PNG 落在 /tmp/boxshot-textedit-live.png / -final.png，肉眼也能核。
+    private func runTextEditDiagnostics() {
+        let logURL = URL(fileURLWithPath: "/tmp/boxshot-textedit.log")
+        try? "".write(to: logURL, atomically: true, encoding: .utf8)
+        func log(_ text: String) {
+            NSLog("[BoxShot][textedit] %@", text)
+            guard let handle = try? FileHandle(forWritingTo: logURL) else { return }
+            handle.seekToEndOfFile()
+            handle.write("\(text)\n".data(using: .utf8)!)
+            try? handle.close()
+        }
+
+        let w = 700, h = 240
+        guard let base = Self.solidImage(width: w, height: h,
+                                         color: CGColor(srgbRed: 0.97, green: 0.97, blue: 0.97, alpha: 1)) else {
+            log("❌ 造底图失败"); exit(1)
+        }
+        let screen = ScreenCapture.activeScreen()
+        let frame = CGRect(x: screen.frame.midX - CGFloat(w) / 2,
+                           y: screen.frame.midY - CGFloat(h) / 2,
+                           width: CGFloat(w), height: CGFloat(h))
+        model.openOverlayEditor(image: base, frame: frame)
+        log("浮层已在 \(frame) 打开")
+
+        let textPoint = CGPoint(x: 80, y: 70)
+        let typed = "所见即所得 WYSIWYG 123"
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+            guard let self, let overlay = self.model.overlayEditor else {
+                log("❌ 浮层没起来"); exit(1)
+            }
+            // 文字用纯黑：判据靠"黑像素包围盒"，红色字（默认色）会混进别的东西
+            overlay.docForDiagnostics.color = .black
+            guard overlay.textEditForDiagnostics(at: textPoint, typing: typed) else {
+                log("❌ 进入文字编辑失败"); exit(1)
+            }
+            let editorFrame = overlay.editorFrameForDiagnostics ?? .zero
+            let shapeBox = overlay.docForDiagnostics.shapes.last?.displayBounds ?? .zero
+            let shapeText = overlay.docForDiagnostics.shapes.last?.text ?? ""
+            log("已输入「\(typed)」：编辑器框=\(NSStringFromRect(editorFrame)) · " +
+                "形状框(图像像素)=\(NSStringFromRect(shapeBox)) · shapes 里的文字=「\(shapeText)」")
+
+            // 光标不属于最终效果，先染透明再截
+            overlay.hideEditorCaretForDiagnostics()
+            self.captureTextEditPair(overlay: overlay, screen: screen, log: log)
+        }
+    }
+
+    /// 阶段二/三：截「打字中 → 确认后」两张图并比，再验"点回来改"和"空文字不留框"
+    private func captureTextEditPair(overlay: OverlayEditorController, screen: NSScreen,
+                                     log: @escaping (String) -> Void) {
+            let textPoint = CGPoint(x: 80, y: 70)
+            let panel = overlay.panelFrameForDiagnostics
+            let displayID = ScreenCapture.display(for: screen)
+            let region = Self.diagRegion(panel: panel, displayID: displayID)
+            log("截取区域(显示器局部坐标)=\(NSStringFromRect(region))")
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                Task { @MainActor in
+                    guard let live = try? await ScreenCapture.captureRegion(displayID: displayID,
+                                                                           rect: region) else {
+                        log("❌ 截「打字中」失败"); exit(1)
+                    }
+                    Self.writePNG(live, to: "/tmp/boxshot-textedit-live.png")
+                    log("已落 /tmp/boxshot-textedit-live.png \(live.width)×\(live.height)")
+
+                    overlay.commitTextForDiagnostics()
+                    let stillEditing = overlay.isEditingTextForDiagnostics
+                    let shapeCount = overlay.docForDiagnostics.shapes.count
+                    log("⏎ 确认后：编辑中=\(stillEditing) · shapes=\(shapeCount)")
+
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                        Task { @MainActor in
+                            guard let final = try? await ScreenCapture.captureRegion(displayID: displayID,
+                                                                                    rect: region) else {
+                                log("❌ 截「最终效果」失败"); exit(1)
+                            }
+                            Self.writePNG(final, to: "/tmp/boxshot-textedit-final.png")
+                            log("已落 /tmp/boxshot-textedit-final.png \(final.width)×\(final.height)")
+                            Self.reportTextEditDiff(live: live, final: final, log: log)
+                            self.checkTextReedit(overlay: overlay, textPoint: textPoint, log: log)
+                        }
+                    }
+                }
+            }
+    }
+
+    /// 阶段二/三：点回来改 + 真键盘投递 + 空文字不留框。
+    ///
+    /// 🔴 真键盘投递必须排在截图比完之后：中文输入法一收到字母就会弹出候选窗，
+    /// 那块浮窗飘在光标边上，留在截图里能把"黑像素包围盒"撑大一倍 ——
+    /// 我第一次就是这么被它骗的，日志看着像"确认后文字缩水了 68 像素"。
+    private func checkTextReedit(overlay: OverlayEditorController, textPoint: CGPoint,
+                                 log: @escaping (String) -> Void) {
+        guard let text = overlay.reeditTextForDiagnostics(at: textPoint) else {
+            log("❌ 双击没进编辑"); exit(1)
+        }
+        log("✅ 双击进了编辑，编辑器带出原文「\(text)」")
+
+        // 真键盘投递：insertText 只证明"API 能改文字"，证明不了面板收得到键盘。
+        // first responder 没设对的话用户打字会石沉大海 —— 那才是要命的。
+        let beforeKey = overlay.editorTextForDiagnostics ?? ""
+        if NSApp.isActive { Self.postKey(CGKeyCode(0)) }   // a
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            let afterKey = overlay.editorTextForDiagnostics ?? ""
+            if NSApp.isActive {
+                log(afterKey != beforeKey
+                    ? "✅ 真键盘输入进了编辑器（「\(beforeKey)」→「\(afterKey)」）"
+                    : "❌ 真键盘输入没进来（编辑器还是「\(afterKey)」）")
+            }
+            overlay.commitTextForDiagnostics()
+            log("确认后 shapes=\(overlay.docForDiagnostics.shapes.count)（应为 1，不许复制出一条）")
+            overlay.commitTextForDiagnostics()   // 空跑一次：不许有副作用
+            log("再确认一次 shapes=\(overlay.docForDiagnostics.shapes.count)")
+
+            // 清空后确认：空框不该留在图上
+            guard overlay.reeditTextForDiagnostics(at: textPoint) != nil else {
+                log("❌ 再次进入编辑失败"); exit(1)
+            }
+            overlay.clearEditorForDiagnostics()
+            overlay.commitTextForDiagnostics()
+            log("清空并确认后 shapes=\(overlay.docForDiagnostics.shapes.count)（应为 0）")
+            exit(0)
+        }
+    }
+
+    /// 截图区域：面板往里收一圈（跳过 2pt 边框 + 四角手柄），顶部再多收 46
+    /// （跳过截图框上方的尺寸条 —— 它自带深色底板，会把"黑像素包围盒"撑大）。
+    private static func diagRegion(panel: CGRect, displayID: CGDirectDisplayID) -> CGRect {
+        let bounds = ScreenCapture.displayBoundsGlobal(displayID)
+        let inset: CGFloat = 24
+        let appKit = CGRect(x: panel.minX + inset,
+                            y: panel.minY + inset,
+                            width: panel.width - inset * 2,
+                            height: panel.height - inset - 46)
+        // AppKit（左下原点，全局）→ 显示器局部（左上原点）
+        return CGRect(x: appKit.minX - bounds.minX,
+                      y: bounds.maxY - appKit.maxY,
+                      width: appKit.width, height: appKit.height)
+    }
+
+    /// 投一次真键盘事件（端到端验"面板收得到键盘"）
+    private static func postKey(_ code: CGKeyCode) {
+        let source = CGEventSource(stateID: .hidSystemState)
+        let down = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: true)
+        let up = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: false)
+        down?.post(tap: .cghidEventTap)
+        up?.post(tap: .cghidEventTap)
+    }
+
+    private static func writePNG(_ image: CGImage, to path: String) {
+        guard let data = ImageEncode.data(image, format: .png, jpgQuality: 1) else { return }
+        try? data.write(to: URL(fileURLWithPath: path), options: .atomic)
+    }
+
+    /// 黑像素（r/g/b 全 < 80）的个数 + 包围盒。
+    /// 底是 0.97 的浅灰、选中框是 accent 蓝（b=255）、面板底色更深但在截图区之外，
+    /// 所以这个阈值只圈得住文字本身。
+    private static func blackBox(_ image: CGImage) -> (count: Int, box: CGRect) {
+        guard let data = image.dataProvider?.data,
+              let ptr = CFDataGetBytePtr(data) else { return (0, .zero) }
+        let bpp = image.bitsPerPixel / 8
+        guard bpp >= 3 else { return (0, .zero) }
+        var count = 0
+        var minX = image.width, minY = image.height, maxX = -1, maxY = -1
+        for y in 0..<image.height {
+            let row = y * image.bytesPerRow
+            for x in 0..<image.width {
+                let o = row + x * bpp
+                guard ptr[o + 2] < 80, ptr[o + 1] < 80, ptr[o] < 80 else { continue }
+                count += 1
+                if x < minX { minX = x }
+                if x > maxX { maxX = x }
+                if y < minY { minY = y }
+                if y > maxY { maxY = y }
+            }
+        }
+        guard maxX >= minX, maxY >= minY else { return (0, .zero) }
+        return (count, CGRect(x: minX, y: minY,
+                              width: maxX - minX + 1, height: maxY - minY + 1))
+    }
+
+    /// 判据：两张图里文字的黑像素**包围盒位置和大小必须一致**（容差 2px，
+    /// 留给抗锯齿）；像素个数容差 20%（两种光栅化器的边缘覆盖率算法不同）。
+    /// 只报不比 = 假通过，所以这里直接打 ✅ / ❌。
+    private static func reportTextEditDiff(live: CGImage, final: CGImage, log: (String) -> Void) {
+        let a = blackBox(live)
+        let b = blackBox(final)
+        log("打字中：黑像素 \(a.count) 个，包围盒 \(NSStringFromRect(a.box))")
+        log("确认后：黑像素 \(b.count) 个，包围盒 \(NSStringFromRect(b.box))")
+        guard a.count > 100, b.count > 100 else {
+            log("❌ 有一边几乎没字（\(a.count) / \(b.count)）—— 编辑链路没跑通")
+            return
+        }
+        let dx = abs(a.box.minX - b.box.minX), dy = abs(a.box.minY - b.box.minY)
+        let dw = abs(a.box.width - b.box.width), dh = abs(a.box.height - b.box.height)
+        log(String(format: "偏差：origin(%.0f, %.0f) size(%.0f, %.0f)",
+                   dx, dy, dw, dh))
+        let countDelta = Double(abs(a.count - b.count)) / Double(max(1, max(a.count, b.count)))
+        log(String(format: "像素个数差 %.1f%%", countDelta * 100))
+        let samePlace = dx <= 2 && dy <= 2 && dw <= 4 && dh <= 4
+        let sameInk = countDelta <= 0.2
+        if samePlace && sameInk {
+            log("✅ 打字时与确认后落在同一位置、同一字号（没有跳位）")
+        } else {
+            log("❌ 打字时与确认后对不上：\(samePlace ? "" : "位置/尺寸超差 ")\(sameInk ? "" : "字重差太多")")
+        }
     }
 
     private static func solidImage(width: Int, height: Int, color: CGColor) -> CGImage? {

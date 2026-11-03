@@ -112,6 +112,40 @@ final class OverlayEditorController: NSObject {
     var docColorForDiagnostics: String { doc.color.hexString }
     /// 诊断用：颜色面板是不是 key、某个点命中的是哪个视图
     var colorPanelIsKeyForDiagnostics: Bool { colorPanel?.isKeyWindow ?? false }
+
+    // ── 文字编辑诊断（`--textedit`）──
+    // 用户要的是"打字时看到的就是最终效果"，这件事只有端到端截图能证：
+    // 编辑器框和渲染框即使数值一样，CoreText 与 NSTextView 的行基线也可能差
+    // 一两像素 —— 那就是确认瞬间"文字跳一下"。
+    func textEditForDiagnostics(at pixelPoint: CGPoint, typing text: String) -> Bool {
+        guard let view = contentView else { return false }
+        doc.tool = .text
+        view.beginTextEditingForDiagnostics(at: pixelPoint)
+        guard let editor = view.editorForDiagnostics else { return false }
+        let all = NSRange(location: 0, length: (editor.string as NSString).length)
+        editor.insertText(text, replacementRange: all)
+        return true
+    }
+    func commitTextForDiagnostics() { contentView?.commitTextEditing() }
+    /// 诊断用：编辑器里当前的文字
+    var editorTextForDiagnostics: String? { contentView?.editorForDiagnostics?.string }
+    /// 诊断用：模拟"双击已有文字接着改"（走和真实双击同一条命中逻辑）
+    func reeditTextForDiagnostics(at pixelPoint: CGPoint) -> String? {
+        guard let view = contentView,
+              let hit = view.textShapeForDiagnostics(at: pixelPoint) else { return nil }
+        view.beginTextEditingForDiagnostics(at: hit.points.first ?? pixelPoint, existing: hit)
+        return view.editorForDiagnostics?.string
+    }
+    /// 诊断用：清空编辑器里的文字（随后确认应该把这条空文字删掉）
+    func clearEditorForDiagnostics() { contentView?.clearEditorForDiagnostics() }
+    /// 诊断用：把插入光标染成透明。
+    /// 光标不属于"最终效果"，留着会在截图里多出一整根黑竖条 —— 包围盒高度
+    /// 会被它撑大 17px 左右，看起来像"确认后文字变小了"。
+    func hideEditorCaretForDiagnostics() {
+        contentView?.editorForDiagnostics?.insertionPointColor = .clear
+    }
+    var editorFrameForDiagnostics: NSRect? { contentView?.editorFrameForDiagnostics }
+    var isEditingTextForDiagnostics: Bool { contentView?.isEditingText ?? false }
     /// 诊断用：工具条 frame / 当前工具（验"合成点击到底能不能进 .statusBar 面板"）
     var toolbarFrameForDiagnostics: CGRect { toolbarPanel?.frame ?? .zero }
     var docToolForDiagnostics: String { doc.tool.rawValue }
@@ -270,6 +304,8 @@ final class OverlayEditorController: NSObject {
     }
 
     func close() {
+        // 关闭前把没确认的文字收下：自动保存开着的话，那行字要进落盘的图
+        contentView?.commitTextEditing()
         autosaveIfNeeded()
         monitors.forEach { NSEvent.removeMonitor($0) }
         monitors.removeAll()
@@ -692,6 +728,9 @@ final class OverlayEditorController: NSObject {
     }
 
     private func selectTool(_ tool: EditorTool) {
+        // 换工具 = 结束当前文字编辑（工具条是另一个面板，点它不会走 contentView 的
+        // mouseDown，不在这里收口的话，切到矩形工具后那段文字还留在编辑态）
+        contentView?.commitTextEditing()
         doc.tool = tool
         refresh()
     }
@@ -737,6 +776,9 @@ final class OverlayEditorController: NSObject {
         button.toolTip = "颜色 \(color.hexString)（有选中标注时直接改它）"
         button.setButtonType(.momentaryChange)
         button.onAction = { [weak self] in
+            // 改颜色前先收掉正在输入的文字：不然文字视图还按旧色画，
+            // 确认那一刻颜色才跳变（另一半是"改色没生效"的错觉）
+            self?.contentView?.commitTextEditing()
             self?.doc.applyToSelected(color: color)
             self?.refresh()
         }
@@ -776,6 +818,7 @@ final class OverlayEditorController: NSObject {
         image.unlockFocus()
         button.image = image
         button.onAction = { [weak self] in
+            self?.contentView?.commitTextEditing()
             self?.doc.applyToSelected(lineWidth: width)
             self?.refresh()
         }
@@ -791,7 +834,11 @@ final class OverlayEditorController: NSObject {
     // ── 输出动作 ────────────────────────────────────────────
 
     private func renderedImage() -> CGImage? {
-        doc.rendered()
+        // 正在输入的文字先落盘：用户打完字不按回车、直接点「复制」，最后那行
+        // 字必须进图。所有输出动作（保存 / 复制 / 贴图 / OCR / 二维码）都走这里，
+        // 在这一个地方收口，比在五个按钮里各写一遍靠谱。
+        contentView?.commitTextEditing()
+        return doc.rendered()
     }
 
     func copyToClipboard() {
@@ -968,7 +1015,6 @@ final class OverlayEditorView: NSView {
     private var draftStart: CGPoint?
     private var statusMessage: String?
     private var statusUntil = Date()
-    private var textField: NSTextField?
     /// 选择工具：正在拖动选中标注
     private var draggingSelection = false
     private var dragLastPoint: CGPoint?
@@ -980,7 +1026,26 @@ final class OverlayEditorView: NSView {
     var hasPendingCrop: Bool { pendingCrop != nil }
     var pendingCropRect: CGRect? { pendingCrop }
 
-    var isEditingText: Bool { textField != nil }
+    var isEditingText: Bool { editingTextView != nil }
+
+    /// 诊断用：从外面进入文字编辑（`--textedit` 验"输入时就等于最终效果"）
+    func beginTextEditingForDiagnostics(at pixelPoint: CGPoint, existing: AnnotationShape? = nil) {
+        beginTextEditing(at: pixelPoint, existing: existing)
+    }
+    /// 诊断用：正在用的那个文本视图（往里 insertText 就等于用户打字）
+    var editorForDiagnostics: NSTextView? { editingTextView }
+    /// 诊断用：编辑器框（视图坐标），和 `displayBounds` 换算后应当重合
+    var editorFrameForDiagnostics: NSRect? { editingTextView?.frame }
+    /// 诊断用：命中的已有文字（双击那条路径）
+    func textShapeForDiagnostics(at pixelPoint: CGPoint) -> AnnotationShape? {
+        editableTextShape(at: pixelPoint)
+    }
+    /// 诊断用：把编辑器清空（模拟全选删除）
+    func clearEditorForDiagnostics() {
+        guard let editor = editingTextView else { return }
+        let all = NSRange(location: 0, length: (editor.string as NSString).length)
+        editor.insertText("", replacementRange: all)
+    }
 
     init(doc: EditorDocument, controller: OverlayEditorController,
          imageRect: NSRect, displayScale: CGFloat, canResize: Bool = false) {
@@ -1026,7 +1091,11 @@ final class OverlayEditorView: NSView {
         ctx.translateBy(x: imageRect.minX, y: imageRect.minY)
         let viewPerPixel = imageRect.width / CGFloat(doc.baseImage.width)
         ctx.scaleBy(x: viewPerPixel, y: viewPerPixel)
-        EditorRenderer.drawShapes(doc.shapes, in: ctx, effects: doc.effects,
+        // 正在编辑的那条文字**跳过绘制**：字由上面的 NSTextView 画，
+        // 两边都画会叠出一层更粗更脏的重影（而且位置差半个像素会发虚）。
+        // 选中框仍然由下面的 drawSelection 画，所以编辑时框跟着文字实时变长。
+        let painted = editingShapeID.map { id in doc.shapes.filter { $0.id != id } } ?? doc.shapes
+        EditorRenderer.drawShapes(painted, in: ctx, effects: doc.effects,
                                   canvasHeight: CGFloat(doc.baseImage.height))
         if let draft {
             EditorRenderer.drawShapes([draft], in: ctx, effects: doc.effects,
@@ -1276,8 +1345,8 @@ final class OverlayEditorView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
-        // 文字输入中：先提交再继续
-        if let field = textField { commitTextField(field) }
+        // 文字输入中：先确认再继续（点到别处 = 确认，这是截图工具的惯例）
+        commitTextEditing()
 
         let viewPoint = convert(event.locationInWindow, from: nil)
 
@@ -1304,6 +1373,11 @@ final class OverlayEditorView: NSView {
         }
 
         if doc.tool == .select {
+            // 双击文字 = 接着改（单击仍然是选中/拖动）
+            if event.clickCount >= 2, let hit = editableTextShape(at: p) {
+                beginTextEditing(at: hit.points.first ?? p, existing: hit)
+                return
+            }
             // 点选：命中 → 选中并进入拖动；落空 → 取消选中
             if doc.select(at: p) != nil {
                 draggingSelection = true
@@ -1318,8 +1392,13 @@ final class OverlayEditorView: NSView {
         } else {
             switch doc.tool {
             case .text:
-                doc.selectedID = nil
-                beginTextEditing(at: p)
+                // 点在已有文字上 = 接着改；点空地 = 新建
+                if let hit = editableTextShape(at: p) {
+                    beginTextEditing(at: hit.points.first ?? p, existing: hit)
+                } else {
+                    doc.selectedID = nil
+                    beginTextEditing(at: p)
+                }
             case .colorPick:
                 if let color = doc.pixelColor(at: p) {
                     doc.commit(AnnotationShape(tool: .colorPick, points: [p], color: color, lineWidth: 0))
@@ -1412,45 +1491,182 @@ final class OverlayEditorView: NSView {
         needsDisplay = true
     }
 
-    // ── 文字编辑 ────────────────────────────────────────────
+    // ── 文字编辑（原地所见即所得）──────────────────────────
+    //
+    // 用户口径：输入时就直接看到最终效果，输完确认，之后还能点回来改。
+    // 所以不是"弹个输入框、确定后再画字"，而是在文字落下的位置放一个**透明的
+    // NSTextView**：字号、颜色、起点都跟渲染器同一套（`displayBounds` 算框），
+    // 打字时屏幕上看到的就是成图里的样子，IME 候选窗也自然跟在光标旁边。
+    //
+    // 🔴 `textContainerInset = .zero`、`lineFragmentPadding = 0` 必须显式设：
+    // NSTextView 默认带 0/5pt 的缩进，不关掉的话确认一瞬间文字会往左上"跳一下"。
 
-    private func beginTextEditing(at pixelPoint: CGPoint) {
-        commitTextFieldIfAny()
-        let field = NSTextField(frame: NSRect(x: imageRect.minX + pixelPoint.x / pixelScale,
-                                              y: imageRect.minY + pixelPoint.y / pixelScale - 12,
-                                              width: 200, height: 24))
-        field.placeholderString = "输入文字，回车确认"
-        field.font = .systemFont(ofSize: 14)
-        field.identifier = NSUserInterfaceItemIdentifier("boxshot.textfield")
-        addSubview(field)
-        textField = field
-        window?.makeFirstResponder(field)
+    private var editingTextView: NSTextView?
+    private var editingShapeID: UUID?
+    /// 编辑前那份 shapes：确认时压成**一个**撤销点，取消时整体回滚
+    private var editSnapshot: [AnnotationShape]?
 
-        // 用闭包捕获提交：回车或失焦都提交
-        field.target = self
-        field.action = #selector(textFieldSubmitted(_:))
+    /// 视图点 / 图像像素
+    private var viewPerPixel: CGFloat {
+        imageRect.width / CGFloat(max(1, doc.baseImage.width))
     }
 
-    @objc private func textFieldSubmitted(_ sender: NSTextField) {
-        commitTextField(sender)
+    /// 渲染器用的是 systemFont(medium)，编辑器必须同款，否则打字时会换字重
+    private static func textFont(size: CGFloat) -> NSFont {
+        .systemFont(ofSize: max(9, size), weight: .medium)
     }
 
-    private func commitTextFieldIfAny() {
-        if let field = textField { commitTextField(field) }
-    }
+    private func beginTextEditing(at pixelPoint: CGPoint, existing: AnnotationShape? = nil) {
+        commitTextEditing()
 
-    private func commitTextField(_ field: NSTextField) {
-        let text = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        // 从字段位置反推像素坐标
-        let pixel = CGPoint(x: (field.frame.minX - imageRect.minX) * pixelScale,
-                            y: (field.frame.minY - imageRect.minY) * pixelScale + 12 * pixelScale)
-        field.removeFromSuperview()
-        textField = nil
-        guard !text.isEmpty else { return }
-        doc.commit(AnnotationShape(tool: .text, points: [pixel],
-                                   color: doc.color, lineWidth: 0, text: text,
-                                   fontSize: 30 * pixelScale))
+        let snapshot = doc.shapes
+        let shape: AnnotationShape
+        if let existing, let hit = doc.shapes.first(where: { $0.id == existing.id }) {
+            shape = hit
+        } else {
+            // 新文字先挂进 shapes（不打撤销点）：这样选中框和包围盒跟着实时长
+            var fresh = AnnotationShape(tool: .text, points: [pixelPoint],
+                                        color: doc.color, lineWidth: 0, text: "",
+                                        fontSize: 30 * pixelScale)
+            fresh.fontSize = 30 * pixelScale
+            doc.shapes.append(fresh)
+            shape = fresh
+        }
+        editSnapshot = snapshot
+        editingShapeID = shape.id
+        doc.selectedID = shape.id
+
+        let editor = NSTextView(frame: .zero)
+        editor.delegate = self
+        editor.drawsBackground = false
+        editor.isRichText = false
+        editor.isEditable = true
+        editor.isSelectable = true
+        editor.allowsUndo = true
+        editor.font = Self.textFont(size: shape.fontSize * viewPerPixel)
+        editor.textColor = shape.color.nsColor
+        editor.insertionPointColor = shape.color.nsColor
+        editor.textContainerInset = .zero
+        editor.textContainer?.lineFragmentPadding = 0
+        editor.textContainer?.widthTracksTextView = false
+        // 🔴 关掉全部"智能"替换：截图里写的 `--flag`、`a"b`、`it's` 都是要
+        // 原样进图的，被换成弯引号 / 破折号就不是用户打的那句话了。
+        editor.isAutomaticQuoteSubstitutionEnabled = false
+        editor.isAutomaticDashSubstitutionEnabled = false
+        editor.isAutomaticTextReplacementEnabled = false
+        editor.isAutomaticSpellingCorrectionEnabled = false
+        editor.isContinuousSpellCheckingEnabled = false
+        editor.isGrammarCheckingEnabled = false
+        editor.smartInsertDeleteEnabled = false
+        editor.string = shape.text
+        addSubview(editor)
+        editingTextView = editor
+        layoutTextEditor()
+        window?.makeFirstResponder(editor)
+        // 修改已有文字：全选，直接打字就替换；接着往末尾补也行
+        if !shape.text.isEmpty { editor.selectAll(nil) }
         needsDisplay = true
+    }
+
+    /// 编辑器位置 = 渲染器给这个文字算出来的框（同一套 displayBounds，不许另写一份）
+    private func layoutTextEditor() {
+        guard let editor = editingTextView, let id = editingShapeID,
+              let shape = doc.shapes.first(where: { $0.id == id }),
+              let box = shape.displayBounds else { return }
+        let vpp = viewPerPixel
+        editor.frame = NSRect(x: imageRect.minX + box.minX * vpp,
+                              y: imageRect.minY + box.minY * vpp,
+                              // 空文字时框只有 40 像素宽，换算成点太小，给个下限好看见光标
+                              width: max(60, box.width * vpp),
+                              height: max(20, box.height * vpp))
+        // 文字变长后框要比视图宽，否则会横向滚动、看着像截断了
+        editor.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
+                                                     height: CGFloat.greatestFiniteMagnitude)
+    }
+
+    /// 确认：落盘成标注（整段编辑只压一个撤销点）
+    ///
+    /// internal 而不是 private：控制器在「保存 / 复制 / 贴图 / OCR / 关闭」之前
+    /// 必须先把它落盘，否则用户在输入框里还没按回车就去点保存，最后那几行字会丢。
+    func commitTextEditing() {
+        guard let editor = editingTextView else { return }
+        let text = editor.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        let id = editingShapeID
+        let snapshot = editSnapshot
+        teardownTextEditor()
+        guard let id, let snapshot else { return }
+        if let idx = doc.shapes.firstIndex(where: { $0.id == id }) {
+            if text.isEmpty {
+                // 空文字不留空框（点一下什么都没输 = 什么都没发生）
+                doc.shapes.remove(at: idx)
+            } else {
+                doc.shapes[idx].text = text
+            }
+        }
+        doc.commitEdit(from: snapshot)
+        needsDisplay = true
+    }
+
+    /// 取消（Esc）：回到编辑前的样子
+    private func cancelTextEditing() {
+        guard editingTextView != nil else { return }
+        let snapshot = editSnapshot
+        teardownTextEditor()
+        if let snapshot { doc.rollback(to: snapshot) }
+        needsDisplay = true
+    }
+
+    private func teardownTextEditor() {
+        editingTextView?.removeFromSuperview()
+        editingTextView = nil
+        editingShapeID = nil
+        editSnapshot = nil
+        window?.makeFirstResponder(self)
+    }
+
+    /// 点某个已有的文字 → 接着改
+    private func editableTextShape(at pixelPoint: CGPoint) -> AnnotationShape? {
+        doc.shapes.last { $0.tool == .text && $0.hitTest(pixelPoint) }
+    }
+}
+
+// ── 文字原位编辑：打字实时同步 + 确认 / 取消 ──────────────
+//
+// 三条铁律：
+// 1. 打字时**不许**调 `doc.commit(...)`。每敲一个字压一个撤销点的话，一次输入
+//    就能把 50 步的栈刷满，还会把之前画的标注挤出栈外（用户按 ⌘Z 发现标注
+//    全没了）。所以走 `setLiveText`（只改不压栈），确认时才压**一个**。
+// 2. 确认 / 取消都以 `editSnapshot` 为基准，跟"改了几次"无关 —— 双击进去改、
+//    改成空、再换成别的字，撤销一次应当直接回到"动手之前"。
+// 3. Esc 归 `cancelOperation:`（文本视图自己的命令链），不要在这里判断 keyCode：
+//    输入法组字过程中的 Esc 是"取消候选"，抢掉会把人正在打的拼音弄丢。
+extension OverlayEditorView: NSTextViewDelegate {
+
+    func textDidChange(_ notification: Notification) {
+        guard let editor = editingTextView, let id = editingShapeID,
+              notification.object as? NSTextView === editor else { return }
+        doc.setLiveText(editor.string, for: id)
+        // 文字变长 → 框跟着长（否则光标跑出可视区被裁掉，看着像打不进去字）
+        layoutTextEditor()
+        needsDisplay = true
+    }
+
+    func textView(_ textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        switch selector {
+        case #selector(NSResponder.insertNewline(_:)):
+            // ⏎ = 确认（截图工具惯例）。文本框只支持单行，换行没有意义。
+            commitTextEditing()
+            return true
+        case #selector(NSResponder.cancelOperation(_:)):
+            cancelTextEditing()
+            return true
+        case #selector(NSResponder.insertTab(_:)):
+            // Tab 也当确认：不然焦点会被吞在一个没有下一个控件的面板里
+            commitTextEditing()
+            return true
+        default:
+            return false
+        }
     }
 }
 

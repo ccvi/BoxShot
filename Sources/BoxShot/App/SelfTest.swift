@@ -875,6 +875,52 @@ enum SelfTest {
                   undoSteps <= EditorDocument.undoLimit)
             check("撤销到底回到最早的可见状态（形状数 \(doc.shapes.count) ≥ \(countBefore)）",
                   doc.shapes.count >= countBefore)
+
+            // ── 文字原地编辑（所见即所得）的撤销语义 ──
+            // 用户口径「输入时就直接看到最终效果，输完确认，之后还能点回来改」。
+            // 这套动作全压在三条文档方法上，所以这里只测文档语义，不跑 UI：
+            //   1) setLiveText 打字期间**不压栈**（否则敲两行字就把栈刷满，
+            //      undoLimit 一截断，之前画的标注全从历史里消失）
+            //   2) commitEdit 整段编辑只压**一个**点
+            //   3) rollback 连"刚新建的那条空文字"一起回滚
+            let editBase = solidImage(width: 120, height: 90, color: CGColor(gray: 0.9, alpha: 1))
+            let editDoc = EditorDocument(image: editBase)
+            let typeShape = AnnotationShape(tool: .text, points: [CGPoint(x: 10, y: 10)],
+                                            color: .black, lineWidth: 0,
+                                            text: "A", fontSize: 24)
+            editDoc.shapes = [typeShape]
+            let editID = typeShape.id
+            let editSnapshot = editDoc.shapes
+            let widthBefore = editDoc.shapes[0].displayBounds?.width ?? 0
+
+            for typed in ["AB", "ABC", "ABCDEFG"] {
+                editDoc.setLiveText(typed, for: editID)
+            }
+            check("实时改文字不压撤销点", !editDoc.canUndo)
+            check("实时改文字后包围盒跟着变宽",
+                  (editDoc.shapes.first?.displayBounds?.width ?? 0) > widthBefore)
+
+            editDoc.commitEdit(from: editSnapshot)
+            check("整段编辑只压一个撤销点", editDoc.canUndo)
+            editDoc.undo()
+            check("撤销一次回到编辑前的文字（\(editDoc.shapes.first?.text ?? "nil")）",
+                  editDoc.shapes.first?.text == "A")
+            check("撤销一步到底（没有残留的中间态）", !editDoc.canUndo)
+
+            // 取消：模拟"点进去、输入、按 Esc"
+            let beforeCancel = editDoc.shapes
+            let scratch = AnnotationShape(tool: .text, points: [CGPoint(x: 60, y: 60)],
+                                          color: .black, lineWidth: 0, text: "临时", fontSize: 24)
+            editDoc.shapes.append(scratch)
+            editDoc.setLiveText("临时改过的字", for: scratch.id)
+            editDoc.rollback(to: beforeCancel)
+            check("取消编辑回滚到编辑前（临时文字被撤掉）",
+                  editDoc.shapes.count == beforeCancel.count)
+
+            // 点进去又原样退出来，不该留下一步空撤销
+            let calm = EditorDocument(image: editBase)
+            calm.commitEdit(from: calm.shapes)
+            check("没改动就不压空撤销点", !calm.canUndo)
         }
 
         // ── 图片编码（1.0.21：改走 CGImageDestination，省一次全图拷贝）──
