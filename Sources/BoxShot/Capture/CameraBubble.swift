@@ -47,7 +47,7 @@ final class CameraBubbleController {
         self.placement = placement
     }
 
-    /// 同一档位在两种模式下的实际点数不同（画中画 200/180/150，摄像头录制 680/600/500）
+    /// 同一档位在两种模式下的实际点数不同（画中画 200/150/100，摄像头录制 680/600/500）
     private var side: CGFloat {
         placement == .centered ? size.cameraSide : size.side
     }

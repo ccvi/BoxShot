@@ -629,10 +629,10 @@ enum SelfTest {
 
         // ── 取景框两套尺寸 + 两种落位（1.0.20 再改版）──
         do {
-            // 区域 / 全屏录制：还原成 200/180/150（贴右下角）
+            // 区域 / 全屏录制：200/150/100（贴右下角）
             check("画中画大 = 200pt", CameraBubbleSize.large.side == 200)
-            check("画中画中 = 180pt", CameraBubbleSize.medium.side == 180)
-            check("画中画小 = 150pt", CameraBubbleSize.small.side == 150)
+            check("画中画中 = 150pt", CameraBubbleSize.medium.side == 150)
+            check("画中画小 = 100pt", CameraBubbleSize.small.side == 100)
             // 摄像头录制：680/600/500（居中）
             check("摄像头大 = 680pt", CameraBubbleSize.large.cameraSide == 680)
             check("摄像头中 = 600pt", CameraBubbleSize.medium.cameraSide == 600)
