@@ -41,10 +41,15 @@ final class CameraBubbleController {
     /// 取景框大小档位（设置 → 录制 → 取景框大小；弹层里切换要实时生效，所以是 var）
     private(set) var size: CameraBubbleSize
     private let placement: Placement
+    /// 贴右下角时离右 / 下边的内缩（pt）。设置里可调，录着改也要立刻生效。
+    private var inset: CGFloat
 
-    init(size: CameraBubbleSize, placement: Placement = .bottomTrailing) {
+    init(size: CameraBubbleSize,
+         placement: Placement = .bottomTrailing,
+         inset: CGFloat = CameraBubbleController.defaultBottomTrailingInset) {
         self.size = size
         self.placement = placement
+        self.inset = inset
     }
 
     /// 同一档位在两种模式下的实际点数不同（画中画 200/150/100，摄像头录制 680/600/500）
@@ -57,6 +62,13 @@ final class CameraBubbleController {
     func resize(to newSize: CameraBubbleSize) {
         guard newSize != size else { return }
         size = newSize
+        if let panel { position(panel, anchor: lastAnchor) }
+    }
+
+    /// 边距在设置里改了：只挪位置，不动窗口大小、也不重建会话
+    func applyInset(_ newInset: CGFloat) {
+        guard newInset != inset else { return }
+        inset = newInset
         if let panel { position(panel, anchor: lastAnchor) }
     }
 
@@ -132,6 +144,19 @@ final class CameraBubbleController {
         Self.fittedSide(wanted: side, anchor: anchor, placement: placement)
     }
 
+    /// 画中画贴右下角时的默认内缩（pt）。**真正用的是 `inset` 这个实例属性**
+    /// （设置 → 录制 → 取景框边距，`Preferences.recordCameraInset`），
+    /// 这里只是构造时的兜底值。
+    nonisolated static let defaultBottomTrailingInset: CGFloat = 30
+
+    /// 画中画的原点（AppKit 左下原点）。纯函数是为了让自检能盯住
+    /// 「右边缝 = inset、下边缝 = inset」这两件事 —— 符号写反了窗口会跑到框外，
+    /// 而 AppKit 钳位后看着像"位置不对"，很难靠肉眼定位。
+    static func bottomTrailingOrigin(anchor: CGRect, size: CGSize,
+                                     inset: CGFloat = defaultBottomTrailingInset) -> CGPoint {
+        CGPoint(x: anchor.maxX - size.width - inset, y: anchor.minY + inset)
+    }
+
     /// 落位：画中画贴右下角，摄像头录制摆正中
     private func position(_ panel: NSPanel, anchor: CGRect) {
         var size = panel.frame.size
@@ -144,9 +169,9 @@ final class CameraBubbleController {
         let y: CGFloat
         switch placement {
         case .bottomTrailing:
-            let inset: CGFloat = 18
-            x = anchor.maxX - size.width - inset
-            y = anchor.minY + inset
+            let origin = Self.bottomTrailingOrigin(anchor: anchor, size: size, inset: inset)
+            x = origin.x
+            y = origin.y
         case .centered:
             x = anchor.midX - size.width / 2
             y = anchor.midY - size.height / 2

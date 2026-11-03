@@ -443,6 +443,14 @@ private struct RecordPane: View {
                 trailing: prefs.value.recordCamera
                     ? "当前 \(Int(prefs.value.recordCameraSize.side)) pt"
                     : "先勾选下面的摄像头取景框")
+            // 边距可调（用户口径）：右下角那条缝要能自己拧，不用来找我改代码
+            row("取景框边距",
+                Stepper("", value: prefs.binding(\.recordCameraInset), in: 0...80, step: 2)
+                    .labelsHidden()
+                    .disabled(!prefs.value.recordCamera),
+                trailing: prefs.value.recordCamera
+                    ? "右边 / 下边各留 \(prefs.value.recordCameraInset) pt"
+                    : "先勾选下面的摄像头取景框")
             // 摄像头录制是独立功能：它那个居中大取景框是另一套尺寸（680/600/500）
             row("摄像头录制",
                 Picker("", selection: prefs.binding(\.cameraRecordSize)) {

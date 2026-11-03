@@ -665,6 +665,33 @@ enum SelfTest {
                                                     anchor: CGRect(x: 0, y: 0, width: 100, height: 100),
                                                     placement: .bottomTrailing) == 96)
 
+            // 画中画贴右下角：边距**可调**（设置 → 录制 → 取景框边距），默认 30
+            let anchor = CGRect(x: 100, y: 200, width: 900, height: 600)
+            let bubble = CGSize(width: 150, height: 150)
+            let corner = CameraBubbleController.bottomTrailingOrigin(anchor: anchor, size: bubble,
+                                                                    inset: 30)
+            check("取景框边距默认 30pt", Preferences().recordCameraInset == 30)
+            check("画中画右边缝 = 边距", (corner.x + bubble.width) == anchor.maxX - 30)
+            check("画中画下边缝 = 边距", corner.y == anchor.minY + 30)
+            check("画中画两边缝一样宽",
+                  (anchor.maxX - corner.x - bubble.width) == (corner.y - anchor.minY))
+            // 换个边距也得跟着走（别在哪条路径上写死某个数）
+            let wide = CameraBubbleController.bottomTrailingOrigin(anchor: anchor, size: bubble,
+                                                                  inset: 48)
+            check("边距 48 就按 48 落",
+                  (anchor.maxX - wide.x - bubble.width) == 48 && (wide.y - anchor.minY) == 48)
+            // 夹紧：离谱值不会把取景框顶到画面中间
+            var clamped = Preferences()
+            clamped.recordCameraInset = 200
+            let high = clamped.recordCameraInsetPoints
+            clamped.recordCameraInset = -5
+            let low = clamped.recordCameraInsetPoints
+            check("边距夹在 0...80", high == 80 && low == 0)
+            check("边距读得回来",
+                  (try? JSONDecoder().decode(Preferences.self,
+                                             from: Data(#"{"recordCameraInset":42}"#.bytes)))?
+                    .recordCameraInset == 42)
+
             check("摄像头录制默认大 680", Preferences().cameraRecordSize == .large)
             check("摄像头录制尺寸读得回来",
                   (try? JSONDecoder().decode(Preferences.self,

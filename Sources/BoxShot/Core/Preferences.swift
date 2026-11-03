@@ -223,6 +223,12 @@ struct Preferences: Codable, Equatable {
     var recordAudio: RecordAudioSource = .mic
     var recordCamera: Bool = false     // 摄像头画中画
     var recordCameraSize: CameraBubbleSize = .medium
+    /// 画中画取景框贴右下角时，离录制区右边 / 底边的内缩（pt）
+    ///
+    /// 用户口径 1.0.24：这一条要**可调**（先给的是写死 30，被打回改成设置项）。
+    /// 右边和下边吃同一个数 —— 「右下角」就该等距，别给某一侧留特例。
+    /// 范围夹在 0...80：0 是贴死边，再大就快顶到中间了。
+    var recordCameraInset: Int = 30
     /// 摄像头录制（固定录制框）里取景框的大小：默认大 600
     var cameraRecordSize: CameraBubbleSize = .large
     var recordFPS: Int = 30
@@ -232,6 +238,13 @@ struct Preferences: Codable, Equatable {
     /// 录制完成后在 Finder 里定位文件（不然文件默默躺在桌面找不到）
     var recordRevealInFinder: Bool = true
     var shortcuts: [String: KeySpec] = [:]   // 出厂不预置热键（1.0.1 用户要求）
+
+    /// 边距的实际点数：夹在 0...80。
+    /// 存的是 Int，用的时候统一走这里 —— 老配置、手改 JSON、界面上输离谱值都不会
+    /// 把取景框顶到画面中间去。
+    var recordCameraInsetPoints: CGFloat {
+        CGFloat(min(max(recordCameraInset, 0), 80))
+    }
 
     /// 严格读取：设置里没录就是 nil，**不回退默认值**——
     /// 之前回退默认值，导致设置里点"清除"后界面又显示回 F7（清除不了的根因）。
@@ -276,6 +289,7 @@ struct Preferences: Codable, Equatable {
         recordAudio = try c.decodeIfPresent(RecordAudioSource.self, forKey: .recordAudio) ?? f.recordAudio
         recordCamera = try c.decodeIfPresent(Bool.self, forKey: .recordCamera) ?? f.recordCamera
         recordCameraSize = try c.decodeIfPresent(CameraBubbleSize.self, forKey: .recordCameraSize) ?? f.recordCameraSize
+        recordCameraInset = try c.decodeIfPresent(Int.self, forKey: .recordCameraInset) ?? f.recordCameraInset
         cameraRecordSize = try c.decodeIfPresent(CameraBubbleSize.self, forKey: .cameraRecordSize) ?? f.cameraRecordSize
         recordFPS = try c.decodeIfPresent(Int.self, forKey: .recordFPS) ?? f.recordFPS
         recordShowCursor = try c.decodeIfPresent(Bool.self, forKey: .recordShowCursor) ?? f.recordShowCursor
@@ -299,7 +313,8 @@ struct Preferences: Codable, Equatable {
         case pinDoubleClick, pinOpacity, pinShadow, maxPinHistory
         case ocrKeepLineBreaks, ocrLineOverlap, ocrIncremental, ocrAutoOpenLink
         case measureShowTips
-        case recordAudio, recordCamera, recordCameraSize, cameraRecordSize, recordFPS, recordShowCursor
+        case recordAudio, recordCamera, recordCameraSize, recordCameraInset, cameraRecordSize
+        case recordFPS, recordShowCursor
         case recordFormat, recordQuality, recordRevealInFinder
         case shortcuts
     }

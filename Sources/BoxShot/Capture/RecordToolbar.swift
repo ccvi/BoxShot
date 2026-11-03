@@ -221,6 +221,11 @@ final class RecordToolbarController: NSObject {
             ?? CGRect(x: 0, y: 0, width: 1280, height: 800)
     }
 
+    /// 设置页改了「取景框边距」：正在录的话立刻挪过去（没有取景框就什么都不做）
+    func applyCameraInset(_ points: CGFloat) {
+        cameraBubble?.applyInset(points)
+    }
+
     private func toggleCameraBubble() {
         if let bubble = cameraBubble, bubble.isVisible {
             bubble.close()
@@ -232,7 +237,9 @@ final class RecordToolbarController: NSObject {
         let bubbleSize = isCameraMode ? (prefs?.cameraRecordSize ?? .large)
                                       : (prefs?.recordCameraSize ?? .medium)
         let bubble = CameraBubbleController(size: bubbleSize,
-                                            placement: isCameraMode ? .centered : .bottomTrailing)
+                                            placement: isCameraMode ? .centered : .bottomTrailing,
+                                            inset: prefs?.recordCameraInsetPoints
+                                                ?? CameraBubbleController.defaultBottomTrailingInset)
         bubble.onClose = { [weak self] in
             self?.cameraBubble = nil
             self?.refreshCameraButton()
@@ -497,6 +504,10 @@ final class RecordToolbarController: NSObject {
         optionsView.onCameraSizeChange = { [weak self] newSize in
             self?.cameraBubble?.resize(to: newSize)
         }
+        // 边距同理：拖着看效果，不用重开录制
+        optionsView.onInsetChange = { [weak self] points in
+            self?.cameraBubble?.applyInset(points)
+        }
         let content = NSViewController()
         content.view = optionsView
 
@@ -551,8 +562,12 @@ final class RecordOptionsView: NSView {
     private let cameraMode: Bool
     /// 取景框大小在弹层里切换时实时改已打开的取景框（工具条负责接线到 cameraBubble）
     var onCameraSizeChange: ((CameraBubbleSize) -> Void)?
+    /// 边距在弹层里拖动时实时挪已打开的取景框
+    var onInsetChange: ((CGFloat) -> Void)?
     /// 「当前 X pt」备注，切换档位时跟着刷新
     private var ptLabel: NSTextField?
+    /// 边距那一行的说明文字，拖 stepper 时跟着刷新
+    private var insetLabel: NSTextField?
 
     init(model: AppModel, cameraMode: Bool = false) {
         self.model = model
@@ -611,6 +626,23 @@ final class RecordOptionsView: NSView {
         pt.setContentCompressionResistancePriority(.required, for: .horizontal)
         ptLabel = pt
         stack.addArrangedSubview(row("取景框大小", size, width: 120, trailing: pt))
+
+        // 边距（只有画中画贴右下角才有意义：摄像头录制是居中，这一行不出现）
+        if !cameraMode {
+            let stepper = NSStepper()
+            stepper.minValue = 0
+            stepper.maxValue = 80
+            stepper.increment = 2
+            stepper.doubleValue = Double(prefs.recordCameraInsetPoints)
+            stepper.target = self
+            stepper.action = #selector(insetChanged(_:))
+            let note = NSTextField(labelWithString: "右 / 下各 \(Int(prefs.recordCameraInsetPoints)) pt")
+            note.font = NSFont.systemFont(ofSize: 11)
+            note.textColor = .secondaryLabelColor
+            note.setContentCompressionResistancePriority(.required, for: .horizontal)
+            insetLabel = note
+            stack.addArrangedSubview(row("边距", stepper, trailing: note))
+        }
 
         // 显示光标（用户要求放回弹层；空标签占位让它和上面几行的控件同列）
         let cursor = NSButton(checkboxWithTitle: "显示光标", target: self, action: #selector(cursorChanged(_:)))
@@ -692,6 +724,16 @@ final class RecordOptionsView: NSView {
         }
         ptLabel?.stringValue = "当前 \(Int(cameraMode ? newSize.cameraSide : newSize.side)) pt"
         onCameraSizeChange?(newSize)
+    }
+
+    @objc private func insetChanged(_ sender: NSStepper) {
+        // 夹一遍再存：stepper 自己能夹，但设置项是 Int、别的地方也可能写，
+        // 统一以 Preferences.recordCameraInsetPoints 为准
+        let points = CGFloat(min(max(Int(sender.doubleValue.rounded()), 0), 80))
+        sender.doubleValue = Double(points)
+        model?.prefs.value.recordCameraInset = Int(points)
+        insetLabel?.stringValue = "右 / 下各 \(Int(points)) pt"
+        onInsetChange?(points)
     }
 
     @objc private func cursorChanged(_ sender: NSButton) {

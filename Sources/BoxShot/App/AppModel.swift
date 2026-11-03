@@ -107,6 +107,10 @@ final class AppModel: ObservableObject {
         if old.hideDockIcon != new.hideDockIcon {
             NSApp.setActivationPolicy(new.hideDockIcon ? .accessory : .regular)
         }
+        // 取景框边距：录着的时候在设置里拧，取景框要当场跟着挪
+        if old.recordCameraInset != new.recordCameraInset {
+            recordToolbar?.applyCameraInset(new.recordCameraInsetPoints)
+        }
     }
 
     /// 「操作完成」的提示音：开关和音效名都在设置里，调用方只管喊一声。
