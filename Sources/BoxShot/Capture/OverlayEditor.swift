@@ -450,6 +450,14 @@ final class OverlayEditorController: NSObject {
         stack.addArrangedSubview(highlight)
         stack.addArrangedSubview(divider(Self.toolbarDividerHeight))
 
+        // 1.0.27 用户口径「在工具条加上 编辑 按钮，点击进入编辑器，同时关闭截图窗」
+        // 位置按他给的截图：高亮与 OCR 之间。图标用 square.and.pencil（系统里"编辑/
+        // 撰写"的通用符号），别跟画笔 pencil.tip、马克笔 highlighter 撞。
+        stack.addArrangedSubview(toolbarButton(symbol: "square.and.pencil",
+                                               title: "在编辑窗口中打开 ⌘E") { [weak self] in
+            self?.openInEditorWindow()
+        })
+
         // 1.0.11 用户口径：**去掉裁剪**，原来塞在 ⋯ 里的三个动作（OCR / 解码 / 贴图）
         // 全部摊到工具条上 —— ⋯ 菜单就此取消。
         // 「复制到剪贴板」本来就在工具条上有按钮（📋），菜单里那条是重复的，一并去掉。
@@ -1022,6 +1030,30 @@ final class OverlayEditorController: NSObject {
         finishAfterAction()
     }
 
+    /// 把当前截图（连同已经画好的标注）送进独立编辑窗口，并把原位浮层收掉。
+    ///
+    /// 用户 1.0.27 口径：「点击进入编辑器，同时关闭截图窗」——所以这里**无条件**
+    /// 关浮层，跟「完成后直接关闭截图窗口」那个开关无关（那个管 OCR / 解码 /
+    /// 贴图 / 复制 / 下载）。内容已经整份交给编辑窗口，浮层再留着就是两张一样的图。
+    ///
+    /// 🔴 交的是 `baseImage + shapes`，**不是**压平后的 rendered()：编辑器本来就
+    /// 收 shapes（`EditorWindowController.show(image:shapes:)`），两边坐标都是图像
+    /// 像素坐标。压平了就变成"撕不下来的成品"，进去连撤销都回不去。
+    /// 唯一要手工补的是正在输入的那行字 —— 它还是 contentView 里的草稿，
+    /// 不 commit 就不在 shapes 里。
+    func openInEditorWindow() {
+        guard let model else { return }
+        contentView?.commitTextEditing()
+        let image = doc.baseImage
+        let shapes = doc.shapes
+        model.openEditor(image: image, shapes: shapes)
+        // 🔴 别在这条按钮/按键回调里同步 close()：onClose 会把 AppModel 的
+        // overlayEditors 里这条摘掉，controller 当场释放，而我们还站在这条
+        // controller 的方法里（裁剪重开那次踩过一模一样的坑）。下一轮再拆自己。
+        let holder = self
+        DispatchQueue.main.async { holder.close() }
+    }
+
     func ocr() {
         guard let image = renderedImage() else { return }
         model?.runOCR(image: image)
@@ -1080,6 +1112,9 @@ final class OverlayEditorController: NSObject {
                 return nil
             case 1 where flags.contains(.command): // S
                 self.save()
+                return nil
+            case 14 where flags.contains(.command): // E：进独立编辑窗口
+                self.openInEditorWindow()
                 return nil
             case 51, 117: // ⌫ / Delete：有选中删标注，否则当撤销
                 if doc.selectedShape != nil {

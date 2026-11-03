@@ -14,7 +14,14 @@ final class AppModel: ObservableObject {
 
     // 功能控制器（懒建：只有真的用到才创建窗口/流）
     private var regionSelector: RegionSelector?
-    private var editorController: EditorWindowController?   // 独立编辑窗口（滚动截图结果等）
+    /// 全部还活着的独立编辑窗口。
+    ///
+    /// 🔴 1.0.27 加「编辑」按钮后这条路变高频：以前只有滚动截图结果会开编辑窗口，
+    /// 一份引用够用；现在每张截图都能点进去，覆盖引用 = 旧窗口留在屏上但没人管
+    /// （跟 1.0.24 修的浮层僵尸窗口同一个形状：强引用一丢，窗口还在，按钮全哑）。
+    /// 诊断入口仍按"最近一个"用，所以留了这个只读计算属性。
+    private var editorControllers: [EditorWindowController] = []
+    var editorController: EditorWindowController? { editorControllers.last }
     var overlayEditor: OverlayEditorController?             // 最新一个原位浮层（诊断/自检都用它）
     /// 全部还活着的原位浮层。
     /// 🔴 1.0.24 修"僵尸窗口"：以前只留最新一个强引用，连续截图时旧的 controller
@@ -337,14 +344,17 @@ final class AppModel: ObservableObject {
     }
 
     /// 独立编辑窗口（滚动截图等不适合原位 1:1 显示的结果）
-    func openEditor(image: CGImage) {
+    ///
+    /// `shapes` 让「浮层 → 编辑器」这条路过得像"接着编"而不是"重新开始"：
+    /// 标注坐标两边都是图像像素坐标，直接搬过去即可（用户 1.0.27 加的工具条「编辑」按钮）。
+    func openEditor(image: CGImage, shapes: [AnnotationShape] = []) {
         let controller = EditorWindowController(model: self)
-        editorController = controller
-        controller.show(image: image)
+        editorControllers.append(controller)
+        controller.show(image: image, shapes: shapes)
     }
 
     func editorDidClose(_ controller: EditorWindowController) {
-        if editorController === controller { editorController = nil }
+        editorControllers.removeAll { $0 === controller }
     }
 
     // ── 截图历史 ────────────────────────────────────────────
