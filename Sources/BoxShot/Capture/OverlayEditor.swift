@@ -346,9 +346,11 @@ final class OverlayEditorController: NSObject {
     /// 切外观比逐个手写前景色更彻底：分隔线（separatorColor）、禁用态、以后
     /// 加进来的控件都跟着对，不会漏一个。
     static let toolbarAppearance = NSAppearance(named: .darkAqua)
-    /// 工具条文字（「文字」那个标签）的前景色：**写死的浅色**。
-    /// 底色是写死的深灰，前景就不能用 `.labelColor` 这种随外观翻转的颜色。
-    static let toolbarForegroundColor = NSColor(calibratedWhite: 0.92, alpha: 1)
+    /// 工具条前景色（图标 + 文字）：**纯白，写死**。
+    /// 底色是写死的深灰，前景就不能用随外观翻转的颜色。
+    /// 也不能只靠切 `.darkAqua`：深色外观下的 `.labelColor` 是带透明度的白，
+    /// 图标看起来是浅灰（2026-11-03 用户指着截图说"这些灰色图标改白色"）。
+    static let toolbarForegroundColor = NSColor.white
     /// 「当前颜色」那颗圆点的直径：**30 的 70% = 21**。
     /// 用户 1.0.11 原话「工具条那个控制颜色的小圆按钮缩小 30%」—— 只缩这颗，
     /// 工具条别的一律不动。它只有 layer 底色、没有图片，内禀尺寸是 0，
@@ -664,6 +666,10 @@ final class OverlayEditorController: NSObject {
         button.layer?.cornerRadius = Self.toolbarButtonCornerRadius
         button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)?
             .withSymbolConfiguration(.init(pointSize: Self.toolbarIconPointSize, weight: .medium))
+        // 纯白：模板图默认按 `.labelColor` 着色，深色外观下那是"带透明度的白"，
+        // 摆在 0.13 的深灰底上看着是灰的（用户要的是白色）。
+        // 这个工具条没有禁用态按钮，不必担心 tint 固定后看不出 disabled。
+        button.contentTintColor = Self.toolbarForegroundColor
         button.imageScaling = .scaleNone
         button.toolTip = title
         button.setButtonType(.momentaryChange)

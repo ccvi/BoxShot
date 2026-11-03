@@ -589,9 +589,11 @@ static let toolbarAppearance = NSAppearance(named: .darkAqua)
 container.appearance = Self.toolbarAppearance     // 工具条、颜色面板、录制工具条三处都要
 ```
 
-这样图标、文字、分隔线（`separatorColor`）、禁用态、以后新加的控件全部跟着对，不会漏一个。「文字」那个标签另外用了写死的 `toolbarForegroundColor`——底色写死就必须前景写死，双保险。
+这样图标、文字、分隔线（`separatorColor`）、禁用态、以后新加的控件全部跟着对，不会漏一个。
 
-复现/验证别靠肉眼看 app：写个 40 行的离屏渲染脚本，同一套深色底 + 模板图标分别渲染 `aqua` 与 `darkAqua` 两张 PNG 对比，一眼就看出前者图标全黑、后者浅灰。
+但**光切外观还不够**：深色外观下的 `.labelColor` 是"带透明度的白"，图标看起来仍是浅灰（用户第二次拿截图圈着说"这些灰色图标改白色"）。所以图标按钮再显式给 `contentTintColor = Self.toolbarForegroundColor`（纯白），文字标签同理 —— 底色写死就必须前景写死。这个工具条没有禁用态按钮，固定 tint 不会盖掉 disabled 的变灰。
+
+复现/验证别靠肉眼看 app：写个 40 行的离屏渲染脚本，同一套深色底 + 模板图标分别渲染「不指定 tint」与「`.white`」两张 PNG 对比，前者发灰、后者纯白，一眼就分得清。
 
 ## Retina 1x 与「改截图框」的冲突
 
