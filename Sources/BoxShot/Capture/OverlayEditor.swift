@@ -489,7 +489,9 @@ final class OverlayEditorController: NSObject {
         // 不透明灰黑实底（2026-11-02 用户口径）。以前是 NSVisualEffectView(.hudWindow)
         // 毛玻璃，截图内容从底下透出来；NSVisualEffectView 无论 state 怎么调都会画
         // 一层材质，要实底就得换成普通 NSView + layer 底色。
-        let container = NSView(frame: NSRect(origin: .zero, size: size))
+        // 容器用可拖的子类：按住按钮间隙 / 内边距能挪工具条（用户 1.0.27 口径）。
+        // 注意只有**工具条**这个容器是它；下面颜色面板那个仍是普通 NSView。
+        let container = DraggableToolbarContainer(frame: NSRect(origin: .zero, size: size))
         container.wantsLayer = true
         container.appearance = Self.toolbarAppearance
         container.layer?.cornerRadius = Self.toolbarContainerCornerRadius

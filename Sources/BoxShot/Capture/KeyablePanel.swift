@@ -28,3 +28,21 @@ final class KeyableWindow: NSWindow {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
 }
+
+/// 可以拖着走的工具条容器。
+///
+/// 用户口径（1.0.27）：「截图时，工具条可以拖动调整位置」—— 工具条常横在选区正下方，
+/// 正好压住要标注的那块内容，得能挪开。
+///
+/// 🔴 无边框 `NSPanel` 默认**不响应拖动**（没有标题栏，`isMovableByWindowBackground`
+/// 也是 false），所以要在容器视图上自己接 `mouseDown` 调 `performDrag(with:)`。
+/// 按钮自己会吃掉 mouseDown，所以这里只会收到"按钮间隙 / 内边距"上的按下，
+/// 跟点按钮不打架。
+///
+/// 拖过之后位置就固定在那儿（`positionToolbar` 只在建工具条时算一次）；
+/// 换一张截图会重新按 `toolbarOrigin` 算回默认位置 —— 那是新浮层，不该继承旧位置。
+final class DraggableToolbarContainer: NSView {
+    override func mouseDown(with event: NSEvent) {
+        window?.performDrag(with: event)
+    }
+}
