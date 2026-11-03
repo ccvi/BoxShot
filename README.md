@@ -4,7 +4,7 @@
 
 零第三方依赖——截图走 ScreenCaptureKit，识别走 Vision，热键走 Carbon，编码走 AVFoundation。
 
-- 当前版本：**1.0.16**
+- 当前版本：**1.0.24**
 - 作者：ccvi1223 · ccvi1223@qq.com
 - 工程最低版本：`.macOS(.v14)`（`Package.swift`）
 - 常驻形态：`LSUIElement = true`，只在菜单栏，不占 Dock

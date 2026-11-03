@@ -304,6 +304,29 @@ printf '%s\n' "$APP_VERSION" > "$VERSION_FILE"
 printf '%s\n' "$CURRENT_FINGERPRINT" > "$FINGERPRINT_FILE"
 
 # ------------------------------------------------------------
+# 6.5 README 的「当前版本」跟着 VERSION 走（防止文档漂移：1.0.16 之后
+#     这行是手写的，一路落到 1.0.24 都没人动，GitHub 上就露馅了）。
+#     README 不进指纹，改它不会把版本号顶上去。
+# ------------------------------------------------------------
+README_FILE="$PROJECT_ROOT/README.md"
+if [[ -f "$README_FILE" ]]; then
+    python3 - "$README_FILE" "$APP_VERSION" <<'PYEOF'
+import re, sys
+path, version = sys.argv[1], sys.argv[2]
+text = open(path, encoding="utf-8").read()
+pattern = r"(当前版本：\*\*)[0-9]+\.[0-9]+\.[0-9]+(\*\*)"
+new = re.sub(pattern, r"\g<1>" + version + r"\g<2>", text, count=1)
+if new != text:
+    open(path, "w", encoding="utf-8").write(new)
+    print(f"  ✓ README「当前版本」已同步为 {version}")
+elif re.search("当前版本：\*\*" + re.escape(version) + "\*\*", text):
+    print(f"  ✓ README「当前版本」已是 {version}，不用改")
+else:
+    print("  ⚠️ README 里没找到「当前版本：**x.y.z**」这一行，跳过同步")
+PYEOF
+fi
+
+# ------------------------------------------------------------
 # 7. 完成
 # ------------------------------------------------------------
 echo ""
