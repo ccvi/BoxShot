@@ -161,6 +161,10 @@ final class RecordToolbarController: NSObject {
         container.material = .hudWindow
         container.state = .active
         container.wantsLayer = true
+        // `.hudWindow` 的材质是深的，但**子视图的外观要自己切** —— 不切的话
+        // 系统处于浅色外观时，模板图标按 `.labelColor` 解析成黑色，压在深色
+        // 材质上几乎看不见（截图工具条 2026-11-03 就是这么翻车的）。
+        container.appearance = NSAppearance(named: .darkAqua)
         container.layer?.cornerRadius = 14
         container.addSubview(stack)
         stack.frame = container.bounds

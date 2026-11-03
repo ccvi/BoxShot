@@ -34,7 +34,16 @@ final class ScrollCaptureController: NSObject {
     private var isBusy = false
     private var pendingGrab = false             // 忙时滚过 → 忙完补抓
     private var scrollDebounce: DispatchWorkItem?
-    private var accumulated: CGImage?
+    /// 拼接画布（增量，只画新增行）。**不再持有整幅累积图**：
+    /// 老写法每帧新开一块整幅位图重画全图，O(N²) 拷贝 + 两份全图常驻。
+    private var canvas: ImageStitch.StitchCanvas?
+    /// 缩略图用的低分辨率画布（180 宽）。每帧只多画一条 180 宽的窄带，
+    /// 这样刷新预览不必为了一张缩略图去合成整幅长图。
+    private var previewCanvas: ImageStitch.StitchCanvas?
+    /// 画布当前所处的空间（0 未旋转 / 1 旋转 90°）。第一帧抓下来时还不知道
+    /// 用户要横着滚还是竖着滚，方向变了得把画布搬到另一个空间（只搬一次）。
+    private var canvasDirection = 0
+    static let previewWidth = 180
     /// 上一帧原图：对齐只拿"上一帧 vs 当前帧"算。
     /// 拿整张累积图去搜索的话，累积越长搜索范围越大，越容易匹配到错误的周期上
     /// —— 而且一旦错一帧，错误就永久留在图里，后面全跟着错。
@@ -192,7 +201,9 @@ final class ScrollCaptureController: NSObject {
     private func startCapturing() {
         guard !isRunning else { return }
         isRunning = true
-        accumulated = nil
+        canvas = nil
+        previewCanvas = nil
+        canvasDirection = 0
         lastFrame = nil
         lastOffset = nil
         frameCount = 0
@@ -283,8 +294,9 @@ final class ScrollCaptureController: NSObject {
         }
         defer { frameCount += 1 }
 
-        guard let current = lastFrame, let canvas = accumulated else {
-            accumulated = frame
+        // 第一帧：开画布（全分辨率 + 预览各一块）
+        guard let current = lastFrame, canvas != nil else {
+            openCanvas(with: frame)
             lastFrame = frame
             segmentCount = 1
             frameView?.status = "已捕获 1 段，滚动页面继续"
@@ -307,23 +319,21 @@ final class ScrollCaptureController: NSObject {
             return
         }
 
-        // ── 拼接：累积图按偏移追加当前帧 ──
-        var stitched: CGImage?
-        if isHorizontal {
-            if let acc = ImageStitch.rotate90(canvas),
-               let b = ImageStitch.rotate90(frame),
-               let joined = ImageStitch.append(bottom: b, to: acc, offset: alignment.offset) {
-                stitched = rotateBack(joined)
-            }
-        } else {
-            stitched = ImageStitch.append(bottom: frame, to: canvas, offset: alignment.offset)
-        }
-
-        guard let stitched else {
+        // 方向可能是在第一帧之后才识别出来的（用户先横着滚）：
+        // 把已拼好的画布搬进新的空间，只搬这一次。
+        if canvasDirection != direction, !realignCanvas(to: direction) {
             frameView?.status = "拼接失败（图太长？），点 ✓ 先保存已截部分"
             return
         }
-        accumulated = stitched
+
+        // ── 拼接：只把这一帧新增的那几行画进画布 ──
+        guard let stitched = toStitchSpace(frame),
+              canvas?.append(stitched, offset: alignment.offset) == true else {
+            frameView?.status = "拼接失败（图太长？），点 ✓ 先保存已截部分"
+            return
+        }
+        // 预览画布吃同一份原始帧，偏移在内部按宽度比例自己缩
+        previewCanvas?.append(stitched, offset: alignment.offset)
         lastFrame = frame
         lastOffset = alignment.offset
         consecutiveFailures = 0
@@ -331,6 +341,48 @@ final class ScrollCaptureController: NSObject {
         frameView?.status = "已捕获 \(segmentCount) 段 · 本段 +\(alignment.offset)px"
         refreshPreview()
     }
+
+    // ── 画布空间（竖向直接拼 / 横向先转 90°） ────────────────
+
+    /// 搬进拼接空间：横向滚动的每一帧先顺时针转 90°，一套竖向算法吃两种方向。
+    /// 转的是**每一帧**（几十 KB 的行），不是每帧把整幅累积图转两遍 —— 那是 O(N²)。
+    private func toStitchSpace(_ image: CGImage) -> CGImage? {
+        direction == 1 ? ImageStitch.rotate90(image) : image
+    }
+
+    private func fromStitchSpace(_ image: CGImage) -> CGImage? {
+        direction == 1 ? rotateBack(image) : image
+    }
+
+    /// 建画布（第一帧，或方向变化后重建）
+    private func openCanvas(with frame: CGImage) {
+        guard let base = toStitchSpace(frame),
+              let main = ImageStitch.StitchCanvas(width: base.width),
+              main.start(base) else { return }
+        canvas = main
+        let preview = ImageStitch.StitchCanvas(width: Self.previewWidth)
+        preview?.start(base)
+        previewCanvas = preview
+        canvasDirection = direction
+    }
+
+    /// 方向变了：把已拼好的图搬进新的空间。一次性 O(N)，横向滚动只会走一次。
+    private func realignCanvas(to newDirection: Int) -> Bool {
+        guard let canvas, let old = canvas.image() else { return false }
+        // 先退回"未旋转"空间，再进新空间
+        guard let natural = fromStitchSpace(old) else { return false }
+        direction = newDirection
+        guard let moved = toStitchSpace(natural),
+              let fresh = ImageStitch.StitchCanvas(width: moved.width),
+              fresh.start(moved) else { return false }
+        self.canvas = fresh
+        let preview = ImageStitch.StitchCanvas(width: Self.previewWidth)
+        preview?.start(moved)
+        previewCanvas = preview
+        canvasDirection = newDirection
+        return true
+    }
+
 
     /// 这一帧没对上：先判是不是"往回滚"，再决定要不要重设基准。
     ///
@@ -374,7 +426,7 @@ final class ScrollCaptureController: NSObject {
     @objc private func toolbarAction(_ sender: NSButton) {
         switch sender.tag {
         case 2: finish(with: nil)
-        case 3: finish(with: accumulated)
+        case 3: finish(with: outputImage())
         case 4: pin()
         case 5: save()
         case 6: copyToClipboard()
@@ -474,9 +526,12 @@ final class ScrollCaptureController: NSObject {
 
     /// 把最新的累积图刷进预览（按宽度铺满、滚到最新的一段）
     private func refreshPreview() {
-        guard let image = accumulated, let imageView = previewImageView,
-              let scroll = previewScroll else { return }
-        previewTitle?.stringValue = "滚动截图预览 \(image.width)×\(image.height)"
+        guard let imageView = previewImageView, let scroll = previewScroll,
+              let preview = previewCanvas?.image(),
+              let image = fromStitchSpace(preview) else { return }
+        if let canvas {
+            previewTitle?.stringValue = "滚动截图预览 \(canvas.width)×\(canvas.height)"
+        }
 
         let viewWidth = max(80, scroll.contentView.bounds.width)
         let scale = viewWidth / CGFloat(image.width)
@@ -490,13 +545,20 @@ final class ScrollCaptureController: NSObject {
         scroll.reflectScrolledClipView(scroll.contentView)
     }
 
+    /// 出图：保存 / 复制 / 贴图 / 交编辑窗口时才合成整幅。
+    /// 合成（`makeImage`）是整块拷贝，绝不能放进每帧的路径里。
+    private func outputImage() -> CGImage? {
+        guard let composite = canvas?.image() else { return nil }
+        return fromStitchSpace(composite)
+    }
+
     private func pin() {
-        guard let image = accumulated else { return }
+        guard let image = outputImage() else { return }
         model?.pinImage(image)
     }
 
     private func save() {
-        guard let image = accumulated, let model else { return }
+        guard let image = outputImage(), let model else { return }
         let prefs = model.prefs.value
         let name = Support.shotFileName(prefix: "boxshot-scroll", ext: prefs.shotFormat.fileExtension)
 
@@ -532,7 +594,7 @@ final class ScrollCaptureController: NSObject {
     }
 
     private func copyToClipboard() {
-        guard let image = accumulated else { return }
+        guard let image = outputImage() else { return }
         Support.copyImageToClipboard(image)
         frameView?.status = "已复制到剪贴板"
         frameView?.needsDisplay = true
@@ -552,10 +614,11 @@ final class ScrollCaptureController: NSObject {
         pendingGrab = false
         monitors.forEach { NSEvent.removeMonitor($0) }
         monitors.removeAll()
-        // 🔴 拼接画布和尾帧是整个会话里最大的两块内存（长截图的画布可达上百 MB）。
+        // 🔴 画布是整个会话里最大的一块内存（长截图的画布可达上百 MB）。
         // finish() 的 image 参数已经把结果带走，这里不留手 ——
         // 不然 controller 虽然 dealloc 了，分配器手里的"刚释放的大页"还是又脏又占。
-        accumulated = nil
+        canvas = nil
+        previewCanvas = nil
         lastFrame = nil
     }
 

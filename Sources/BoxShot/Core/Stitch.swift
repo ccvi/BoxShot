@@ -198,6 +198,9 @@ enum ImageStitch {
     /// 新内容只有 offset 行；写成 `t.height + b.height - overlap` 等于把
     /// bottom 的重叠部分又整整加了一遍，画布会比页面实际高度多出一大截
     /// （1.0.5 自检：1173 行的页面拼出 2330 行）。
+    ///
+    /// ⚠️ 这个函数现在是**参考实现**：真跑的时候用 `StitchCanvas`（增量、O(N)）。
+    /// 留着它是因为自检要拿它跟画布逐像素对照 —— 性能优化的正确性得有人钉住。
     static func append(bottom: CGImage, to top: CGImage, offset: Int) -> CGImage? {
         let targetW = min(top.width, bottom.width)
         guard targetW > 0,
@@ -221,6 +224,136 @@ enum ImageStitch {
                                width: CGFloat(targetW), height: CGFloat(b.height)))
         return ctx.makeImage()
     }
+
+    // ── 增量画布 ────────────────────────────────────────────
+
+    /// 滚动截图的累积画布：**朝下长**，每帧只画新增的那几条。
+    ///
+    /// 🔴 为什么必须换掉 `append`：`append` 每拼一帧就新开一块整幅位图、把已拼好的
+    /// 图整个重画一遍。第 N 帧要复制 N 行，总拷贝量 O(N²) —— 拼到 1 万像素高时，
+    /// 每滚一下都要 memcpy 一遍 36MB，卡顿肉眼可见；内存上也同时存在「老画布 +
+    /// 新画布」两份全图。
+    ///
+    /// 这里改成本质不同的做法：
+    ///   · 单帧成本 = O(新增行数)，总拷贝量 O(N)；
+    ///   · 容量按 1.5 倍摊还扩容，只在跨过容量时整体搬一次（log N 次）；
+    ///   · 常驻内存 ≈ 1.5 × 已用高度，不再有"两份全图"的瞬间。
+    ///
+    /// 坐标有两套，别混：CGContext 是**左下原点**，内容顶边贴 `capacity` 往下长，
+    /// 所以新条带画在 `capacity - newHeight` 就碰不到已有像素；而 `cropping(to:)`
+    /// 的 y 是**从顶部算**的。少翻一次就是上下颠倒的图，且尺寸完全正确。
+    final class StitchCanvas {
+
+        /// 拼接上限（行）：再长就不是截图了，是内存事故
+        static let maxHeight = 30000
+
+        let width: Int
+        private let limit: Int
+        private var ctx: CGContext
+        private var capacity: Int
+        /// 已用高度（行）
+        private(set) var height = 0
+        /// 已拼段数（第一帧算 1 段）
+        private(set) var segments = 0
+
+        init?(width: Int, limit: Int = StitchCanvas.maxHeight) {
+            guard width > 0, limit > 0 else { return nil }
+            self.width = width
+            self.limit = min(limit, StitchCanvas.maxHeight)
+            let cap = min(self.limit, max(1024, width))
+            guard let context = Self.makeContext(width: width, height: cap) else { return nil }
+            ctx = context
+            capacity = cap
+        }
+
+        private static func makeContext(width: Int, height: Int) -> CGContext? {
+            let context = CGContext(data: nil, width: width, height: height,
+                                    bitsPerComponent: 8, bytesPerRow: 0,
+                                    space: CGColorSpaceCreateDeviceRGB(),
+                                    bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                                      | CGBitmapInfo.byteOrder32Little.rawValue)
+            context?.interpolationQuality = .high
+            return context
+        }
+
+        /// 第一帧：整幅当底。
+        @discardableResult
+        func start(_ image: CGImage) -> Bool {
+            guard image.height > 0, image.height <= limit,
+                  let img = ImageStitch.normalized(image, width: width) else { return false }
+            guard grow(to: img.height) else { return false }
+            ctx.draw(img, in: CGRect(x: 0, y: CGFloat(capacity - img.height),
+                                     width: CGFloat(width), height: CGFloat(img.height)))
+            height = img.height
+            segments = 1
+            return true
+        }
+
+        /// 追加一帧：只把 bottom **底部 offset 行**画进画布。
+        ///
+        /// offset 是原图像素；如果这一帧宽度跟画布不一致会被缩放，offset 同步按比例
+        /// 缩（否则预览画布那种小尺寸会一次吃掉几十倍行数）。
+        @discardableResult
+        func append(_ bottom: CGImage, offset: Int) -> Bool {
+            guard segments > 0, height > 0 else { return start(bottom) }
+            // 🔴 先按**原始像素**校验：offset 必须小于一帧高度（必须真有重叠）。
+            // 别用"截断到 b.height-1"糊过去 —— 滚过一屏的帧本来就该拒绝，
+            // 截断等于把一段根本对不上的内容硬拼上去，画面上是内容错乱。
+            guard offset >= 0, offset < bottom.height else { return false }
+            guard let b = ImageStitch.normalized(bottom, width: width) else { return false }
+            let ratio = Double(b.height) / Double(max(1, bottom.height))
+            // 缩放后再夹一次（预览画布会把 offset 按宽度比缩小，可能缩到 0）
+            let off = max(0, min(b.height - 1, Int((Double(offset) * ratio).rounded())))
+            let newHeight = height + off
+            guard newHeight <= limit else { return false }
+
+            var strip: CGImage?
+            if off > 0 {
+                // 底部 off 行：cropping 的 y 从顶部算
+                let rect = CGRect(x: 0, y: CGFloat(b.height - off),
+                                  width: CGFloat(width), height: CGFloat(off))
+                guard let cut = b.cropping(to: rect) else { return false }
+                strip = cut
+            }
+            guard grow(to: newHeight) else { return false }
+            if let strip {
+                // 左下原点：新内容接在已用区域的下面
+                ctx.draw(strip, in: CGRect(x: 0, y: CGFloat(capacity - newHeight),
+                                           width: CGFloat(width), height: CGFloat(off)))
+            }
+            height = newHeight
+            segments += 1
+            return true
+        }
+
+        /// 出图（保存 / 贴图 / 交编辑窗口时才调）。`makeImage` 是整块拷贝，别在每帧里叫。
+        func image() -> CGImage? {
+            guard height > 0, let full = ctx.makeImage() else { return nil }
+            guard height != capacity else { return full }
+            return full.cropping(to: CGRect(x: 0, y: 0, width: width, height: height))
+        }
+
+        /// 扩容：按 1.5 倍摊还，跨过容量才整体搬一次；老内容在旧画布顶部，搬到新画布顶部。
+        private func grow(to need: Int) -> Bool {
+            guard need <= limit else { return false }
+            guard need > capacity else { return true }
+            var target = capacity
+            while target < need {
+                target = min(limit, target + max(256, target / 2))
+                if target < need && target >= limit { return false }
+            }
+            guard let bigger = Self.makeContext(width: width, height: target) else { return false }
+            if height > 0, let full = ctx.makeImage(),
+               let used = full.cropping(to: CGRect(x: 0, y: 0, width: width, height: height)) {
+                bigger.draw(used, in: CGRect(x: 0, y: CGFloat(target - height),
+                                             width: CGFloat(width), height: CGFloat(height)))
+            }
+            ctx = bigger
+            capacity = target
+            return true
+        }
+    }
+
 
     /// 旋转 90° 顺时针（横向滚动截图复用竖向算法）
     static func rotate90(_ image: CGImage) -> CGImage? {
@@ -298,7 +431,9 @@ enum ImageStitch {
                 textureSamples > 0 ? Double(textureTotal) / Double(textureSamples) : 0)
     }
 
-    private static func normalized(_ image: CGImage, width: Int) -> CGImage? {
+    /// 宽度归一（只在这一帧宽度跟目标不一致时才真的缩放）。
+    /// 不 private：`StitchCanvas` 要用同一套缩放口径，两处各写一遍迟早对不上。
+    static func normalized(_ image: CGImage, width: Int) -> CGImage? {
         guard image.width != width else { return image }
         let height = max(1, Int(CGFloat(image.height) * CGFloat(width) / CGFloat(image.width)))
         guard let ctx = CGContext(data: nil, width: width, height: height,

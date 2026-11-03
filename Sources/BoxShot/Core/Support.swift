@@ -2,6 +2,7 @@ import AppKit
 import AVFoundation
 import CoreGraphics
 import Foundation
+import ImageIO
 
 // ============================================================
 // 零碎工具：目录、开机启动、权限、提示音、剪贴板、文件名
@@ -66,14 +67,26 @@ enum Support {
     }
 
     /// 把图片写进剪贴板（PNG + TIFF 双类型：预览/Finder 认 TIFF，程序间认 PNG）
+    ///
+    /// 🔴 两种类型都走 `CGImageDestination` 直编，不用 `NSBitmapImageRep`：
+    /// 后者每转一次就把整幅图拷一份，这里要转两次 = 多出两份全图（整屏 40MB）。
     static func copyImageToClipboard(_ image: CGImage) {
-        let bitmap = NSBitmapImageRep(cgImage: image)
-        guard let tiff = bitmap.tiffRepresentation,
-              let png = bitmap.representation(using: .png, properties: [:]) else { return }
+        guard let png = encode(image, uti: "public.png"),
+              let tiff = encode(image, uti: "public.tiff") else { return }
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setData(tiff, forType: .tiff)
         pasteboard.setData(png, forType: .png)
+    }
+
+    /// 用 ImageIO 直接编码，不经 NSBitmapImageRep（省一次全图拷贝）
+    private static func encode(_ image: CGImage, uti: String) -> Data? {
+        let buffer = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(
+            buffer as CFMutableData, uti as CFString, 1, nil) else { return nil }
+        CGImageDestinationAddImage(destination, image, nil)
+        guard CGImageDestinationFinalize(destination) else { return nil }
+        return buffer as Data
     }
 
     static func copyTextToClipboard(_ text: String) {

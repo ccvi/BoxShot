@@ -48,9 +48,22 @@ final class EditorDocument: ObservableObject {
     var canUndo: Bool { !undoStack.isEmpty }
     var canRedo: Bool { !redoStack.isEmpty }
 
-    func commit(_ shape: AnnotationShape) {
-        undoStack.append(shapes)
+    /// 撤销栈上限。每步存的是一整份 `[AnnotationShape]`（结构体数组，不含位图），
+    /// 单份通常几 KB，但编辑一小时、反复改颜色粗细能到几百步 —— 没有上限就是
+    /// 一条悄悄往上爬的曲线。50 步够用（再往回也没人记得清）。
+    static let undoLimit = 50
+
+    /// 压撤销点：统一从这里走，别各处 `undoStack.append` —— 那样迟早有人漏了截断。
+    private func pushUndo(_ snapshot: [AnnotationShape]) {
+        undoStack.append(snapshot)
+        if undoStack.count > Self.undoLimit {
+            undoStack.removeFirst(undoStack.count - Self.undoLimit)
+        }
         redoStack.removeAll()
+    }
+
+    func commit(_ shape: AnnotationShape) {
+        pushUndo(shapes)
         shapes.append(shape)
     }
 
@@ -99,15 +112,13 @@ final class EditorDocument: ObservableObject {
               let idx = shapes.firstIndex(where: { $0.id == origin.id }) else { return }
         var previous = shapes
         previous[idx] = origin
-        undoStack.append(previous)
-        redoStack.removeAll()
+        pushUndo(previous)
     }
 
     /// 删除选中标注（⌫ / Delete）
     func deleteSelected() {
         guard let selectedID, let idx = shapes.firstIndex(where: { $0.id == selectedID }) else { return }
-        undoStack.append(shapes)
-        redoStack.removeAll()
+        pushUndo(shapes)
         shapes.remove(at: idx)
         self.selectedID = nil
     }
@@ -117,8 +128,7 @@ final class EditorDocument: ObservableObject {
         if color != nil { self.color = color! }
         if let lineWidth { self.lineWidth = lineWidth }
         guard let selectedID, let idx = shapes.firstIndex(where: { $0.id == selectedID }) else { return }
-        undoStack.append(shapes)
-        redoStack.removeAll()
+        pushUndo(shapes)
         if let color { shapes[idx].color = color }
         if let lineWidth { shapes[idx].lineWidth = lineWidth }
     }
@@ -629,7 +639,10 @@ struct EditorView: View {
             }
 
         case .mosaic, .blur:
-            guard let effect = (shape.tool == .mosaic ? doc.effects.pixelated : doc.effects.blurred) else { return }
+            // 与渲染器同一套区域口径：同类效果的并集外接矩形，只铺这一块
+            let cover = EditorRenderer.unionRect(of: shape.tool, in: doc.shapes)
+            guard let effect = (shape.tool == .mosaic ? doc.effects.pixelated(covering: cover)
+                                                      : doc.effects.blurred(covering: cover)) else { return }
             var clip: Path
             if shape.points.count == 2, shape.tool == .mosaic || shape.tool == .blur {
                 // 矩形 / 椭圆语义（渲染器同款判断）
@@ -646,8 +659,7 @@ struct EditorView: View {
             // 效果等价且不会污染后续形状的绘制状态
             context.drawLayer { layer in
                 layer.clip(to: clip, style: FillStyle(eoFill: false))
-                layer.draw(Image(decorative: effect, scale: 1),
-                           in: CGRect(origin: .zero, size: doc.imageSize))
+                layer.draw(Image(decorative: effect.image, scale: 1), in: effect.rect)
             }
 
         case .measure:

@@ -335,6 +335,20 @@ final class OverlayEditorController: NSObject {
     /// 会从底下透出来，图标看着发脏。改成实心 NSView + layer 底色，
     /// 圆角不变。工具条和颜色面板必须用同一个值，别一处实心一处毛玻璃。
     static let toolbarBackgroundColor = NSColor(calibratedWhite: 0.13, alpha: 1)
+    /// 🔴 工具条容器**强制深色外观**。
+    ///
+    /// 底色是写死的深灰，但如果容器不切外观，里面的 `NSImage(systemSymbolName:)`
+    /// 模板图和 `.labelColor` 仍按系统外观解析 —— 系统是浅色时图标 / 文字全部
+    /// 渲染成黑色，压在 0.13 的深底上等于隐形（2026-11-03 用户截图反馈）。
+    /// 之前那版是毛玻璃 `.hudWindow`，材质本身就把前景衬成浅色，所以没暴露；
+    /// 换成实心 NSView 之后这个问题才浮出来。
+    ///
+    /// 切外观比逐个手写前景色更彻底：分隔线（separatorColor）、禁用态、以后
+    /// 加进来的控件都跟着对，不会漏一个。
+    static let toolbarAppearance = NSAppearance(named: .darkAqua)
+    /// 工具条文字（「文字」那个标签）的前景色：**写死的浅色**。
+    /// 底色是写死的深灰，前景就不能用 `.labelColor` 这种随外观翻转的颜色。
+    static let toolbarForegroundColor = NSColor(calibratedWhite: 0.92, alpha: 1)
     /// 「当前颜色」那颗圆点的直径：**30 的 70% = 21**。
     /// 用户 1.0.11 原话「工具条那个控制颜色的小圆按钮缩小 30%」—— 只缩这颗，
     /// 工具条别的一律不动。它只有 layer 底色、没有图片，内禀尺寸是 0，
@@ -426,6 +440,7 @@ final class OverlayEditorController: NSObject {
         // 一层材质，要实底就得换成普通 NSView + layer 底色。
         let container = NSView(frame: NSRect(origin: .zero, size: size))
         container.wantsLayer = true
+        container.appearance = Self.toolbarAppearance
         container.layer?.cornerRadius = Self.toolbarContainerCornerRadius
         container.layer?.backgroundColor = Self.toolbarBackgroundColor.cgColor
         container.addSubview(stack)
@@ -520,6 +535,7 @@ final class OverlayEditorController: NSObject {
         // 同工具条：不透明灰黑实底 + 圆角（圆角共用 toolbarContainerCornerRadius）
         let container = NSView(frame: NSRect(origin: .zero, size: size))
         container.wantsLayer = true
+        container.appearance = Self.toolbarAppearance
         container.layer?.cornerRadius = Self.toolbarContainerCornerRadius
         container.layer?.backgroundColor = Self.toolbarBackgroundColor.cgColor
         container.addSubview(stack)
@@ -630,7 +646,7 @@ final class OverlayEditorController: NSObject {
         button.layer?.cornerRadius = Self.toolbarButtonCornerRadius
         let attributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: Self.toolbarIconPointSize * 0.62, weight: .medium),
-            .foregroundColor: NSColor.labelColor,
+            .foregroundColor: Self.toolbarForegroundColor,
         ]
         button.attributedTitle = NSAttributedString(string: text, attributes: attributes)
         button.toolTip = title

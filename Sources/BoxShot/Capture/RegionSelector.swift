@@ -41,7 +41,8 @@ final class RegionSelector: NSObject {
     /// 诊断用（--wintest 伪造窗口确认时要带 displayID）
     var currentDisplayID: CGDirectDisplayID { displayID }
     /// 诊断用：等价于"用户确认后收起遮罩"（finish 是 fileprivate）
-    func finishForDiagnostics() { finish() }
+    /// 默认**保住底图**：诊断走的是"窗口已关闭"兜底路径，底图被清了就裁不出东西。
+    func finishForDiagnostics(keepBackdrop: Bool = true) { finish(keepBackdrop: keepBackdrop) }
 
     /// 放大镜设置快照（nil / enabled=false 就不抓底图、也不画）
     private var loupeConfig: Loupe.Config?
@@ -164,8 +165,19 @@ final class RegionSelector: NSObject {
         MainActor.assumeIsolated { delegate?.regionSelectorDidCancel(self) }
     }
 
-    fileprivate func finish() {
+    /// - Parameter keepBackdrop: 窗口点选那条路要**留着整屏底图** ——
+    ///   它要在 SCK 查不到窗口之后按框裁一块兜底。其余路径（拖框确认 / Esc 取消）
+    ///   一旦收起遮罩就再也用不到它了，当场放掉。
+    ///
+    ///   🔴 为什么值得单独放：底图是整屏原图（2880×1864×4 ≈ 20.5MB）。
+    ///   拖框确认之后马上要抓一张同尺寸的成图，两张会短暂叠在一起；
+    ///   取消更是彻底用不上。早点放掉能把这条路径的峰值削掉一块。
+    fileprivate func finish(keepBackdrop: Bool = false) {
         isActive = false
+        if !keepBackdrop {
+            sourceImage = nil
+            overlayView?.sourceImage = nil
+        }
         if let escMonitor { NSEvent.removeMonitor(escMonitor) }
         escMonitor = nil
         let view = overlayView
@@ -394,7 +406,7 @@ final class RegionSelector: NSObject {
                     let selectorRef = selector
                     let displayID = self.displayID
                     MainActor.assumeIsolated {
-                        selectorRef?.finish()
+                        selectorRef?.finish(keepBackdrop: true)
                         selectorRef?.delegate?.regionSelector(selectorRef!, didConfirmWindow: hit, displayID: displayID)
                     }
                 }
@@ -418,7 +430,9 @@ final class RegionSelector: NSObject {
             let selectorRef = selector
             let displayID = self.displayID
             MainActor.assumeIsolated {
-                selectorRef?.finish()
+                // 拖框确认走的是"重新抓这一块"，底图用不上了：当场放掉 20.5MB，
+                // 别让它跟紧接着的成图抓取叠在一起。
+                selectorRef?.finish(keepBackdrop: false)
                 selectorRef?.delegate?.regionSelector(selectorRef!, didConfirmRegion: rect, displayID: displayID)
             }
         }
@@ -526,7 +540,7 @@ final class RegionSelector: NSObject {
                     let selectorRef = selector
                     let displayID = self.displayID
                     MainActor.assumeIsolated {
-                        selectorRef?.finish()
+                        selectorRef?.finish(keepBackdrop: true)
                         selectorRef?.delegate?.regionSelector(selectorRef!, didConfirmWindow: win, displayID: displayID)
                     }
                 }

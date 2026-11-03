@@ -52,15 +52,19 @@ enum SelfTest {
             let steps = [137, 89, 210, 63, 174]
             var visitY = 0
             var lastFrame = page.cropping(to: CGRect(x: 0, y: 0, width: 480, height: viewH))
-            var accumulated = lastFrame
             var hint: Int?
             var foundOffsets: [Int] = []
             var failureNotes: [String] = []
+            // 生产路径用的是增量画布（只画新增行），不是 append 整幅重绘
+            let firstFrame = lastFrame
+            let stitch = ImageStitch.StitchCanvas(width: 480)
+            if let firstFrame { _ = stitch?.start(firstFrame) }
+            check("增量画布建得起来", stitch?.segments == 1)
 
             for step in steps {
                 visitY += step
                 guard let bottom = page.cropping(to: CGRect(x: 0, y: visitY, width: 480, height: viewH)),
-                      let top = lastFrame, let canvas = accumulated else {
+                      let top = lastFrame else {
                     failureNotes.append("第 \(step) 段取帧失败")
                     break
                 }
@@ -69,11 +73,10 @@ enum SelfTest {
                     break
                 }
                 foundOffsets.append(alignment.offset)
-                guard let joined = ImageStitch.append(bottom: bottom, to: canvas, offset: alignment.offset) else {
+                guard stitch?.append(bottom, offset: alignment.offset) == true else {
                     failureNotes.append("第 \(step) 段拼接失败")
                     break
                 }
-                accumulated = joined
                 lastFrame = bottom
                 hint = alignment.offset
             }
@@ -83,15 +86,61 @@ enum SelfTest {
             if !failureNotes.isEmpty { print("    ↳ \(failureNotes.joined(separator: "；"))") }
 
             let expectedHeight = visitY + viewH
-            check("拼接总高度正确（\(accumulated?.height ?? -1) vs \(expectedHeight)）",
-                  accumulated?.height == expectedHeight)
+            check("拼接总高度正确（\(stitch?.height ?? -1) vs \(expectedHeight)）",
+                  stitch?.height == expectedHeight)
 
+            let accumulated = stitch?.image()
             if let acc = accumulated,
                let expected = page.cropping(to: CGRect(x: 0, y: 0, width: 480, height: expectedHeight)) {
                 let diff = pixelMismatchRatio(acc, expected, tolerance: 3)
                 check(String(format: "拼接结果与源页面逐像素一致（坏点 %.4f%%）", diff * 100), diff < 0.001)
             } else {
                 check("拼接结果与源页面逐像素一致（取图失败）", false)
+            }
+
+            // 🔴 性能重构的正确性门：增量画布必须和"整幅重绘"的参考实现逐像素一致。
+            // 光测"跟源页面像"抓不到"少画了几行"这类错 —— 高度对、内容整体偏移一像素
+            // 也能混过去；跟参考实现对照才锁得住。
+            var reference: CGImage? = firstFrame
+            var refY = 0
+            for step in steps {
+                refY += step
+                guard let bottom = page.cropping(to: CGRect(x: 0, y: refY, width: 480, height: viewH)),
+                      let top = reference,
+                      let joined = ImageStitch.append(bottom: bottom, to: top, offset: step) else {
+                    reference = nil
+                    break
+                }
+                reference = joined
+            }
+            if let reference, let accumulated {
+                let diff = pixelMismatchRatio(reference, accumulated, tolerance: 0)
+                check(String(format: "增量画布与参考实现逐像素一致（坏点 %.4f%%）", diff * 100),
+                      diff < 0.0001)
+                check("增量画布与参考实现同高（\(reference.height) vs \(accumulated.height)）",
+                      reference.height == accumulated.height)
+            } else {
+                check("增量画布与参考实现逐像素一致（取图失败）", false)
+            }
+
+            // 扩容边界：初始容量 1024 行，上面 1173 行一定跨过一次扩容，
+            // 跨过之后早期内容不能丢、也不能错位（上面那条逐像素已经锁住，这条守尺寸）
+            check("扩容后宽度不变（480）", accumulated?.width == 480)
+
+            // 没滚动（offset = 0）时高度不能变
+            if let flat = ImageStitch.StitchCanvas(width: 480), let firstFrame, flat.start(firstFrame) {
+                _ = flat.append(firstFrame, offset: 0)
+                check("offset=0 不增加高度（\(flat.height)）", flat.height == viewH)
+            } else {
+                check("offset=0 不增加高度（建画布失败）", false)
+            }
+
+            // 超长必须拒绝，不能把画布吃到内存崩掉
+            if let capped = ImageStitch.StitchCanvas(width: 480, limit: 1100),
+               let firstFrame, capped.start(firstFrame) {
+                check("超过行数上限时拒绝追加", capped.append(firstFrame, offset: 900) == false)
+            } else {
+                check("超过行数上限时拒绝追加（建画布失败）", false)
             }
 
             // 空白画面（纯色）里任何偏移都"像"，必须判失败，否则会瞎拼
@@ -623,8 +672,59 @@ enum SelfTest {
         do {
             let base = solidImage(width: 64, height: 64, color: CGColor(srgbRed: 0.2, green: 0.6, blue: 0.9, alpha: 1))
             let effects = EffectImages(base: base)
-            check("马赛克效果图生成", effects.pixelated != nil)
-            check("模糊效果图生成", effects.blurred != nil)
+            check("马赛克效果图生成", effects.pixelated(covering: nil) != nil)
+            check("模糊效果图生成", effects.blurred(covering: nil) != nil)
+            // 只铺标注框那块：尺寸必须等于请求的区域，不能偷偷做成整幅
+            if let cropped = effects.pixelated(covering: CGRect(x: 8, y: 6, width: 20, height: 14)) {
+                check("马赛克按区域裁剪（\(cropped.image.width)×\(cropped.image.height) @ \(Int(cropped.rect.minX)),\(Int(cropped.rect.minY))）",
+                      cropped.image.width == 20 && cropped.image.height == 14
+                        && cropped.rect.minX == 8 && cropped.rect.minY == 6)
+            } else {
+                check("马赛克按区域裁剪（生成失败）", false)
+            }
+
+            // 🔴 裁剪不能改变像素：整幅效果图里对应的那块，必须和"按区域生成"的那块
+            // 逐像素相同。否则用户保存出来的马赛克跟预览不一样（块相位错位）。
+            let region = CGRect(x: 8, y: 6, width: 20, height: 14)
+            if let full = effects.pixelated(covering: nil)?.image,
+               let part = effects.pixelated(covering: region)?.image,
+               let fullPart = full.cropping(to: region) {
+                let diff = pixelMismatchRatio(fullPart, part, tolerance: 0)
+                check(String(format: "马赛克裁剪块与整幅同区域逐像素一致（坏点 %.4f%%）", diff * 100),
+                      diff < 0.0001)
+            } else {
+                check("马赛克裁剪块与整幅同区域逐像素一致（取图失败）", false)
+            }
+            if let full = effects.blurred(covering: nil)?.image,
+               let part = effects.blurred(covering: region)?.image,
+               let fullPart = full.cropping(to: region) {
+                // 高斯模糊是 GPU 浮点算的，子区域的取整会差 1 级（0…255）。
+                // 1 级不可见，2 级以上才是真错了。
+                let diff = pixelMismatchRatio(fullPart, part, tolerance: 1)
+                check(String(format: "模糊裁剪块与整幅同区域一致（差 >1 级的像素 %.4f%%）", diff * 100),
+                      diff < 0.0001)
+            } else {
+                check("模糊裁剪块与整幅同区域一致（取图失败）", false)
+            }
+
+            // 🔴 方向门：纯色图测不出上下翻转（翻过来还是同一个颜色）。
+            // 用「上黑下白」的渐变图，取**靠上**那块做马赛克 —— 结果必须是暗的。
+            // 取子区域时要翻一次 y（标注左上原点 ↔ CI 左下原点），翻错就是
+            // "位置看着对、拿的是另一块"，这种错只有带方向信息的图能钉住。
+            if let gradient = gradientImage(width: 40, height: 40) {
+                let gradientEffects = EffectImages(base: gradient)
+                if let top = gradientEffects.pixelated(covering: CGRect(x: 0, y: 0, width: 40, height: 10))?.image,
+                   let bottom = gradientEffects.pixelated(covering: CGRect(x: 0, y: 30, width: 40, height: 10))?.image,
+                   let topBytes = pixelBytes(top), let bottomBytes = pixelBytes(bottom) {
+                    let topLuma = Int(topBytes[1]), bottomLuma = Int(bottomBytes[1])
+                    check("马赛克取的是同一 y 侧（上块 \(topLuma) 暗、下块 \(bottomLuma) 亮）",
+                          topLuma + 40 < bottomLuma)
+                } else {
+                    check("马赛克取的是同一 y 侧（取图失败）", false)
+                }
+            } else {
+                check("马赛克取的是同一 y 侧（造图失败）", false)
+            }
 
             // 取色读数
             let doc = EditorDocument(image: base)
@@ -759,6 +859,50 @@ enum SelfTest {
             check("删除可撤销", doc.canUndo)
             doc.undo()
             check("撤销删除恢复形状", doc.shapes.count == 1)
+
+            // ── 撤销栈上限（1.0.21）：编辑一小时不能无限往上爬 ──
+            // 连做 undoLimit + 20 次改动，栈里最多留 undoLimit 步；
+            // 并且"最近的 N 步"必须还在（截断只能砍最老的，不能砍新的）。
+            let countBefore = doc.shapes.count
+            for i in 0..<(EditorDocument.undoLimit + 20) {
+                var dot = AnnotationShape(tool: .pen, points: [CGPoint(x: CGFloat(i), y: 0)], color: .red, lineWidth: 2)
+                dot.points.append(CGPoint(x: CGFloat(i), y: 1))
+                doc.commit(dot)
+            }
+            var undoSteps = 0
+            while doc.canUndo { doc.undo(); undoSteps += 1 }
+            check("撤销栈最多留 \(EditorDocument.undoLimit) 步（实际 \(undoSteps)）",
+                  undoSteps <= EditorDocument.undoLimit)
+            check("撤销到底回到最早的可见状态（形状数 \(doc.shapes.count) ≥ \(countBefore)）",
+                  doc.shapes.count >= countBefore)
+        }
+
+        // ── 图片编码（1.0.21：改走 CGImageDestination，省一次全图拷贝）──
+        // 编码路径换了，产出的字节必须还是"能被解码回同一张图"的 PNG/JPEG。
+        if let sample = solidImage(width: 40, height: 24, color: CGColor(gray: 0.4, alpha: 1)) as CGImage? {
+            if let png = ImageEncode.data(sample, format: .png, jpgQuality: 1.0),
+               let source = CGImageSourceCreateWithData(png as CFData, nil),
+               let back = CGImageSourceCreateImageAtIndex(source, 0, nil) {
+                check("PNG 编码后可解码且尺寸一致（\(back.width)×\(back.height)）",
+                      back.width == 40 && back.height == 24)
+                check(String(format: "PNG 往返逐像素一致（坏点 %.4f%%）",
+                             pixelMismatchRatio(sample, back, tolerance: 0) * 100),
+                      pixelMismatchRatio(sample, back, tolerance: 0) < 0.0001)
+            } else {
+                check("PNG 编码后可解码且尺寸一致（编码失败）", false)
+            }
+            if let jpg = ImageEncode.data(sample, format: .jpg, jpgQuality: 0.8),
+               let source = CGImageSourceCreateWithData(jpg as CFData, nil),
+               let back = CGImageSourceCreateImageAtIndex(source, 0, nil) {
+                check("JPEG 编码后可解码且尺寸一致（\(back.width)×\(back.height)）",
+                      back.width == 40 && back.height == 24)
+            } else {
+                check("JPEG 编码后可解码且尺寸一致（编码失败）", false)
+            }
+            check("未知格式不会抛错（PNG 数据非空）",
+                  (ImageEncode.data(sample, format: .png, jpgQuality: 1.0)?.isEmpty == false))
+        } else {
+            check("图片编码用例的样图造不出来", false)
         }
 
         // ── 箭头几何（1.0.12：用户说"箭头不够尖"）──
@@ -1216,6 +1360,23 @@ enum SelfTest {
         guard let data = ctx.data else { return nil }
         let ptr = data.bindMemory(to: UInt8.self, capacity: w * h * 4)
         return Array(UnsafeBufferPointer(start: ptr, count: w * h * 4))
+    }
+
+    /// 上黑下白的竖向渐变。用来验"取子区域时 y 翻对了" —— 纯色图翻不翻都一样，
+    /// 测不出方向错误（这正是本项目反复踩的那类坑）。
+    private static func gradientImage(width: Int, height: Int) -> CGImage? {
+        guard let ctx = CGContext(data: nil, width: width, height: height,
+                                  bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue) else { return nil }
+        // CG 左下原点：y=0 是底部 → 底部白、顶部黑
+        let colors = [CGColor(red: 1, green: 1, blue: 1, alpha: 1),
+                      CGColor(red: 0, green: 0, blue: 0, alpha: 1)] as CFArray
+        guard let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(),
+                                        colors: colors, locations: [0, 1]) else { return nil }
+        ctx.drawLinearGradient(gradient, start: CGPoint(x: 0, y: 0),
+                               end: CGPoint(x: 0, y: CGFloat(height)), options: [])
+        return ctx.makeImage()
     }
 
     private static func solidImage(width: Int, height: Int, color: CGColor) -> CGImage {

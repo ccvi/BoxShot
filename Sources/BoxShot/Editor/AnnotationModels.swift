@@ -2,6 +2,7 @@ import AppKit
 import CoreGraphics
 import CoreImage
 import Foundation
+import ImageIO
 
 // ============================================================
 // 标注模型与合成渲染
@@ -281,9 +282,17 @@ struct BeautifyOptions: Equatable {
 // ── 效果图缓存 ───────────────────────────────────────────────
 
 final class EffectImages {
+
+    /// 一块裁剪过的效果图。`rect` 是它在**底图像素坐标（左上原点）**里的位置 ——
+    /// 画的时候必须知道它从哪儿来，否则整块会贴到左上角。
+    struct Cropped {
+        let image: CGImage
+        let rect: CGRect
+    }
+
     let base: CGImage
-    private var pixelatedCache: CGImage?
-    private var blurredCache: CGImage?
+    private var pixelatedCache: (rect: CGRect, image: CGImage)?
+    private var blurredCache: (rect: CGRect, image: CGImage)?
 
     /// 全应用共用一个。以前每次出效果图都 `CIContext(options:)` 新建一个 ——
     /// 创建是几十毫秒级 + 分配一整套 GPU 资源，第一次上马赛克/模糊
@@ -294,37 +303,65 @@ final class EffectImages {
         self.base = base
     }
 
-    /// 马赛克：CIPixellate，块大小随图像尺寸走
-    var pixelated: CGImage? {
-        if let hit = pixelatedCache { return hit }
-        let made = Self.applyFilter(base, filterName: "CIPixellate") { filter, extent in
-            filter.setValue(max(10, Int(min(extent.width, extent.height) / 60)), forKey: "inputScale")
+    private var fullRect: CGRect {
+        CGRect(x: 0, y: 0, width: base.width, height: base.height)
+    }
+
+    /// 马赛克：CIPixellate，块大小随**整幅**尺寸走。
+    ///
+    /// 🔴 按 `rect`（所有马赛克标注的并集外接矩形）只铺设这一块。
+    /// 以前不管用户涂多小一块，都生成一张整幅效果图 —— 整屏截图 2880×1864
+    /// 就是 20.5MB，马赛克 + 模糊两张 41MB，还一直挂到编辑器关闭。
+    /// 现在滤镜仍在整幅 CIImage 上算（块大小的基准不能变），但只把这块
+    /// 光栅化出来，像素上与原做法完全一致。
+    func pixelated(covering rect: CGRect? = nil) -> Cropped? {
+        let region = clamped(rect)
+        if let hit = pixelatedCache, hit.rect == region {
+            return Cropped(image: hit.image, rect: region)
         }
-        pixelatedCache = made
-        return made
+        let extent = fullRect
+        guard let filter = CIFilter(name: "CIPixellate") else { return nil }
+        filter.setValue(CIImage(cgImage: base), forKey: kCIInputImageKey)
+        filter.setValue(max(10, Int(min(extent.width, extent.height) / 60)), forKey: "inputScale")
+        guard let output = filter.outputImage?.cropped(to: extent),
+              let image = Self.ciContext.createCGImage(output, from: Self.ciRect(region, in: base)) else {
+            return nil
+        }
+        pixelatedCache = (region, image)
+        return Cropped(image: image, rect: region)
     }
 
     /// 模糊：CIGaussianBlur + 裁回原边界（模糊会把边缘糊出去）
-    var blurred: CGImage? {
-        if let hit = blurredCache { return hit }
-        let extent = CGRect(x: 0, y: 0, width: base.width, height: base.height)
-        let ciBase = CIImage(cgImage: base)
+    func blurred(covering rect: CGRect? = nil) -> Cropped? {
+        let region = clamped(rect)
+        if let hit = blurredCache, hit.rect == region {
+            return Cropped(image: hit.image, rect: region)
+        }
+        let extent = fullRect
         guard let filter = CIFilter(name: "CIGaussianBlur") else { return nil }
-        filter.setValue(ciBase, forKey: kCIInputImageKey)
+        filter.setValue(CIImage(cgImage: base), forKey: kCIInputImageKey)
         filter.setValue(10.0, forKey: kCIInputRadiusKey)
-        guard let output = filter.outputImage?.cropped(to: extent) else { return nil }
-        blurredCache = Self.ciContext.createCGImage(output, from: extent)
-        return blurredCache
+        guard let output = filter.outputImage?.cropped(to: extent),
+              let image = Self.ciContext.createCGImage(output, from: Self.ciRect(region, in: base)) else {
+            return nil
+        }
+        blurredCache = (region, image)
+        return Cropped(image: image, rect: region)
     }
 
-    private static func applyFilter(_ image: CGImage, filterName: String,
-                                    configure: (CIFilter, CGRect) -> Void) -> CGImage? {
-        let extent = CGRect(x: 0, y: 0, width: image.width, height: image.height)
-        guard let filter = CIFilter(name: filterName) else { return nil }
-        filter.setValue(CIImage(cgImage: image), forKey: kCIInputImageKey)
-        configure(filter, extent)
-        guard let output = filter.outputImage?.cropped(to: extent) else { return nil }
-        return ciContext.createCGImage(output, from: extent)
+    /// 标注坐标是"左上原点"，CI 的 extent 是"左下原点" —— 取子区域时必须翻一次 y，
+    /// 少翻就是"位置对、内容是另一块"（本项目的老坑，见 CGImage.cropping）。
+    private static func ciRect(_ topLeft: CGRect, in base: CGImage) -> CGRect {
+        CGRect(x: topLeft.minX, y: CGFloat(base.height) - topLeft.maxY,
+               width: topLeft.width, height: topLeft.height)
+    }
+
+    /// 夹进底图范围内，并且取整（子像素区域会让 CGImage 尺寸对不上）
+    private func clamped(_ rect: CGRect?) -> CGRect {
+        guard let rect, !rect.isNull, rect.width > 0, rect.height > 0 else { return fullRect }
+        let inside = rect.integral.intersection(fullRect)
+        guard !inside.isNull, inside.width >= 1, inside.height >= 1 else { return fullRect }
+        return inside
     }
 }
 
@@ -416,10 +453,40 @@ enum EditorRenderer {
     /// 删掉中间一步后剩下的自动重排，不需要"重置序号"按钮。
     static func drawShapes(_ shapes: [AnnotationShape], in ctx: CGContext,
                            effects: EffectImages, canvasHeight: CGFloat) {
+        // 同类效果只生成一块：所有该效果标注的**并集外接矩形**。
+        // 两处马赛克隔得远会多算中间那段空白，但比"每个标注各生成一份"省得多，
+        // 也比"整幅生成"省 —— 用户通常只涂屏幕的一小块。
+        let mosaicRect = unionRect(of: .mosaic, in: shapes)
+        let blurRect = unionRect(of: .blur, in: shapes)
         for shape in shapes {
+            let effectRect: CGRect?
+            switch shape.tool {
+            case .mosaic: effectRect = mosaicRect
+            case .blur:   effectRect = blurRect
+            default:      effectRect = nil
+            }
             draw(shape: shape, in: ctx, effects: effects, canvasHeight: canvasHeight,
+                 effectRect: effectRect,
                  stepNumber: shape.tool == .step ? stepNumber(of: shape, in: shapes) : 0)
         }
+    }
+
+    /// 马赛克 / 模糊的生效矩形：取拖拽的首尾两点围成的框（左上原点，图像像素）
+    static func shapeRect(_ shape: AnnotationShape) -> CGRect? {
+        guard shape.points.count >= 2,
+              let a = shape.points.first, let b = shape.points.last else { return nil }
+        return rect(from: a, to: b)
+    }
+
+    /// 某类标注的并集外接矩形（左上原点，图像像素）。渲染和 SwiftUI 预览共用，
+    /// 两边算出来的区域必须是同一块，不然预览和存下来的图会不一样。
+    static func unionRect(of tool: EditorTool, in shapes: [AnnotationShape]) -> CGRect? {
+        var result: CGRect?
+        for shape in shapes where shape.tool == tool {
+            guard let box = shapeRect(shape) else { continue }
+            result = result.map { $0.union(box) } ?? box
+        }
+        return result
     }
 
     // ── 步骤标注几何（渲染与自检共用） ──
@@ -453,7 +520,7 @@ enum EditorRenderer {
     }
 
     private static func draw(shape: AnnotationShape, in ctx: CGContext, effects: EffectImages,
-                             canvasHeight: CGFloat, stepNumber: Int = 0) {
+                             canvasHeight: CGFloat, effectRect: CGRect? = nil, stepNumber: Int = 0) {
         let color = shape.color
         let width = max(1, shape.lineWidth)
 
@@ -550,19 +617,24 @@ enum EditorRenderer {
                      canvasHeight: canvasHeight, in: ctx)
 
         case .mosaic, .blur:
-            guard let effect = (shape.tool == .mosaic ? effects.pixelated : effects.blurred),
-                  let a = shape.points.first, let b = shape.points.last else { return }
+            guard let shapeRect = Self.shapeRect(shape),
+                  let effect = (shape.tool == .mosaic ? effects.pixelated(covering: effectRect)
+                                                      : effects.blurred(covering: effectRect)) else { return }
             ctx.saveGState()
             // 两点语义 = 拖拽起止点围成的矩形区域。
             // 🔴 不能用直线路径 clip：直线是零面积的，裁剪后什么都画不出来
             //（1.0.1"画了马赛克但看不见"的根因）。
-            ctx.addPath(CGPath(rect: rect(from: a, to: b), transform: nil))
+            ctx.addPath(CGPath(rect: shapeRect, transform: nil))
             ctx.clip()
             // 效果图与底图同理：翻转空间里直接 draw 会上下颠倒，
             // 临时还原标准空间再画（clip 已记录在设备空间，不受影响）。
+            // 标准空间是左下原点，所以裁剪块的位置要再翻一次 y。
             ctx.translateBy(x: 0, y: canvasHeight)
             ctx.scaleBy(x: 1, y: -1)
-            ctx.draw(effect, in: CGRect(x: 0, y: 0, width: effects.base.width, height: effects.base.height))
+            ctx.draw(effect.image, in: CGRect(x: effect.rect.minX,
+                                              y: canvasHeight - effect.rect.maxY,
+                                              width: effect.rect.width,
+                                              height: effect.rect.height))
             ctx.restoreGState()
 
         case .measure:
@@ -697,14 +769,26 @@ enum EditorRenderer {
 // ── 图像编码 ─────────────────────────────────────────────────
 
 enum ImageEncode {
+
+    /// 🔴 不走 `NSBitmapImageRep`。
+    ///
+    /// `NSBitmapImageRep(cgImage:)` 会先把整幅图**拷一份**进自己的位图缓冲
+    /// （整屏 2880×1864 就是 20.5MB），编码完才释放。`CGImageDestination` 直接把
+    /// CGImage 交给 ImageIO 编码，中间不再多一份全图 —— 保存大图时的峰值几乎减半。
+    ///
+    /// 用 "public.png" / "public.jpeg" 这两个 UTI 字符串，省得为一个常量引入
+    /// UniformTypeIdentifiers；两者都是稳定的系统 UTI。
     static func data(_ image: CGImage, format: ShotFormat, jpgQuality: Double) -> Data? {
-        let rep = NSBitmapImageRep(cgImage: image)
-        switch format {
-        case .png:
-            return rep.representation(using: .png, properties: [:])
-        case .jpg:
-            return rep.representation(using: .jpeg,
-                                      properties: [.compressionFactor: max(0.1, min(1, jpgQuality))])
+        let uti = (format == .png) ? "public.png" : "public.jpeg"
+        let buffer = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(
+            buffer as CFMutableData, uti as CFString, 1, nil) else { return nil }
+        var properties: [CFString: Any] = [:]
+        if format == .jpg {
+            properties[kCGImageDestinationLossyCompressionQuality] = max(0.1, min(1, jpgQuality))
         }
+        CGImageDestinationAddImage(destination, image, properties as CFDictionary)
+        guard CGImageDestinationFinalize(destination) else { return nil }
+        return buffer as Data
     }
 }
