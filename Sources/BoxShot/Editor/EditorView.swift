@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 
+
 // ============================================================
 // 编辑器文档：底图 + 标注 + 撤销栈
 // ============================================================
@@ -58,6 +59,28 @@ final class EditorDocument: ObservableObject {
     /// 单份通常几 KB，但编辑一小时、反复改颜色粗细能到几百步 —— 没有上限就是
     /// 一条悄悄往上爬的曲线。50 步够用（再往回也没人记得清）。
     static let undoLimit = 50
+
+    /// 6 档字号（**点**）—— 直接引用截图浮层那一份，别在这里另抄一个数组。
+    ///
+    /// 用户 1.0.27 一眼看出「编辑工具的输入文字功能跟截图工具条的输入文字功能
+    /// 不一致」：其中一条就是编辑窗口**没有字号控件**，落字时还写死 `(22, 30)`。
+    /// 档位必须同源，`--selftest` 里有断言盯着两边是不是同一个数组。
+    static let fontSizeOptions: [CGFloat] = OverlayEditorController.fontSizeOptions
+
+    /// 字号换算：下拉给的是**视图点**，形状里存的是**图像像素**。
+    ///
+    /// `fitScale` = 视图点 / 图像像素（显示缩放），所以 像素 = 点 ÷ fitScale。
+    /// 2x 屏（fitScale 0.5）下 30pt → 60px，跟浮层 `doc.fontSize * pixelScale`
+    /// 完全同一个口径 —— 两边算出来的字号必须能互相看懂，否则"同一张图在两个地方
+    /// 编辑，字大小不一样"。下限 9 是渲染器的字号下限（见 AnnotationModels）。
+    static func pixelFontSize(points: CGFloat, fitScale: CGFloat) -> CGFloat {
+        max(9, points / max(fitScale, 0.05))
+    }
+
+    /// 反向：图像像素 → 视图点（下拉要显示"现在是多少 pt"）
+    static func pointFontSize(pixels: CGFloat, fitScale: CGFloat) -> CGFloat {
+        max(9, pixels * max(fitScale, 0.05))
+    }
 
     /// 压撤销点：统一从这里走，别各处 `undoStack.append` —— 那样迟早有人漏了截断。
     private func pushUndo(_ snapshot: [AnnotationShape]) {
@@ -238,7 +261,15 @@ struct EditorView: View {
     @State private var fitScale: CGFloat = 1
     @State private var draft: AnnotationShape?
     @State private var draftStart: CGPoint?
-    @State private var editingText: (point: CGPoint, text: String)?
+    /// 正在输入的文字形状 id（值类型快照从 doc.shapes 里取，见 `editingShape`）
+    ///
+    /// 🔴 1.0.27 改的：以前是 `(point, text)` 元组 —— 文字只活在视图状态里，
+    /// 画布上根本没有这个字，所以"边打边看到最终效果"根本做不到，用户只能盯着
+    /// 一个 240pt 的圆角小框。现在跟浮层一样：先把空文字挂进 shapes（不压撤销点），
+    /// 边打边 `setLiveText`，确认时才 `commitEdit` 压一个点。
+    @State private var editingID: UUID?
+    /// 开始编辑前的 shapes 快照（取消时回滚 / 确认时压成撤销点）
+    @State private var editSnapshot: [AnnotationShape]?
     @State private var statusMessage: String = ""
     /// 选择工具拖动中的上一次像素坐标
     @State private var selectDragLast: CGPoint?
@@ -447,18 +478,9 @@ struct EditorView: View {
                 }
                 .frame(width: displaySize.width, height: displaySize.height)
 
-                // 文字输入浮层
-                if let editing = editingText {
-                    TextField("输入文字，回车确认", text: Binding(
-                        get: { editingText?.text ?? "" },
-                        set: { editingText?.text = $0 }
-                    ))
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 15))
-                    .frame(width: 240)
-                    .position(x: min(editing.point.x * fitScale + 120, displaySize.width - 120),
-                              y: min(editing.point.y * fitScale + 18, displaySize.height - 20))
-                    .onSubmit { commitEditingText() }
+                // 文字输入：就地铺一个 NSTextView（跟截图浮层同一套），不是 TextField
+                if let shape = editingShape {
+                    textEditorOverlay(for: shape)
                 }
             }
             // 手势直接挂在画布容器上：坐标就是画布局部坐标（点），
@@ -488,6 +510,8 @@ struct EditorView: View {
         DragGesture(minimumDistance: 1)
             .onChanged { value in
                 guard doc.imageSize.width > 0 else { return }
+                // 开始在画布上画别的东西 = 这段文字写完了，先落盘
+                if editingID != nil { commitEditingText() }
                 let pad = doc.beautify?.padding ?? 0
                 let p = clampToImage(CGPoint(x: value.location.x / fitScale - pad,
                                              y: value.location.y / fitScale - pad))
@@ -552,12 +576,15 @@ struct EditorView: View {
     }
 
     private func handleTap(_ p: CGPoint) {
+        // 点别处先把正在打的字落盘：不然换工具 / 换颜色之后那行字停在草稿里，
+        // 画布上看不见（它只在 shapes 里"半挂"着），用户会以为白打了。
+        commitEditingText()
         switch doc.tool {
         case .select:
             doc.select(at: p)
         case .text:
             doc.selectedID = nil
-            editingText = (p, "")
+            beginTextEditing(at: p)
         case .colorPick:
             doc.selectedID = nil
             if let color = doc.pixelColor(at: p) {
@@ -580,17 +607,79 @@ struct EditorView: View {
         }
     }
 
+    /// 正在编辑的那条文字（值快照；doc.shapes 一变这里就跟着新，输入框尺寸也随之长）
+    private var editingShape: AnnotationShape? {
+        guard let editingID else { return nil }
+        return doc.shapes.first { $0.id == editingID }
+    }
+
+    /// 开一段新文字：先把它挂进 shapes（**不压撤销点**），边打边看。
+    /// 字号 = 下拉的**点** ÷ fitScale → 图像像素；以前这里写死 30 像素，
+    /// 在大图上小得像颗芝麻，也是"跟浮层不一致"的一部分。
+    private func beginTextEditing(at p: CGPoint) {
+        let snapshot = doc.shapes
+        let shape = AnnotationShape(tool: .text, points: [p], color: doc.color, lineWidth: 0,
+                                    text: "",
+                                    fontSize: EditorDocument.pixelFontSize(points: doc.fontSize,
+                                                                           fitScale: fitScale))
+        doc.shapes.append(shape)
+        editSnapshot = snapshot
+        editingID = shape.id
+        doc.selectedID = shape.id
+    }
+
     private func commitEditingText() {
-        guard let editing = editingText, !editing.text.isEmpty else {
-            editingText = nil
+        guard let id = editingID else { return }
+        let snapshot = editSnapshot
+        editingID = nil
+        editSnapshot = nil
+        defer { doc.selectedID = nil }
+        guard let idx = doc.shapes.firstIndex(where: { $0.id == id }) else { return }
+        let trimmed = doc.shapes[idx].text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            // 点一下什么都没输 = 什么都没发生：连空框一起撤掉
+            doc.shapes.remove(at: idx)
+        } else {
+            doc.shapes[idx].text = trimmed
+        }
+        // 整段编辑只压一个撤销点；一个字都没改（含"空框被删回原样"）就不压
+        if let snapshot { doc.commitEdit(from: snapshot) }
+    }
+
+    /// 取消（Esc）：回到开始编辑前的样子
+    private func cancelEditingText() {
+        guard let snapshot = editSnapshot else {
+            editingID = nil
             return
         }
-        let shape = AnnotationShape(tool: .text, points: [editing.point],
-                                    color: doc.color, lineWidth: 0,
-                                    text: editing.text,
-                                    fontSize: max(22, 30))
-        doc.commit(shape)
-        editingText = nil
+        editingID = nil
+        editSnapshot = nil
+        doc.rollback(to: snapshot)
+        doc.selectedID = nil
+    }
+
+    /// 画布上的输入框：位置与字号全按**渲染器算出来的框**走（同一套 `displayBounds`），
+    /// 这样打出来的字跟最终成图在同一处、同样大 —— 这就是"跟截图工具条一致"的含义。
+    @ViewBuilder
+    private func textEditorOverlay(for shape: AnnotationShape) -> some View {
+        let pad = doc.beautify?.padding ?? 0
+        let box = shape.displayBounds ?? CGRect(origin: shape.points.first ?? .zero,
+                                               size: CGSize(width: 40, height: shape.fontSize))
+        // 空文字时渲染框只有 40 像素宽，换算成点放不下光标 → 给下限
+        let width = max(80, box.width * fitScale + 6)
+        let height = max(22, max(shape.fontSize, 20) * fitScale * 1.35)
+        let originX = (box.minX + pad) * fitScale
+        let originY = (box.minY + pad) * fitScale
+        CanvasTextEditor(
+            text: Binding(get: { editingShape?.text ?? "" },
+                          set: { doc.setLiveText($0, for: shape.id) }),
+            fontSize: EditorDocument.pointFontSize(pixels: shape.fontSize, fitScale: fitScale),
+            color: shape.color.nsColor,
+            onCommit: { commitEditingText() },
+            onCancel: { cancelEditingText() }
+        )
+        .frame(width: width, height: height)
+        .position(x: originX + width / 2, y: originY + height / 2)
     }
 
     // ── 坐标换算 ──
@@ -755,6 +844,8 @@ struct EditorView: View {
             HStack(spacing: 2) {
                 ForEach(EditorTool.allCases) { tool in
                     Button {
+                        // 换工具前先把正在打的字落盘，不然它停在"半挂"状态
+                        commitEditingText()
                         doc.tool = tool
                     } label: {
                         Group {
@@ -809,9 +900,15 @@ struct EditorView: View {
                     .frame(width: 46, height: 22)
             }
 
-            // 粗细
-            Slider(value: $doc.lineWidth, in: 2...24, step: 1)
-                .frame(width: 90)
+            // 文字上下文给字号，其它工具给粗细。
+            // 🔴 字看不看得见全靠字号，而粗细**不参与**文字渲染（渲染器只用 fontSize），
+            // 两个都摆出来既没用也放不下 —— 1080 宽的窗口里工具条已经排满了。
+            if doc.tool == .text || doc.selectedShape?.tool == .text {
+                fontSizeMenu
+            } else {
+                Slider(value: $doc.lineWidth, in: 2...24, step: 1)
+                    .frame(width: 90)
+            }
 
             Divider().frame(height: 22)
 
@@ -860,6 +957,171 @@ struct EditorView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
+    }
+
+    // ── 字号（与截图浮层同一份 6 档）────────────────────────
+
+    private var fontSizeMenu: some View {
+        Menu {
+            ForEach(Array(EditorDocument.fontSizeOptions.enumerated()), id: \.offset) { _, points in
+                Button {
+                    setFontSize(points)
+                } label: {
+                    Text("\(Int(points)) pt")
+                }
+            }
+        } label: {
+            Text("\(Int(currentFontSizePoints.rounded())) pt")
+                .font(.system(size: 11, weight: .medium))
+                .monospacedDigit()
+                .frame(width: 40, alignment: .leading)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("字号（只作用于文字）：20 / 24 / 30 / 40 / 52 / 68 pt")
+    }
+
+    /// 下拉该显示哪一档：正在输入 / 选中文字 → 看**那条文字**；否则看默认值。
+    /// 浮层那边是同一套口径（`OverlayEditorController.currentFontSizeIndex`）。
+    private var currentFontSizePoints: CGFloat {
+        if let shape = editingShape ?? doc.selectedShape, shape.tool == .text, shape.fontSize > 0 {
+            return EditorDocument.pointFontSize(pixels: shape.fontSize, fitScale: fitScale)
+        }
+        return doc.fontSize
+    }
+
+    /// 改字号（点）。三条路跟浮层一样：
+    /// 正在输入 → 实时改（不压撤销点）；选中文字 → 改它并记住默认值；否则只改默认值。
+    private func setFontSize(_ points: CGFloat) {
+        doc.fontSize = points
+        let pixels = EditorDocument.pixelFontSize(points: points, fitScale: fitScale)
+        if let id = editingID, let idx = doc.shapes.firstIndex(where: { $0.id == id }) {
+            doc.shapes[idx].fontSize = pixels
+        } else {
+            doc.applyToSelected(fontSize: pixels)
+        }
+    }
+}
+
+// ============================================================
+// 画布上的文字输入框
+// ============================================================
+
+/// 编辑器里的"输入文字"—— **跟截图浮层用同一种东西：NSTextView**。
+///
+/// 用户 1.0.27 口径：「编辑工具的输入文字功能跟截图工具条的输入文字功能不一致」。
+/// 编辑器这边原来是一个 240pt 宽的 `TextField("输入文字，回车确认")`：圆角边框、
+/// 15pt 固定字号、跟画布上的字毫无关系，看着就是两个功能。浮层那边是"点一下就地
+/// 出现、字号颜色跟最终渲染一模一样、边打边看"。
+///
+/// 所以这里照抄浮层那套配置（`OverlayEditorView.beginTextEditing`）：透明背景、
+/// 无边框、`systemFont(medium)`、关掉全部智能替换 —— 截图里写的 `--flag`、`a"b`、
+/// `it's` 都必须原样进图，被换成弯引号/破折号就不是用户打的那句话。
+///
+/// 交互也照抄：⏎ / Tab = 确认，Esc = 取消。🔴 Esc 走 `cancelOperation:`，
+/// **不要**在 keyCode 里判 53 —— 输入法组字过程中的 Esc 是"取消候选"，
+/// 抢掉会把用户正在打的拼音弄丢。
+struct CanvasTextEditor: NSViewRepresentable {
+
+    @Binding var text: String
+    /// 字号（**视图点**，调用方已经换算过）
+    var fontSize: CGFloat
+    var color: NSColor
+    var onCommit: () -> Void
+    var onCancel: () -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeNSView(context: Context) -> NSTextView {
+        let view = AutoFocusTextView(frame: .zero)
+        view.delegate = context.coordinator
+        view.drawsBackground = false
+        view.isRichText = false
+        view.isEditable = true
+        view.isSelectable = true
+        view.allowsUndo = true
+        view.textContainerInset = .zero
+        view.textContainer?.lineFragmentPadding = 0
+        view.textContainer?.widthTracksTextView = false
+        // 宽度不设限：打完一行不期望它自动换行（⏎ 是"确认"，不是换行）
+        view.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
+                                                   height: CGFloat.greatestFiniteMagnitude)
+        view.isAutomaticQuoteSubstitutionEnabled = false
+        view.isAutomaticDashSubstitutionEnabled = false
+        view.isAutomaticTextReplacementEnabled = false
+        view.isAutomaticSpellingCorrectionEnabled = false
+        view.isContinuousSpellCheckingEnabled = false
+        view.isGrammarCheckingEnabled = false
+        view.smartInsertDeleteEnabled = false
+        view.string = text
+        apply(fontSize: fontSize, color: color, to: view)
+        return view
+    }
+
+    func updateNSView(_ view: NSTextView, context: Context) {
+        context.coordinator.parent = self
+        // 🔴 只在真不一样时回写：文本变化本来就是 NSTextView 自己发出来的，
+        // 无条件 set 会把正在组字的输入法打断（中文打一半被清空）。
+        if view.string != text { view.string = text }
+        apply(fontSize: fontSize, color: color, to: view)
+    }
+
+    private func apply(fontSize: CGFloat, color: NSColor, to view: NSTextView) {
+        let font = NSFont.systemFont(ofSize: max(9, fontSize), weight: .medium)
+        if view.font != font { view.font = font }
+        if view.textColor != color {
+            view.textColor = color
+            // 光标也得跟着走，深色底图上默认黑光标看不见
+            view.insertionPointColor = color
+        }
+    }
+
+    /// 进窗口就抢焦点。
+    ///
+    /// 🔴 别在 `makeNSView` 里 `DispatchQueue.main.async { view.window?… }` 了：
+    /// NSViewRepresentable 刚造出来的这一拍，view 还没挂进 window（`window` 是 nil，
+    /// `makeFirstResponder` 静默失败）。1.0.27 第一次实测就是这样 —— 点完画布打字
+    /// 一个字都进不去，画布上只留一个空选中框，看着像"文字工具坏了"。
+    /// `viewDidMoveToWindow` 才是唯一能确定"已经挂上去了"的时机。
+    final class AutoFocusTextView: NSTextView {
+        private var didAutoFocus = false
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard !didAutoFocus, let window else { return }
+            didAutoFocus = true
+            // 这一拍 SwiftUI 可能还在往 window 上挂 hosting 层，下一轮再抢更稳
+            DispatchQueue.main.async { [weak self, weak window] in
+                guard let self, let window, self.window === window else { return }
+                window.makeFirstResponder(self)
+            }
+        }
+    }
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: CanvasTextEditor
+        init(_ parent: CanvasTextEditor) { self.parent = parent }
+
+        func textDidChange(_ notification: Notification) {
+            guard let view = notification.object as? NSTextView else { return }
+            parent.text = view.string
+        }
+
+        func textView(_ textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+            switch selector {
+            case #selector(NSResponder.insertNewline(_:)):
+                parent.onCommit()
+                return true
+            case #selector(NSResponder.insertTab(_:)):
+                // Tab 也当确认：这个临时输入框没有"下一个焦点"可去
+                parent.onCommit()
+                return true
+            case #selector(NSResponder.cancelOperation(_:)):
+                parent.onCancel()
+                return true
+            default:
+                return false
+            }
+        }
     }
 }
 

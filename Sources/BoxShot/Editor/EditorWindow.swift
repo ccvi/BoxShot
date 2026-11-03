@@ -43,7 +43,9 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
         let displayW = CGFloat(image.width) * scale
         let displayH = CGFloat(image.height) * scale
         let toolbarHeight: CGFloat = 62
-        let contentSize = NSSize(width: max(520, displayW),
+        // 最小宽度 640：工具条本身就占 ~1100pt（13 个工具 + 6 色 + 取色器 + 粗细/字号
+        // + 撤销 + 输出组），520 会把「文字工具 + 字号下拉」那一排压到互相挤。
+        let contentSize = NSSize(width: max(640, displayW),
                                  height: displayH + toolbarHeight)
         window.setContentSize(contentSize)
         window.center()
@@ -135,6 +137,10 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
         escMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, let window = self.window, event.window === window else { return event }
             if event.keyCode == 53 {
+                // 🔴 正在输入文字时 Esc 是"取消这段文字"，不是"关窗口"。
+                // 文本视图自己会处理 cancelOperation:（并回调 Viewer 的取消），
+                // 这里放行就对了 —— 抢掉的话用户打一半按 Esc 整个窗口就没了。
+                if window.firstResponder is NSTextView { return event }
                 window.performClose(nil)
                 return nil
             }

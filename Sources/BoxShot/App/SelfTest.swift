@@ -544,6 +544,26 @@ enum SelfTest {
                     && OverlayEditorController.fontSizeIndex(for: 400) == options.count - 1)
         }
 
+        // ── 编辑窗口与截图浮层的字号同源（1.0.27 用户口径「两个文字功能不一致」）──
+        // 用户原话是"编辑工具的输入文字功能跟截图工具条的输入文字功能不一致，
+        // 也没有调整文字大小的功能"。档位和换算一旦各写一份，下次改一边就又不一致了。
+        do {
+            check("编辑窗口与浮层共用同一份字号档位",
+                  EditorDocument.fontSizeOptions == OverlayEditorController.fontSizeOptions)
+            // 2x 屏（fitScale 0.5）下 30pt 必须落成 60px —— 跟浮层
+            // `doc.fontSize * pixelScale` 是同一个口径，同一张图在两处编辑字号才对得上
+            check("字号 30pt @0.5 → 60px",
+                  EditorDocument.pixelFontSize(points: 30, fitScale: 0.5) == 60)
+            check("字号 60px @0.5 → 30pt（换算来回一致）",
+                  EditorDocument.pointFontSize(pixels: 60, fitScale: 0.5) == 30)
+            check("1:1 缩放时点与像素相等",
+                  EditorDocument.pixelFontSize(points: 30, fitScale: 1) == 30)
+            // 窗口刚建、画布还没量出来时 fitScale = 0，不能除出 inf/nan
+            check("fitScale 为 0 也算得出有限值",
+                  EditorDocument.pixelFontSize(points: 30, fitScale: 0).isFinite
+                    && EditorDocument.pointFontSize(pixels: 60, fitScale: 0).isFinite)
+        }
+
         // ── 字号只作用于文字：选着矩形改字号不该动它、更不该白压一个撤销点 ──
         do {
             let base = solidImage(width: 40, height: 40, color: CGColor(gray: 0.9, alpha: 1))
