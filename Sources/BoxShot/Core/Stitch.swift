@@ -260,7 +260,10 @@ enum ImageStitch {
             guard width > 0, limit > 0 else { return nil }
             self.width = width
             self.limit = min(limit, StitchCanvas.maxHeight)
-            let cap = min(self.limit, max(1024, width))
+            // 初始容量给 256 行就够：`start` 会按首帧高度把它长到刚好的量。
+            // 一开始就按 1024 行分配会白白多占（900 宽 × 768 多余行 ≈ 2.6MB），
+            // 而滚动截图一开就是一块几百 MB 的画布，这点浪费也要省。
+            let cap = min(self.limit, 256)
             guard let context = Self.makeContext(width: width, height: cap) else { return nil }
             ctx = context
             capacity = cap
@@ -339,7 +342,8 @@ enum ImageStitch {
             guard need > capacity else { return true }
             var target = capacity
             while target < need {
-                target = min(limit, target + max(256, target / 2))
+                // 步长至少 256 行，且一次至少长到够用 —— 否则首帧 620 行要连做两轮
+                target = min(limit, max(need, target + max(256, target / 2)))
                 if target < need && target >= limit { return false }
             }
             guard let bigger = Self.makeContext(width: width, height: target) else { return false }
