@@ -746,6 +746,51 @@ Resources/
 | `/tmp/boxshot-textedit.trigger` | 同上，标记文件触发 |
 | `--loupetest` | 把放大镜**离屏**渲染成 `/tmp/boxshot-loupe.png`：不用截图权限、不用真拖选区。源图刻意做成「顶部一条红、底部一条蓝」，红条跑到下面就是翻面了（对称图案看不出来） |
 | `--menutest` | 打印菜单栏每一项的 `isEnabled`。**菜单项 target/action 写错不报错、只会变灰**，只有打出来才看得见（`/tmp/boxshot-menutest.log`） |
+| `--memreport` | 立刻打一份内存账：`footprint` + 当前持有的控制器/贴图/窗口清单，落 `/tmp/boxshot-memreport.log`。不截图、不动界面 |
+| `/tmp/boxshot-memreport.trigger` | 同上，标记文件触发 |
+| `--memprobe` | 内存账目**全量**跑一遍，每档打一次账：整屏浮层 ×3 → OCR → 选区遮罩 → 真全屏截图 → 独立编辑窗口 → 历史面板 + 空格预览 → 末尾再开一次选区遮罩。日志 `/tmp/boxshot-memprobe.log`。⚠️ 会真截一张全屏并**写进历史**，跑完记得删 |
+| `--memprobe --hold` | 同上但不退出，留给外部 `footprint -p <pid>` / `vmmap <pid> \| grep Whippet` 抓整屏 drawable。用完自己 `kill` |
+| `/tmp/boxshot-memprobe.trigger` | 同上，标记文件触发 |
+
+## 内存账目怎么读（1.0.23 实测）
+
+「不截图半小时了，内存还是 160」这类问题要分三个数看：**有没有泄漏**、**账面多少**、**真占多少物理内存**。三者不是一回事。
+
+- **没有泄漏**：`leaks -nostacks <pid>` 对跑了 1.5 小时的进程只报 **4 个 leak / 224 字节**（全是 CFData）。
+- **账面** = `physical footprint`，也就是活动监视器「内存」那一列。实测 **157.3 MB**（peak 369.8 MB）。
+- **真占**：同一时刻 `vmmap -summary` 写的是 `Writable regions: resident=19.0M swapped_out=127.2M` —— 账面里那 127MB 早被系统压进压缩内存/换出，真躺在 RAM 里的只有 19MB，外加一块 57.8MB 的 IOSurface。**「内存上去了不回落」是 footprint 这个指标的本性，不是漏了 free。**
+
+157.3MB 怎么摊开（`footprint -p` 的分类表）：
+
+| 项 | 大小 | 是什么 | 能不能省 |
+| --- | --- | --- | --- |
+| IOSurface | 57.8MB | 一块 3420×2214 的 `CA Whippet Drawable`（整屏尺寸，RGhA = 8 字节/像素） | 见下，代码层放不掉 |
+| MALLOC_SMALL | 58MB | 其中约 47MB 是 **Vision/OCR 的 Espresso 模型**，OCR 过一次就常驻；其余是业务对象 | 不用 OCR 就不会有；框架缓存 |
+| MALLOC_LARGE | 11MB | 截图/渲染的大块缓冲 | 关窗会还，malloc 蓄水池留一部分 |
+| CoreAnimation + IOAccelerator + graphics + CG raster | ~14MB | 开过窗口就有 | 省不掉 |
+| 其它（__DATA / metadata / page table…） | ~16MB | | |
+
+`--memprobe` 逐档实测（全新进程，同一台机器）：
+
+| 档 | footprint |
+| --- | --- |
+| 启动，还没开过浮层 | 10.7 MB |
+| 整屏浮层开着 | 42 MB |
+| 关掉 +1.2s（连开三轮都回到这里，不涨） | 22 MB |
+| OCR 跑完 +3s | 73 MB（一次性 +47MB，之后不涨） |
+| 选区遮罩开着 | 139 MB |
+| 取消 +1.5s | 81 MB |
+| 真全屏截图：浮层开着 | 157 MB |
+| 关掉 +2s | 89 MB |
+| 独立编辑窗口（整屏原图）开着 | 167 MB |
+| 关掉 +2s | 108 MB（**这里留了 +19MB 不还**） |
+| 历史面板 + 空格 QuickLook 预览 + 关面板 | 108 → 116 → 108（净 0） |
+
+**结论**：整屏浮层 / 选区遮罩 / 真全屏截图 / 历史 + 空格预览，关掉后都干净回落；留不下的只有那块 57.8MB 整屏 drawable，而它**不属于任何还活着的窗口** —— `[NSApp windows]` 里六个窗口没有一个是整屏尺寸（最大的是 1606×816 的 `QLPreviewPanel`），外部 `CGWindowList` 看到的也一样。干净进程把所有路径跑一遍，`vmmap | grep Whippet` 是 **0 条**，所以代码里没有对应的强引用可放，最可能是 CoreAnimation 在窗口服务器侧保留的整屏 surface —— 这条**没确证**，留作线索。想让它立刻下去：退出重开；不想管也行，系统在内存压力下自己收。
+
+测的时候踩到的两条：
+- 本机 `ps` 受限，量内存只能用 `footprint -p <pid>`（带分类表）和 `vmmap <pid> | grep -i whippet`。
+- 独立编辑窗口关掉后那 +19MB，试过在 `windowWillClose` 里把 `contentView` 也摘成 nil，**实测一分没少**，已回退 —— 说明不是我们手里的引用。
 
 ## 已知问题（待修）
 

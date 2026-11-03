@@ -181,6 +181,12 @@ final class AppModel: ObservableObject {
     /// 诊断用：选区遮罩是不是还开着（--esctest 拿它判断 Esc 到底生效没有）
     var isRegionSelectorActive: Bool { regionSelector?.isActive ?? false }
 
+    /// 诊断用：开一次区域遮罩（`--memprobe` 量它是多少显存 —— 整屏窗口 = 一块
+    /// 3420×2214 的 CA drawable ≈ 57.8MB，必须确认它取消后真的还回去）
+    func beginRegionSelectorForDiagnostics() {
+        startRegionShot(copyDirectly: false)
+    }
+
     /// 诊断用：拿当前遮罩的底图按全局矩形裁一块（--wintest 验坐标换算）
     func diagnosticBackdropCrop(globalRect: CGRect) -> CGImage? {
         regionSelector?.cropBackdrop(globalRect: globalRect)
@@ -338,6 +344,19 @@ final class AppModel: ObservableObject {
         controller.show()
     }
 
+    // ── 诊断：编辑器 / 历史面板（--memprobe 用） ──
+    // 这两条是探针唯一没覆盖的用户路径，而它们恰好都会让"整屏尺寸的图层"
+    // 进过场（编辑窗口里摆整屏原图、QuickLook 预览整屏截图）。
+
+    func openEditorForDiagnostics(image: CGImage) { openEditor(image: image) }
+    func closeEditorForDiagnostics() { editorController?.window?.close() }
+    func showHistoryForDiagnostics() { showShotHistory() }
+    func historyPreviewForDiagnostics(index: Int) -> Bool {
+        historyWindow?.previewForDiagnostics(index: index) ?? false
+    }
+    func closeHistoryPreviewForDiagnostics() { historyWindow?.closePreviewForDiagnostics() }
+    func closeHistoryForDiagnostics() { historyWindow?.closeWindowForDiagnostics() }
+
     // ── OCR / QR ────────────────────────────────────────────
 
     func runOCR(image: CGImage) {
@@ -453,6 +472,18 @@ final class AppModel: ObservableObject {
         lines.append("区域选择: \(presence(regionSelector))")
         lines.append("测量遮罩: \(presence(measureOverlay))")
         lines.append("贴图: \(pinManager.stats())")
+        // 窗口清单：**这一条才是"关了半天还占着全屏显存"的照妖镜**。
+        // 一块整屏 3420×2214 的 CA drawable 就是 57.8MB（vmmap 里叫
+        // 'CA Whippet Drawable'），只要那个窗口还在世，它就一直在。
+        lines.append("窗口: \(NSApp.windows.count) 个")
+        for (index, window) in NSApp.windows.enumerated() {
+            let layer = window.contentView?.layer == nil ? "无图层" : "有图层"
+            lines.append("  #\(index) \(type(of: window)) " +
+                         "frame=\(NSStringFromRect(window.frame)) " +
+                         "level=\(window.level.rawValue) " +
+                         "visible=\(window.isVisible ? 1 : 0) " +
+                         "key=\(window.isKeyWindow ? 1 : 0) \(layer)")
+        }
         return lines.joined(separator: "\n")
     }
 

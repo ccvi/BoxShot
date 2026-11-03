@@ -217,6 +217,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             runArrowDiagnostics()
             return
         }
+        // 诊断入口：--memprobe 连开三轮"整屏浮层"，每轮关掉后打一次内存账 + 窗口清单。
+        // 「不截图半小时了还是 160MB」要分成两件不同的事：① 有东西关不掉（窗口/图层）；
+        // ② malloc 蓄水池 + 交换出去的内核页，那部分本来就不还。
+        // 这个入口专治①：每轮关完 footprint 不回落、窗口清单里还吊着一块整屏面板，
+        // 那就是真有对象没放（整屏 3420×2214 的 CA drawable 一块就是 57.8MB）。
+        let memProbeTrigger = "/tmp/boxshot-memprobe.trigger"
+        if CommandLine.arguments.contains("--memprobe")
+            || FileManager.default.fileExists(atPath: memProbeTrigger) {
+            try? FileManager.default.removeItem(atPath: memProbeTrigger)
+            runMemProbe()
+            return
+        }
         // 诊断入口：--textedit 验「文字输入时看到的就是最终效果」
         // （截图逐像素比「打字中」与「回车确认后」两张图，见函数注释）
         let textEditTrigger = "/tmp/boxshot-textedit.trigger"
@@ -1233,6 +1245,213 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             log("❌ 打字时与确认后对不上：\(samePlace ? "" : "位置/尺寸超差 ")\(sameInk ? "" : "字重差太多")")
         }
+    }
+
+    /// 诊断入口实现：三轮「开整屏浮层 → 关」，每步打一次账。
+    /// 每轮自己造一份整屏原图（不跨轮持有），否则基线就被诊断自己抬高了。
+    private func runMemProbe() {
+        let logURL = URL(fileURLWithPath: "/tmp/boxshot-memprobe.log")
+        try? "".write(to: logURL, atomically: true, encoding: .utf8)
+        func log(_ text: String) {
+            NSLog("[BoxShot][memprobe] %@", text)
+            guard let handle = try? FileHandle(forWritingTo: logURL) else { return }
+            handle.seekToEndOfFile()
+            handle.write("\(text)\n".data(using: .utf8)!)
+            try? handle.close()
+        }
+        func stage(_ name: String) {
+            log("── \(name) ──")
+            log(model.memReport())
+        }
+
+        let screen = ScreenCapture.activeScreen()
+        let scale = screen.backingScaleFactor
+
+        func cycle(_ index: Int, done: @escaping () -> Void) {
+            let w = Int(screen.frame.width * scale)
+            let h = Int(screen.frame.height * scale)
+            guard let full = Self.solidImage(width: w, height: h,
+                                             color: CGColor(srgbRed: 0.2, green: 0.4, blue: 0.7, alpha: 1)),
+                  let cropped = full.cropping(to: CGRect(x: 0, y: 0, width: min(1200, w), height: min(800, h)))
+            else { log("❌ 造整屏原图失败"); done(); return }
+
+            // 真截图那条路：image = 裁出来的选区，frame = 选区在屏幕上的位置，
+            // fullDisplay = 整屏原图 → 浮层面板铺满整屏（57.8MB drawable 就是从这来的）
+            let frame = CGRect(x: screen.frame.midX - 300, y: screen.frame.midY - 200,
+                               width: 600, height: 400)
+            let fullDisplay = OverlayEditorController.FullDisplay(image: full,
+                                                                  frameAppKit: screen.frame,
+                                                                  pixelScale: scale,
+                                                                  panelFrameAppKit: screen.frame)
+            model.openOverlayEditor(image: cropped, frame: frame, fullDisplay: fullDisplay)
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak self] in
+                stage("第 \(index) 轮：整屏浮层开着")
+                self?.model.overlayEditor?.close()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                    stage("第 \(index) 轮：关掉 +1.2s")
+                    done()
+                }
+            }
+        }
+
+        // OCR 单独测一档：Vision 第一次跑会把识别模型（Espresso）载进进程，
+        // 之后框架自己缓存，代码这边管不着 —— 所以要量清楚它到底留下多少，
+        // 免得把系统框架的开销算在"我们没释放"头上。
+        func ocrPhase(done: @escaping () -> Void) {
+            let w = 1200, h = 800
+            guard let textImage = Self.textImage(width: w, height: h) else {
+                log("❌ 造文字图失败"); done(); return
+            }
+            stage("OCR 前")
+            Task { @MainActor in
+                _ = try? await OCREngine.recognizeText(in: textImage, keepLineBreaks: false, lineOverlap: 0.3)
+                log("OCR 跑完（模型已载入）")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                    stage("OCR 后 +3s")
+                    done()
+                }
+            }
+        }
+
+        // 独立编辑窗口：历史里双击整屏图走的就是这条路，窗里摆的是整屏原图。
+        // 窗口本身不是整屏（按 visibleFrame 缩到能放下），但**内容图层**可能是
+        // 整屏尺寸 —— 它到底留不留 57.8MB，只能量。
+        func editorPhase(done: @escaping () -> Void) {
+            let w = Int(screen.frame.width * scale)
+            let h = Int(screen.frame.height * scale)
+            guard let full = Self.solidImage(width: w, height: h,
+                                             color: CGColor(srgbRed: 0.7, green: 0.2, blue: 0.3, alpha: 1))
+            else { log("❌ 造整屏原图失败"); done(); return }
+            stage("编辑窗口前")
+            model.openEditorForDiagnostics(image: full)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { [weak self] in
+                stage("编辑窗口开着（整屏原图）")
+                self?.model.closeEditorForDiagnostics()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                    stage("编辑窗口关掉 +2s")
+                    done()
+                }
+            }
+        }
+
+        // 历史面板 + 空格空格预览：QLPreviewPanel.shared() 是进程级单例，
+        // 一旦预览过就一直挂在 NSApp.windows 里，最像"半个钟头没截图还占着显存"的嫌疑人。
+        func historyPhase(done: @escaping () -> Void) {
+            stage("历史面板前")
+            model.showHistoryForDiagnostics()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { [weak self] in
+                stage("历史面板开着")
+                let opened = self?.model.historyPreviewForDiagnostics(index: 0) ?? false
+                if !opened { log("（历史里没有图，跳过空格预览）") }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { [weak self] in
+                    if opened { stage("空格预览开着") }
+                    self?.model.closeHistoryPreviewForDiagnostics()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                        if opened { stage("空格预览关掉 +1.5s") }
+                        self?.model.closeHistoryForDiagnostics()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+                            stage("历史面板关掉 +1.8s")
+                            done()
+                        }
+                    }
+                }
+            }
+        }
+
+        // 最后一档：把「选区遮罩（整屏窗口）」放在**最后**再开一次并取消。
+        //
+        // 这是为了验证一个猜想：进程里那块 3420×2214 的 CA drawable（57.8MB）
+        // 可能根本不是"谁没释放"，而是 CoreAnimation 的 drawable 池**保留最近一次的
+        // 整屏 surface** 备着下次复用。判据很硬：如果真是池，那么谁最后关的，
+        // vmmap 里留下的就该是谁的尺寸 —— 把整屏窗口挪到最后，57.8MB 就该出现并留在那儿。
+        func regionTail(done: @escaping () -> Void) {
+            stage("末尾：再开一次选区遮罩")
+            model.beginRegionSelectorForDiagnostics()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+                Self.postKey(CGKeyCode(53))
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                    stage("末尾：选区遮罩取消 +2.5s")
+                    done()
+                }
+            }
+        }
+
+        stage("启动（还没开过浮层）")
+        cycle(1) {
+            cycle(2) {
+                cycle(3) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                        ocrPhase {
+                            // 选区遮罩也测一档：它是**整屏窗口**，如果它没释放，
+                            // 同样是一块 3420×2214 的 drawable（57.8MB）。
+                            stage("选区遮罩前")
+                            self.model.beginRegionSelectorForDiagnostics()
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+                                stage("选区遮罩开着（Esc 取消）")
+                                Self.postKey(CGKeyCode(53))
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                                    stage("选区遮罩取消后 +1.5s")
+                                    // 最后走一遍**真的全屏截图**（走 SCK 抓屏 + 真浮层，
+                                    // 和用户按"全屏截图"完全同一条路）—— 前面几轮都是合成图，
+                                    // 只有这一条能证明"真截一张之后"到底留不留整屏 drawable。
+                                    stage("真全屏截图前")
+                                    self.model.perform(.fullscreenShot)
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                                        stage("真全屏截图：浮层开着")
+                                        self.model.overlayEditor?.close()
+                                        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                                            stage("真全屏截图：关掉 +2s")
+                                            editorPhase {
+                                                historyPhase {
+                                                    regionTail {
+                                                        self.finishMemProbe()
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func finishMemProbe() {
+        stage_hold()
+    }
+
+    private func stage_hold() {
+        if CommandLine.arguments.contains("--hold") {
+            NSLog("[BoxShot][memprobe] 保持存活（--hold），pid=%d", ProcessInfo.processInfo.processIdentifier)
+            return
+        }
+        exit(0)
+    }
+
+    /// 造一张"有字可认"的图（白底黑字，字号够大 —— Vision 在小字上会直接不出结果）
+    private static func textImage(width: Int, height: Int) -> CGImage? {
+        guard let ctx = CGContext(data: nil, width: width, height: height,
+                                  bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                                    | CGBitmapInfo.byteOrder32Little.rawValue) else { return nil }
+        ctx.setFillColor(CGColor(gray: 1, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        let text = "BoxShot 内存探针 Memory Probe 12345"
+        let line = NSAttributedString(string: text, attributes: [
+            .font: NSFont.systemFont(ofSize: 64, weight: .medium),
+            .foregroundColor: NSColor.black,
+        ])
+        let ns = NSGraphicsContext(cgContext: ctx, flipped: false)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = ns
+        line.draw(at: NSPoint(x: 60, y: CGFloat(height) / 2))
+        NSGraphicsContext.restoreGraphicsState()
+        return ctx.makeImage()
     }
 
     private static func solidImage(width: Int, height: Int, color: CGColor) -> CGImage? {

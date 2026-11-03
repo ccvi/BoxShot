@@ -112,6 +112,30 @@ final class HistoryWindowController: NSWindowController, NSWindowDelegate, QLPre
         onClose?()
     }
 
+    // ── 诊断：从外部驱动「空格预览 / 关窗」（--memprobe 用） ──
+    //
+    // 空格预览走 QLPreviewPanel.shared()，那是**进程级单例**：只要预览过一次，
+    // 面板窗口就会一直挂在 NSApp.windows 里。这块到底留不留整屏 drawable
+    // 只能实测，所以做成可以从探针里一键开/关。
+
+    func previewForDiagnostics(index: Int) -> Bool {
+        let items = ShotHistoryStore.shared.items
+        guard let panel = QLPreviewPanel.shared(), index >= 0, index < items.count else { return false }
+        selection.selectedID = items[index].id
+        panel.dataSource = self
+        panel.currentPreviewItemIndex = index
+        panel.makeKeyAndOrderFront(nil)
+        return true
+    }
+
+    func closePreviewForDiagnostics() {
+        QLPreviewPanel.shared()?.orderOut(nil)
+    }
+
+    func closeWindowForDiagnostics() {
+        window?.close()
+    }
+
     private func url(for item: ShotHistoryItem) -> URL? {
         let url = ShotHistoryStore.shared.url(for: item)
         return FileManager.default.fileExists(atPath: url.path) ? url : nil
