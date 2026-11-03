@@ -73,6 +73,8 @@ final class ScrollCaptureController: NSObject {
     private var segmentCount = 0
     /// 连续失败次数：≥3 就把基准换成当前帧重新开始，绝不让自己卡死
     private var consecutiveFailures = 0
+    /// finish 只走一遍：动作后的延迟关 + 用户点 ✓/✕ 可能撞车
+    private var didFinish = false
     private var monitors: [Any] = []
     /// 缩略图（实时预览）面板：用户要求"强制打开、不能关闭"，
     /// 所以它在 begin() 里就建好、跟着整个流程存在，连标题栏和关闭按钮都没有。
@@ -627,6 +629,7 @@ final class ScrollCaptureController: NSObject {
     private func pin() {
         guard let image = outputImage() else { return }
         model?.pinImage(image)
+        finishAfterAction()
     }
 
     private func save() {
@@ -637,7 +640,7 @@ final class ScrollCaptureController: NSObject {
         // autoSave：不再弹面板，直接落到设置目录
         if prefs.autoSave, let dirPath = prefs.saveDirectory, !dirPath.isEmpty {
             let url = Support.uniqueFileURL(in: URL(fileURLWithPath: dirPath, isDirectory: true), name: name)
-            write(image: image, to: url, prefs: prefs)
+            if write(image: image, to: url, prefs: prefs) { finishAfterAction() }
             return
         }
 
@@ -645,17 +648,20 @@ final class ScrollCaptureController: NSObject {
         panel.nameFieldStringValue = name
         panel.allowedContentTypes = prefs.shotFormat == .png ? [.png] : [.jpeg]
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        write(image: image, to: url, prefs: prefs)
+        if write(image: image, to: url, prefs: prefs) { finishAfterAction() }
     }
 
-    private func write(image: CGImage, to url: URL, prefs: Preferences) {
+    @discardableResult
+    private func write(image: CGImage, to url: URL, prefs: Preferences) -> Bool {
         guard let data = ImageEncode.data(image, format: prefs.shotFormat, jpgQuality: prefs.jpgQuality) else {
             frameView?.status = "图片编码失败"
             frameView?.needsDisplay = true
-            return
+            return false
         }
+        var ok = false
         do {
             try data.write(to: url)
+            ok = true
             frameView?.status = "已保存：\(url.lastPathComponent)"
             if prefs.playSound { Support.playFeedbackSound(named: prefs.feedbackSound) }
         } catch {
@@ -663,6 +669,7 @@ final class ScrollCaptureController: NSObject {
             frameView?.status = "保存失败：\(error.localizedDescription)"
         }
         frameView?.needsDisplay = true
+        return ok
     }
 
     private func copyToClipboard() {
@@ -671,9 +678,24 @@ final class ScrollCaptureController: NSObject {
         frameView?.status = "已复制到剪贴板"
         frameView?.needsDisplay = true
         model?.playFeedbackSound()
+        finishAfterAction()
+    }
+
+    /// 完成即关（设置 → 截图，与普通截图浮层同一个开关）：
+    /// 滚动截图工具条上的**贴图 / 保存 / 复制**成功后就地收掉整个会话
+    /// （取景框、工具条、缩略图、滚轮监听全撤）。延迟 0.5s 是为了让状态条
+    /// 那句"已保存 / 已复制"来得及看；✕ 和 ✓ 不受这个开关影响。
+    private func finishAfterAction() {
+        guard let model, model.prefs.value.closeAfterAction else { return }
+        let holder = self
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            holder.finish(with: nil)
+        }
     }
 
     private func finish(with image: CGImage?) {
+        guard !didFinish else { return }
+        didFinish = true
         stop()
         closePanels()
         onFinish?(image)
