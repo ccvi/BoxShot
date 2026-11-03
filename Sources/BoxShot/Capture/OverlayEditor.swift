@@ -46,6 +46,7 @@ final class OverlayEditorController: NSObject {
     private var toolButtons: [EditorTool: NSButton] = [:]
     private var swatchButtons: [String: NSButton] = [:]
     private var widthButtons: [CGFloat: NSButton] = [:]
+    private var fontSizePopup: NSPopUpButton?
     private var colorAnchorButton: NSButton?
     private var colorPanel: NSPanel?
     private var monitors: [Any] = []
@@ -537,6 +538,10 @@ final class OverlayEditorController: NSObject {
     /// 顺带把 3 档粗细也收在一起。
     /// 诊断用：直接把颜色面板打开（--show-overlay-color 拿它截图核对）
     func showColorPanelForDiagnostics() { toggleColorPanel() }
+    /// 诊断用：字号下拉本体（验菜单项与 target/action 有没有接上）
+    var fontSizePopupForDiagnostics: NSPopUpButton? { fontSizePopup }
+    /// 诊断用：当前默认字号（点）
+    var docFontSizeForDiagnostics: CGFloat { doc.fontSize }
 
     private func toggleColorPanel() {
         if let panel = colorPanel, panel.isVisible {
@@ -567,6 +572,13 @@ final class OverlayEditorController: NSObject {
             widthButtons[width] = button
             stack.addArrangedSubview(button)
         }
+        // 字号：跟颜色 / 粗细同一条面板（用户 2026-11-03 口径「在颜色控制工具条那里加上
+        // 字号控制，下拉，分 6 个档」）。放最右边，中间隔一条竖线 —— 左边三组是"笔画长什么样"，
+        // 右边这个是"文字多大"，语义上本来就不是一类。
+        stack.addArrangedSubview(divider())
+        let popup = fontSizePopUp()
+        fontSizePopup = popup
+        stack.addArrangedSubview(popup)
         stack.layoutSubtreeIfNeeded()
         let size = stack.fittingSize
 
@@ -599,6 +611,28 @@ final class OverlayEditorController: NSObject {
         panel.setFrameOrigin(Self.colorPanelOrigin(toolbar: toolbarPanel?.frame ?? .zero,
                                                    panelSize: panel.frame.size,
                                                    visible: screen.visibleFrame))
+    }
+
+    /// 6 档字号（**点**）。默认 30 落在正中间 —— 加控件之前浮层里写死的就是
+    /// `30 * pixelScale`，档位必须包含它，否则老用户的第一段字会突然变大变小。
+    /// 20→68 大约是 3.4 倍，够覆盖「一行小注」到「整屏大字标题」。
+    static let fontSizeOptions: [CGFloat] = [20, 24, 30, 40, 52, 68]
+
+    /// 字号 → 档位序号：取**最近**的一档。
+    /// 为什么要"最近"而不是精确相等：形状里的字号是图像像素，换成点再换回来会带
+    /// 浮点误差（2x 屏 60px → 30.0000001pt），精确匹配会一个都对不上 → 下拉永远
+    /// 显示第 1 档，用户改完字号看着像没生效。
+    static func fontSizeIndex(for points: CGFloat) -> Int {
+        var best = 0
+        var bestDelta = CGFloat.greatestFiniteMagnitude
+        for (index, option) in fontSizeOptions.enumerated() {
+            let delta = abs(option - points)
+            if delta < bestDelta {
+                bestDelta = delta
+                best = index
+            }
+        }
+        return best
     }
 
     /// 色块直径（pt）：圆形，圆角取一半。
@@ -759,8 +793,26 @@ final class OverlayEditorController: NSObject {
                 button.layer?.backgroundColor = NSColor.clear.cgColor
             }
         }
+        syncFontSizePopup()
         updateColorAnchor()
         contentView?.needsDisplay = true
+    }
+
+    /// 下拉显示哪一档：选中了文字就看**那条文字**的字号，否则看默认值。
+    /// 不这么做的话，双击一条 52pt 的旧文字接着改，下拉还显示 30 —— 用户以为
+    /// 字号没记住，一改又从 30 开始。
+    private func syncFontSizePopup() {
+        guard let popup = fontSizePopup else { return }
+        let points: CGFloat
+        if let selected = doc.selectedShape, selected.tool == .text, selected.fontSize > 0 {
+            points = selected.fontSize / max(0.001, selectionPixelScale)
+        } else {
+            points = doc.fontSize
+        }
+        let index = Self.fontSizeIndex(for: points)
+        if popup.indexOfSelectedItem != index {
+            popup.selectItem(at: index)
+        }
     }
 
     // ── 颜色 / 粗细控件 ─────────────────────────────────────
@@ -792,6 +844,55 @@ final class OverlayEditorController: NSObject {
             button.heightAnchor.constraint(equalToConstant: Self.swatchSide),
         ])
         return button
+    }
+
+    // ── 字号下拉（6 档）──────────────────────────────────
+
+    /// 下拉宽度。🔴 AppKit 控件的自然宽度要**进窗口后**才准，初始化时量出来偏窄：
+    /// 按测量值定宽会把「30 pt」挤成「30 p…」。所以显式给一个宁宽勿窄的值。
+    static let fontSizePopupWidth: CGFloat = 68
+
+    private func fontSizePopUp() -> NSPopUpButton {
+        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0,
+                                                width: Self.fontSizePopupWidth, height: 22),
+                                  pullsDown: false)
+        popup.isBordered = false
+        popup.controlSize = .small
+        popup.font = .systemFont(ofSize: 12 * Self.toolbarScale, weight: .medium)
+        // 底色是写死的深灰，前景也得写死：深色外观下 `.labelColor` 是带透明度的白，
+        // 看着发灰（工具条图标那次已经被这条坑过一次）。
+        popup.contentTintColor = Self.toolbarForegroundColor
+        popup.addItems(withTitles: Self.fontSizeOptions.map { "\(Int($0)) pt" })
+        popup.toolTip = "字号（只作用于文字）：20 / 24 / 30 / 40 / 52 / 68 pt"
+        popup.target = self
+        popup.action = #selector(fontSizeChanged(_:))
+        popup.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            popup.widthAnchor.constraint(equalToConstant: Self.fontSizePopupWidth),
+            popup.heightAnchor.constraint(equalToConstant: 22),
+        ])
+        popup.selectItem(at: Self.fontSizeIndex(for: doc.fontSize))
+        return popup
+    }
+
+    @objc private func fontSizeChanged(_ sender: NSPopUpButton) {
+        let index = sender.indexOfSelectedItem
+        guard Self.fontSizeOptions.indices.contains(index) else { return }
+        changeFontSize(Self.fontSizeOptions[index])
+    }
+
+    /// 改字号（点）。三条路各走各的，别一股脑先 commit：
+    ///   - **正在输入**：实时改（连编辑器一起换），不压撤销点 —— 落盘时随整段编辑一起算一个点；
+    ///   - 选中了一条文字：改它（进撤销栈），同时把默认值也改掉，下一段字沿用；
+    ///   - 别的工具 / 没选中：只改默认值。
+    private func changeFontSize(_ points: CGFloat) {
+        doc.fontSize = points
+        if contentView?.isEditingText == true {
+            contentView?.setLiveFontSize(points)
+        } else {
+            doc.applyToSelected(fontSize: points * selectionPixelScale)
+        }
+        refresh()
     }
 
     private func lineWidthButton(_ width: CGFloat) -> NSButton {
@@ -1525,10 +1626,11 @@ final class OverlayEditorView: NSView {
             shape = hit
         } else {
             // 新文字先挂进 shapes（不打撤销点）：这样选中框和包围盒跟着实时长。
-            // 默认字号 30 **点** → 换成图像像素（同一份口径：渲染器按像素画）
+            // 字号 = 下拉选的**点** × pixelScale → 图像像素（渲染器按像素画）。
+            // 以前这里写死 30 * pixelScale，现在 30 只是下拉的默认档。
             let fresh = AnnotationShape(tool: .text, points: [pixelPoint],
                                         color: doc.color, lineWidth: 0, text: "",
-                                        fontSize: 30 * pixelScale)
+                                        fontSize: doc.fontSize * pixelScale)
             doc.shapes.append(fresh)
             shape = fresh
         }
@@ -1584,8 +1686,20 @@ final class OverlayEditorView: NSView {
                                                      height: CGFloat.greatestFiniteMagnitude)
     }
 
-    /// 确认：落盘成标注（整段编辑只压一个撤销点）
+    /// 改正在输入的那段文字的字号（实时，不压撤销点）
     ///
+    /// 视图坐标是点，形状字号是图像像素：`shape.fontSize = points * pixelScale`
+    /// 之后编辑器字号正好就是 `points`（= `fontSize × viewPerPixel`），不用再换算一次。
+    func setLiveFontSize(_ points: CGFloat) {
+        guard let id = editingShapeID,
+              let idx = doc.shapes.firstIndex(where: { $0.id == id }) else { return }
+        doc.shapes[idx].fontSize = points * pixelScale
+        editingTextView?.font = Self.textFont(size: points)
+        layoutTextEditor()
+        needsDisplay = true
+    }
+
+    /// 确认：落盘成标注（整段编辑只压一个撤销点）
     /// internal 而不是 private：控制器在「保存 / 复制 / 贴图 / OCR / 关闭」之前
     /// 必须先把它落盘，否则用户在输入框里还没按回车就去点保存，最后那几行字会丢。
     func commitTextEditing() {

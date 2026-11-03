@@ -1401,6 +1401,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     let now = self.model.overlayEditor?.docColorForDiagnostics ?? "nil"
                     clog("点击 \(Int(g.x)),\(Int(g.y)) 之后颜色=\(now)")
                     clog(now == before ? "⚠️ 点色块没换色" : "✅ 点色块换了颜色：\(before) → \(now)")
+
+                    // ── 字号下拉（2026-11-03 新增）──
+                    // 菜单本身是**模态**的（NSMenu 会跑自己的 runloop），诊断里不适合真弹，
+                    // 所以走 selectItem + sendAction —— 和用户点中某一项是同一条 target/action。
+                    guard let overlay = self.model.overlayEditor,
+                          let popup = overlay.fontSizePopupForDiagnostics else {
+                        clog("❌ 没找到字号下拉"); return
+                    }
+                    clog("字号下拉：\(popup.numberOfItems) 项 · \(popup.itemTitles.joined(separator: " / "))")
+                    // 选中预置的那条 48px 文字 → 下拉应当自动跳到最近的档（52 pt）
+                    overlay.docForDiagnostics.select(at: CGPoint(x: 170, y: 145))
+                    overlay.refresh()
+                    // 这张 800×500 的图按 400pt 显示（1pt = 2px），预置文字 48px = 24pt
+                    clog("选中文字后下拉显示=\(popup.titleOfSelectedItem ?? "nil")（48px ÷ 2 = 24 pt）")
+                    popup.selectItem(at: 0)                     // 20 pt
+                    popup.sendAction(popup.action, to: popup.target)
+                    let shapeSize = overlay.docForDiagnostics.selectedShape?.fontSize ?? -1
+                    clog("选 20 pt 后：该文字 fontSize=\(shapeSize)px（应 40 = 20pt × 2）· 默认字号=\(overlay.docFontSizeForDiagnostics) pt")
                 }
             }
         }

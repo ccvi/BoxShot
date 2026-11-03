@@ -490,6 +490,53 @@ enum SelfTest {
                   RGBColor.palette.contains(.orange) && RGBColor.palette.contains(.purple))
         }
 
+        // ── 字号下拉 6 档（2026-11-03 用户口径「分 6 个档」）──
+        do {
+            let options = OverlayEditorController.fontSizeOptions
+            check("字号正好 6 档（实际 \(options.count)）", options.count == 6)
+            check("字号档位严格递增（\(options.map { Int($0) })）",
+                  zip(options, options.dropFirst()).allSatisfy { $0 < $1 })
+            // 默认值必须在档位里：否则下拉会显示成"没选中"，用户看一眼以为控件是坏的
+            check("默认字号 30 是其中一档", options.contains(EditorDocument(image: solidImage(width: 8, height: 8, color: CGColor(gray: 0.5, alpha: 1))).fontSize))
+            check("字号落在一个合理的范围（最小 ≥ 12、最大 ≤ 120）",
+                  (options.first ?? 0) >= 12 && (options.last ?? 0) <= 120)
+            // 像素 ↔ 点的浮点误差不该影响"显示第几档"
+            check("字号取最近档：30→2、31→2、38→3",
+                  OverlayEditorController.fontSizeIndex(for: 30) == 2
+                    && OverlayEditorController.fontSizeIndex(for: 31) == 2
+                    && OverlayEditorController.fontSizeIndex(for: 38) == 3)
+            check("字号超出范围时夹到首尾档",
+                  OverlayEditorController.fontSizeIndex(for: 4) == 0
+                    && OverlayEditorController.fontSizeIndex(for: 400) == options.count - 1)
+        }
+
+        // ── 字号只作用于文字：选着矩形改字号不该动它、更不该白压一个撤销点 ──
+        do {
+            let base = solidImage(width: 40, height: 40, color: CGColor(gray: 0.9, alpha: 1))
+            let rectShape = AnnotationShape(tool: .rect,
+                                            points: [CGPoint(x: 4, y: 4), CGPoint(x: 20, y: 20)],
+                                            color: .red, lineWidth: 4)
+            let rectDoc = EditorDocument(image: base, shapes: [rectShape])
+            rectDoc.selectedID = rectShape.id
+            rectDoc.applyToSelected(fontSize: 68)
+            check("选着矩形改字号：形状不动、也不压撤销点",
+                  rectDoc.shapes[0].fontSize == rectShape.fontSize && !rectDoc.canUndo)
+
+            var textShape = AnnotationShape(tool: .text, points: [CGPoint(x: 4, y: 4)],
+                                            color: .red, lineWidth: 0, text: "字", fontSize: 30)
+            textShape.fontSize = 30
+            let textDoc = EditorDocument(image: base, shapes: [textShape])
+            textDoc.selectedID = textShape.id
+            textDoc.applyToSelected(fontSize: 68)
+            check("选着文字改字号：字号变了且可撤销",
+                  textDoc.shapes[0].fontSize == 68 && textDoc.canUndo)
+            // 同一个档位再点一次不该再压一个点（"没变化就别记"）
+            textDoc.applyToSelected(fontSize: 68)
+            textDoc.undo()
+            check("重复选同一档不重复压点（撤销一次就回到 30）",
+                  textDoc.shapes[0].fontSize == 30)
+        }
+
         // ── 步骤标注（点击放 ①②③，自动递增）──
         do {
             check("步骤标注是单击工具（不是拖拽）", !EditorTool.step.isDragTool)

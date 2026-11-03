@@ -16,6 +16,12 @@ final class EditorDocument: ObservableObject {
     @Published var tool: EditorTool = .arrow
     @Published var color: RGBColor = .red
     @Published var lineWidth: CGFloat = 4
+    /// 新建文字的字号，**单位是点**（视图点），落成形状时 × `pixelScale` 换成图像像素。
+    ///
+    /// 为什么默认值是 30：加字号控件之前，浮层里写死的就是 `30 * pixelScale`。
+    /// 沿用这个数，用户加完控件写出来的第一段字跟以前一模一样 —— 新增控件不该
+    /// 顺手把既有观感改了。6 个档位里也正好包含 30，下拉不会显示成"未选中"。
+    @Published var fontSize: CGFloat = 30
     /// 当前选中的标注（"选择"工具点选；⌫ 删除；拖动移动）
     @Published var selectedID: UUID?
     /// 截图美化（Xnapper 式套壳）；nil = 关闭。底图不动，渲染时往外套
@@ -122,14 +128,22 @@ final class EditorDocument: ObservableObject {
         self.selectedID = nil
     }
 
-    /// 改选中标注的颜色 / 粗细（进撤销栈）；没有选中时只改默认值
-    func applyToSelected(color: RGBColor? = nil, lineWidth: CGFloat? = nil) {
+    /// 改选中标注的颜色 / 粗细 / 字号（进撤销栈）；没有选中时只改默认值
+    ///
+    /// 字号只对文字生效：选中一个矩形时改字号，既不该动它、也不该白压一个撤销点。
+    /// 所以这里先算出"改完长什么样"，跟原来一模一样就直接返回。
+    func applyToSelected(color: RGBColor? = nil, lineWidth: CGFloat? = nil,
+                         fontSize: CGFloat? = nil) {
         if color != nil { self.color = color! }
         if let lineWidth { self.lineWidth = lineWidth }
         guard let selectedID, let idx = shapes.firstIndex(where: { $0.id == selectedID }) else { return }
+        var updated = shapes[idx]
+        if let color { updated.color = color }
+        if let lineWidth { updated.lineWidth = lineWidth }
+        if let fontSize, updated.tool == .text { updated.fontSize = fontSize }
+        guard updated != shapes[idx] else { return }
         pushUndo(shapes)
-        if let color { shapes[idx].color = color }
-        if let lineWidth { shapes[idx].lineWidth = lineWidth }
+        shapes[idx] = updated
     }
 
     // ── 文字原地编辑（所见即所得）───────────────────────────
