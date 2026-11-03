@@ -354,6 +354,26 @@ enum SelfTest {
             let p4 = ScrollCaptureController.previewOrigin(region: wide, visible: visible, size: size)
             check("整屏宽的框：缩略图退到屏幕右边不越界",
                   p4.x + size.width <= visible.maxX - 3 && p4.x >= visible.minX + 3)
+
+            // 铺满后整幅缩放（1.0.25）：长图高度贴框、宽度按比例缩小；没铺满照旧宽度铺满
+            let fit = ScrollCaptureController.previewDocumentSize(imageWidth: 720, imageHeight: 2400,
+                                                                  viewWidth: 178, viewHeight: 573)
+            check("铺满后高度贴框宽度跟着缩",
+                  abs(fit.height - 573) < 0.5 && abs(fit.width - 573.0 * 720.0 / 2400.0) < 0.5)
+            let notFull = ScrollCaptureController.previewDocumentSize(imageWidth: 720, imageHeight: 300,
+                                                                      viewWidth: 178, viewHeight: 573)
+            check("没铺满照旧按宽度铺满",
+                  abs(notFull.width - 178) < 0.5 && abs(notFull.height - 178.0 * 300.0 / 720.0) < 0.5)
+            let square = ScrollCaptureController.previewDocumentSize(imageWidth: 500, imageHeight: 500,
+                                                                     viewWidth: 178, viewHeight: 573)
+            check("正方形按宽度铺满且不超高",
+                  abs(square.width - 178) < 0.5 && square.height <= 573)
+
+            // 触摸板距离抓帧（1.0.25）：触发距离 = 区域高 × 0.4，再矮也不低于 48pt
+            check("距离抓帧按区域高四成",
+                  ScrollCaptureController.motionCaptureDistance(regionHeight: 500) == 200)
+            check("距离抓帧有 48pt 下限",
+                  ScrollCaptureController.motionCaptureDistance(regionHeight: 60) == 48)
         }
 
         // ── 标注工具条落位（1.0.10 用户口径：下 → 上 → 框内底部，间距 10pt）──

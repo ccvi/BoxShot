@@ -13,6 +13,14 @@ import CoreGraphics
 // 的就是"明明滚得不快却老提示没对上"；更糟的是连挂 3 帧会重置基准，
 // 拿运动中的帧当基准，后面拼出来全是错位。所以途中不抓帧，停稳再抓。
 //
+// 🔴 1.0.25 补充：**触摸板不能只等停稳**。两指一划惯性动辄滚出一两屏，
+// 惯性事件源源不断把去抖一直往后推（用户看到"半天不动"），真停稳时页面
+// 已经离基准一整屏开外 —— 两帧零重叠，对齐必然失败，连挂 3 次就是
+// "内容跳变已跳过一段"。所以精确 delta（触摸板）按**累计滚动距离**中途
+// 抓帧：每滚约 40% 框高抓一帧，相邻帧永远有一半以上重叠；运动帧对不上
+// 不计入失败数（亚像素/重绘是常态，不是内容跳变）。鼠标滚轮一格一点，
+// 停稳再抓本来就够，路径原样不动。
+//
 // 抓帧后台串行：停稳触发时若上一帧还在处理，记下待抓标记，处理完补一帧。
 // ============================================================
 
@@ -33,7 +41,18 @@ final class ScrollCaptureController: NSObject {
     private var isRunning = false
     private var isBusy = false
     private var pendingGrab = false             // 忙时滚过 → 忙完补抓
+    private var pendingGrabInMotion = false     // 补抓的那帧当时页面还在动吗
     private var scrollDebounce: DispatchWorkItem?
+    /// 触摸板自上次抓帧以来累计的滚动距离（pt，取两轴里大的那个）
+    private var scrollDistance: CGFloat = 0
+    /// 触摸板距离抓帧：累计滚动每达到区域高的这个比例就抓一帧（0.4 → 相邻帧 60% 重叠）
+    static let motionCaptureFraction: CGFloat = 0.4
+    /// 距离抓帧的下限（pt）：太小的选区不该每滚几像素就抓
+    static let motionCaptureMinDistance: CGFloat = 48
+    /// 纯函数：触摸板距离抓帧的触发距离（自检直接喂数字验）
+    static func motionCaptureDistance(regionHeight: CGFloat) -> CGFloat {
+        max(motionCaptureMinDistance, regionHeight * motionCaptureFraction)
+    }
     /// 拼接画布（增量，只画新增行）。**不再持有整幅累积图**：
     /// 老写法每帧新开一块整幅位图重画全图，O(N²) 拷贝 + 两份全图常驻。
     private var canvas: ImageStitch.StitchCanvas?
@@ -209,6 +228,7 @@ final class ScrollCaptureController: NSObject {
         frameCount = 0
         segmentCount = 0
         consecutiveFailures = 0
+        scrollDistance = 0
         grabFrame()
         installScrollMonitor()
         installEscMonitor()
@@ -218,7 +238,7 @@ final class ScrollCaptureController: NSObject {
     /// 滚轮事件不需要辅助功能授权。
     private func installScrollMonitor() {
         let note: (NSEvent) -> Void = { [weak self] event in
-            self?.noteScroll(deltaX: event.deltaX, deltaY: event.deltaY)
+            self?.noteScroll(event)
         }
         monitors.append(NSEvent.addGlobalMonitorForEvents(matching: .scrollWheel, handler: note))
         monitors.append(NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
@@ -228,10 +248,14 @@ final class ScrollCaptureController: NSObject {
     }
 
     /// 每次滚动：按主导方向识别横/竖向；**途中不抓帧**（运动中的帧没法用，
-    /// 见类头注释），去抖 250ms 等停稳后再抓一帧拼接
-    private func noteScroll(deltaX: CGFloat, deltaY: CGFloat) {
+    /// 见类头注释），去抖 250ms 等停稳后再抓一帧拼接。
+    ///
+    /// 例外（1.0.25）：触摸板（精确 delta）按累计距离中途抓帧 ——
+    /// 惯性一动一两屏，等停稳两帧就零重叠了，见类头注释。
+    private func noteScroll(_ event: NSEvent) {
         guard isRunning else { return }
-        let ax = abs(deltaX), ay = abs(deltaY)
+        let dx = event.deltaX, dy = event.deltaY
+        let ax = abs(dx), ay = abs(dy)
         if ax > 1 && ax > ay + 0.5 {
             if direction != 1 {
                 direction = 1
@@ -245,22 +269,41 @@ final class ScrollCaptureController: NSObject {
                 frameView?.needsDisplay = true
             }
         }
+
+        // 触摸板：累计滚动距离达到区域高的 40% 就抓一帧（此时页面还在动，
+        // 帧标成 inMotion —— 对不上不算失败）。鼠标滚轮（非精确 delta）不走这条。
+        if event.hasPreciseScrollingDeltas {
+            scrollDistance += max(ax, ay)
+            if scrollDistance >= Self.motionCaptureDistance(regionHeight: region.height) {
+                scrollDistance = 0
+                scrollDebounce?.cancel()
+                grabOrQueue(inMotion: true)
+                return
+            }
+        }
+
         // 尾部去抖：停稳 250ms 后抓帧拼接。0.18 太贴 —— 触控板惯性刚结束
         // 那一下还可能带亚像素相位，宁可多等 70ms 也要拿到"静止"的画面。
         scrollDebounce?.cancel()
-        let item = DispatchWorkItem { [weak self] in self?.grabOrQueue() }
+        let item = DispatchWorkItem { [weak self] in self?.grabOrQueue(inMotion: false) }
         scrollDebounce = item
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: item)
     }
 
-    private func grabOrQueue() {
+    private func grabOrQueue(inMotion: Bool) {
         guard isRunning else { return }
-        if isBusy { pendingGrab = true } else { grabFrame() }
+        if isBusy {
+            pendingGrab = true
+            pendingGrabInMotion = inMotion
+        } else {
+            grabFrame(inMotion: inMotion)
+        }
     }
 
-    private func grabFrame() {
+    private func grabFrame(inMotion: Bool = false) {
         guard isRunning, !isBusy else { return }
         isBusy = true
+        scrollDistance = 0
         let displayID = self.displayID
         let region = self.region
         Task.detached(priority: .userInitiated) { [weak self] in
@@ -275,18 +318,19 @@ final class ScrollCaptureController: NSObject {
             }
             await MainActor.run { [weak self] in
                 guard let self else { return }
-                self.handleFrame(frame)
+                self.handleFrame(frame, inMotion: inMotion)
                 self.isBusy = false
                 // 忙的时候用户又滚了 → 补一帧，保证滚动结果不丢
                 if self.pendingGrab {
+                    let motion = self.pendingGrabInMotion
                     self.pendingGrab = false
-                    self.grabFrame()
+                    self.grabFrame(inMotion: motion)
                 }
             }
         }
     }
 
-    private func handleFrame(_ frame: CGImage?) {
+    private func handleFrame(_ frame: CGImage?, inMotion: Bool) {
         guard isRunning else { return }
         guard let frame else {
             frameView?.status = "抓帧失败，重试中…"
@@ -315,7 +359,7 @@ final class ScrollCaptureController: NSObject {
         }
 
         guard let alignment else {
-            handleFailure(frame: frame, current: current)
+            handleFailure(frame: frame, current: current, inMotion: inMotion)
             return
         }
 
@@ -388,7 +432,12 @@ final class ScrollCaptureController: NSObject {
     ///
     /// 🔴 绝不能只留一句提示然后原地等 —— 基准不动，用户再往下滚只会离它更远，
     /// 于是每一帧都失败，看着就像"只截了一次，之后怎么滚都不动"。
-    private func handleFailure(frame: CGImage, current: CGImage) {
+    ///
+    /// 🔴 运动帧（触摸板距离抓帧）对不上**不算失败**：亚像素相位 / 重绘半帧
+    /// 是惯性滚动的常态，不是"内容跳变"。计进失败数的话，一次快滑就能连挂
+    /// 3 帧 → 错误地重置基准。直接静默跳过，等停稳那帧来补。
+    private func handleFailure(frame: CGImage, current: CGImage, inMotion: Bool) {
+        guard !inMotion else { return }
         consecutiveFailures += 1
 
         // 把当前帧当 top、上一帧当 bottom 反着对一次：能对上说明用户往回滚了
@@ -524,7 +573,7 @@ final class ScrollCaptureController: NSObject {
         return NSPoint(x: x, y: fallbackY)
     }
 
-    /// 把最新的累积图刷进预览（按宽度铺满、滚到最新的一段）
+    /// 把最新的累积图刷进预览（没铺满按宽度铺满；铺满后整幅缩到框内，见下）
     private func refreshPreview() {
         guard let imageView = previewImageView, let scroll = previewScroll,
               let preview = previewCanvas?.image(),
@@ -534,15 +583,31 @@ final class ScrollCaptureController: NSObject {
         }
 
         let viewWidth = max(80, scroll.contentView.bounds.width)
-        let scale = viewWidth / CGFloat(image.width)
-        let docSize = NSSize(width: viewWidth, height: CGFloat(image.height) * scale)
-        imageView.frame = NSRect(origin: .zero, size: docSize)
+        let viewHeight = max(80, scroll.contentView.bounds.height)
+        let docSize = Self.previewDocumentSize(imageWidth: image.width, imageHeight: image.height,
+                                               viewWidth: viewWidth, viewHeight: viewHeight)
+        // 高度超框后宽度随比例缩小、水平居中：整幅长图一眼看全，不再滚动
+        imageView.frame = NSRect(origin: NSPoint(x: max(0, (viewWidth - docSize.width) / 2), y: 0),
+                                 size: docSize)
         imageView.image = NSImage(cgImage: image,
                                   size: NSSize(width: image.width, height: image.height))
         scroll.documentView = imageView
         // NSImageView 不是 flipped：y=0 在底部，滚到 0 就是看最新的那段
         scroll.contentView.scroll(to: NSPoint(x: 0, y: 0))
         scroll.reflectScrolledClipView(scroll.contentView)
+    }
+
+    /// 纯函数：缩略图显示尺寸（自检直接喂数字验）。
+    ///
+    /// 用户口径 1.0.25：长图没铺满缩略图框时按宽度铺满（原行为）；
+    /// **一旦铺满**（按宽度铺满后高度超出框），就改成整幅缩到框内 ——
+    /// 高度贴框、宽度按比例缩小并水平居中，越长图宽越窄，不再滚动预览。
+    static func previewDocumentSize(imageWidth: Int, imageHeight: Int,
+                                    viewWidth: CGFloat, viewHeight: CGFloat) -> NSSize {
+        guard imageWidth > 0, imageHeight > 0, viewWidth > 0, viewHeight > 0 else { return .zero }
+        let scale = min(viewWidth / CGFloat(imageWidth), viewHeight / CGFloat(imageHeight))
+        return NSSize(width: CGFloat(imageWidth) * scale,
+                      height: CGFloat(imageHeight) * scale)
     }
 
     /// 出图：保存 / 复制 / 贴图 / 交编辑窗口时才合成整幅。
