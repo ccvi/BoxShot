@@ -220,6 +220,20 @@ enum SelfTest {
                 check("半像素停靠测试造图失败", false)
             }
 
+            // 白底稀疏页面（真实网页的样子）：完美解不许被"分离度"误杀（1.0.26）。
+            // 旧门比的是窗口内均值（±7px 里每个偏移都"挺像"），mad=0 的完美解
+            // 也拉不开 8 的差距 → 慢速滚动频繁提示"这一帧没对上"。
+            if let sparse = sparseTextPage(width: 480, height: 1200),
+               let spTop = sparse.cropping(to: CGRect(x: 0, y: 0, width: 480, height: viewH)),
+               let spBottom = sparse.cropping(to: CGRect(x: 0, y: 137, width: 480, height: viewH)) {
+                let r = ImageStitch.align(top: spTop, bottom: spBottom)
+                check("白底稀疏页面也能对上（\(r?.offset.description ?? "nil")）", r?.offset == 137)
+                check("页面没动判成相同", ImageStitch.isNearlyIdentical(spTop, spTop))
+                check("页面滚了就判成不同", !ImageStitch.isNearlyIdentical(spTop, spBottom))
+            } else {
+                check("白底稀疏页面造图失败", false)
+            }
+
             // 取景框几何：选区必须**整个**落在面板的透明区里。
             // 1.0.5 的血案是面板盖在选区上还画了预览，抓帧把自己拍进去了。
             let region = NSRect(x: 300, y: 200, width: 480, height: 500)
@@ -1480,6 +1494,41 @@ enum SelfTest {
         while y < height {
             ctx.draw(tile, in: CGRect(x: 0, y: CGFloat(y), width: CGFloat(width), height: CGFloat(period)))
             y += period
+        }
+        return ctx.makeImage()
+    }
+
+    /// 白底稀疏页面：白背景 + 一行行"文字条"（长短不一、起始位置随机）。
+    /// 真实网页就长这样 —— 大片留白，纹理只占一小部分，是"分离度"类判据
+    /// 最容易误杀的形态（1.0.26 用它钉住"完美解不许被拒"）。
+    private static func sparseTextPage(width: Int, height: Int) -> CGImage? {
+        guard let ctx = CGContext(data: nil, width: width, height: height,
+                                  bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                                    | CGBitmapInfo.byteOrder32Little.rawValue) else { return nil }
+        ctx.setFillColor(CGColor(gray: 1, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height)))
+        ctx.setFillColor(CGColor(gray: 0.16, alpha: 1))
+        var seed: UInt64 = 7
+        func rnd(_ n: Int) -> Int {
+            seed = seed &* 6364136223846793005 &+ 1442695040888963407
+            return Int((seed >> 33) % UInt64(max(1, n)))
+        }
+        var y = 10
+        while y < height - 20 {
+            // 每行画 3 条细笔画（1~2px 高）：真实文字有垂直方向的细结构，
+            // 拿实心色块的话上下平移 1px 内部像素完全一样，会出现一堆"完美解"打平
+            var x = 30 + rnd(40)
+            let end = width - 30 - rnd(60)
+            while x < end {
+                let w = 6 + rnd(26)
+                let h = 1 + rnd(2)
+                ctx.fill(CGRect(x: CGFloat(x), y: CGFloat(y + rnd(8)),
+                                width: CGFloat(w), height: CGFloat(h)))
+                x += w + 5 + rnd(10)
+            }
+            y += 40
         }
         return ctx.makeImage()
     }

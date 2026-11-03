@@ -85,6 +85,14 @@ enum ImageStitch {
         }
         guard !candidates.isEmpty else { return nil }
 
+        // 🔴 1.0.26：分离度跟**全局基线**比，不再跟窗口内均值比。
+        // 窗口只覆盖 base±span（span ≈ 7px），白底多的页面里附近几个偏移得分
+        // 本来就一样低（实测窗口均值 4.4，而最优解 mad=0），"最优比平均好 8"
+        // 这条会把**数学上完美**的解拒掉 —— 用户症状就是"滚得很慢也老提示
+        // 这一帧没对上"。中位数对个别错位周期不敏感，也不随页面明暗漂移。
+        let sortedMads = candidates.map(\.score).sorted()
+        let baseline = sortedMads[sortedMads.count / 2]
+
         // 候选窗口：粗搜前几名 + （有 hint 时）离 hint 最近的那个。
         // 10 而不是 6：强横向条纹页（表格 / 代码编辑器）在粗搜里同相位候选一大把，
         // 多精修几个窗口是毫秒级开销，换第一段（无 hint）多一分命中真解的机会。
@@ -106,13 +114,14 @@ enum ImageStitch {
         let colStep = max(1, targetW / 320)
 
         if debugLog {
-            FileHandle.standardError.write("[stitch] maxD=\(maxD) 窗口=\(centers.sorted()) ratio=\(String(format: "%.2f", ratio)) span=\(span)\n".data(using: .utf8)!)
+            FileHandle.standardError.write("[stitch] maxD=\(maxD) 窗口=\(centers.sorted()) ratio=\(String(format: "%.2f", ratio)) span=\(span) baseline=\(String(format: "%.2f", baseline))\n".data(using: .utf8)!)
         }
         var solutions: [(d: Int, mad: Double, texture: Double)] = []
         for center in centers.sorted() {
             let base = Int((Double(center) * ratio).rounded())
             guard let r = refineWindow(top: fTop, bottom: fBottom, base: base, span: span,
-                                       rowStep: rowStep, colStep: colStep) else { continue }
+                                       rowStep: rowStep, colStep: colStep,
+                                       baseline: baseline) else { continue }
             // 相邻窗口精修出来的可能是同一个偏移。🔴 合并时留 **mad 更小的那个**，
             // 不是先到的 —— 窗口按 center 升序扫，低窗口可能先交出一个"还行但不是
             // 最优"的解（1.0.15 实测：伪解 d=136 mad=14.7 先进队，把真解 d=137
@@ -142,13 +151,19 @@ enum ImageStitch {
 
     /// 在 base±span 里挑 mad 最小的偏移，并做质量门。
     ///
-    /// 质量门 ①：像素级对上（mad 很小，只容忍亚像素重采样的误差）。
-    /// 质量门 ②：得跟"错的偏移"拉开差距 —— 纯色 / 空白画面里每个候选的 mad 都是 0，
-    /// 最优解毫无意义。1.0.5 曾用 `texture >= 1 || mad <= 1.5` 兜底，纯色恰好走后者，
-    /// 把"什么都不像"当成"完美匹配"拼了进去。改成看候选间分离度，跟画面亮不亮、
-    /// 有没有细节都无关。
+    /// 🔴 1.0.26：分离度的参照系换成**全局粗搜中位数**（`baseline`）。
+    /// 原来比的是本窗口内所有候选的均值 —— 窗口只有 ±7px 宽，白底页面里
+    /// 附近每个偏移都"挺像"（实测均值 4.4~6.5），于是一个 mad=0（逐像素
+    /// 完全相等）的完美解也会因为"没拉开 8 的差距"被拒。这是慢速滚动
+    /// 频繁提示"这一帧没对上"的主因，offline 复现 192 例里旧门误杀 61 例。
+    ///
+    /// 门 ⓪：逐像素级完美（mad ≤ 1）且画面有纹理 → 直接认。纯色页面纹理
+    /// 接近 0，仍然会被挡住（1.0.5 的教训：纯色里"什么都不像"不能当成完美匹配）。
+    /// 门 ①：整数像素级对上，要求比全局基线低 8。
+    /// 门 ②：亚像素余量（1.0.15），比基线低 12 —— 半像素重采样会把正确 d 的
+    /// mad 抬到 10~20，这是"对上了但带误差"，不是"对错了"。
     private static func refineWindow(top: Gray, bottom: Gray, base: Int, span: Int,
-                                     rowStep: Int, colStep: Int)
+                                     rowStep: Int, colStep: Int, baseline: Double)
         -> (d: Int, mad: Double, texture: Double)? {
         // 上界只能按 top 的高度收（d 可以大于 bottom 的高度，
         // 只要 bottom 第 0 行还能落到 top 里面去）—— 拿 bottom.height 卡会
@@ -171,17 +186,29 @@ enum ImageStitch {
 
         let meanMad = allMads.reduce(0, +) / Double(allMads.count)
         if debugLog {
-            let info = "窗口 \(lower)...\(upper) best=d\(result.d) mad=\(String(format: "%.2f", result.mad)) mean=\(String(format: "%.1f", meanMad))"
+            let info = "窗口 \(lower)...\(upper) best=d\(result.d) mad=\(String(format: "%.2f", result.mad)) mean=\(String(format: "%.1f", meanMad)) baseline=\(String(format: "%.1f", baseline))"
             FileHandle.standardError.write("[stitch]   \(info)\n".data(using: .utf8)!)
         }
-        // 门 ①：整数像素级对上（mad 很小，只容忍亚像素重采样的误差）。
-        if result.mad <= 6, meanMad - result.mad >= 8 { return result }
-        // 门 ②：亚像素余量（1.0.15）。触控板 / 平滑滚动停下的位置经常带小数
-        // （比如 137.4px），两帧各自带着抗锯齿重采样渲染，正确 d 的 mad 会被
-        // 抬到 10~20、跟相邻 d 拉不出深坑 —— 这不是"对错了"，是"对上了但带着
-        // 半像素误差"。放宽容忍，但要求与窗口内其他候选的分离度更大（防低纹理瞎拼）。
-        if result.mad <= 20, meanMad - result.mad >= 12 { return result }
+        // 门 ⓪（1.0.26）：逐像素级完美 + 画面有纹理 → 直接认。
+        if result.mad <= 1.0, result.texture >= 1.5 { return result }
+        // 门 ①：整数像素级对上（分离度比全局基线）
+        if result.mad <= 6, baseline - result.mad >= 8 { return result }
+        // 门 ②：亚像素余量（1.0.15），分离度要求更大，防低纹理瞎拼
+        if result.mad <= 20, baseline - result.mad >= 12 { return result }
         return nil
+    }
+
+    /// 两帧是不是几乎一模一样（页面根本没动：滚到头 / 光标压在不可滚区域）。
+    ///
+    /// 浮层拿它把"没滚"和"对不上"分开：前者不该报"这一帧没对上"，
+    /// 否则用户只是滚到头了，界面一路报警像出了故障。
+    static func isNearlyIdentical(_ a: CGImage, _ b: CGImage) -> Bool {
+        let w = min(240, min(a.width, b.width))
+        guard w > 16,
+              let ga = makeGray(a, width: w), let gb = makeGray(b, width: w),
+              ga.height == gb.height,
+              let s = score(top: ga, bottom: gb, d: 0, rowStep: 1, colStep: 1) else { return false }
+        return s.mad <= 2.0
     }
 
     /// 把 bottom 接到 top 下面（内部自己求偏移）。失败返回 nil。

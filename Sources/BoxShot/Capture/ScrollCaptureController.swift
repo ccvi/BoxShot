@@ -349,6 +349,13 @@ final class ScrollCaptureController: NSObject {
         }
 
         let isHorizontal = direction == 1
+        // 页面根本没动（滚到头 / 光标压在不可滚区域）：静默跳过。
+        // 以前这种帧会一路"没对上"→"内容跳变"，把"没滚"演成一次故障。
+        // 横竖都做这个判断：两帧逐像素一样，跟方向无关。
+        if ImageStitch.isNearlyIdentical(current, frame) {
+            frameView?.status = "页面没动（可能到头了），继续滚动"
+            return
+        }
         var alignment: ImageStitch.Alignment?
         if isHorizontal {
             if let a = ImageStitch.rotate90(current), let b = ImageStitch.rotate90(frame) {
