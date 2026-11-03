@@ -47,7 +47,7 @@ final class CameraBubbleController {
         self.placement = placement
     }
 
-    /// 同一档位在两种模式下的实际点数不同（画中画 200/180/150，摄像头录制 600/550/500）
+    /// 同一档位在两种模式下的实际点数不同（画中画 200/180/150，摄像头录制 680/600/500）
     private var side: CGFloat {
         placement == .centered ? size.cameraSide : size.side
     }
@@ -122,7 +122,7 @@ final class CameraBubbleController {
     /// · 画中画（右下角小窗）：按短边 **45%** 收 —— 170pt 的圆压在 300×200 的选区上
     ///   会把被录内容盖掉大半，这种极端情况必须缩。
     /// · 摄像头录制（居中大窗）：只在**真的塞不进**录制框**时才收（按 100% 短边）——
-    ///   用户口径是"我设 600 就是 600"，600 的圆放进 770 高的框里就该原样落地。
+    ///   用户口径是"我设 680 就是 680"，680 的圆放进 721 高的框里就该原样落地。
     static func fittedSide(wanted: CGFloat, anchor: CGRect, placement: Placement) -> CGFloat {
         let ratio: CGFloat = (placement == .centered) ? 1.0 : 0.45
         return min(wanted, max(96, min(anchor.width, anchor.height) * ratio))

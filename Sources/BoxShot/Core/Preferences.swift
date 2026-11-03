@@ -72,7 +72,8 @@ let recordFPSOptions: [Int] = [10, 15, 24, 25, 30, 48, 50, 60]
 ///   1.0.20 一度把这一套合并成 600/550/500，结果区域录制里一个 600 的圆把画面盖掉大半，
 ///   用户要求「区域录制、全屏录制还原成之前的」—— 所以恢复。
 /// · `cameraSide` —— **摄像头录制**（固定录制框）里居中摆的那个大取景框：
-///   大 600 / 中 550 / 小 500。用户口径就是这三个数 —— 人脸要看得清。
+///   大 680 / 中 600 / 小 500（1.0.24 起，「大」再放大一档；虚线录制框尺寸不动）。
+///   用户口径就是这三个数 —— 人脸要看得清。
 enum CameraBubbleSize: String, Codable, CaseIterable, Identifiable {
     case large
     case medium
@@ -97,8 +98,8 @@ enum CameraBubbleSize: String, Codable, CaseIterable, Identifiable {
     /// 摄像头录制（固定录制框）里取景框的边长，单位 pt
     var cameraSide: CGFloat {
         switch self {
-        case .large:  return 600
-        case .medium: return 550
+        case .large:  return 680
+        case .medium: return 600
         case .small:  return 500
         }
     }

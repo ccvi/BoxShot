@@ -612,7 +612,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         guard let screen = NSScreen.main else { log("没有屏幕"); exit(0) }
         // 这里测的是「区域 / 全屏录制里的画中画」，所以用 recordCameraSize（小尺寸、贴右下角），
-        // 不是摄像头录制那套 600/550/500 —— 两套尺寸不能串用。
+        // 不是摄像头录制那套 680/600/500 —— 两套尺寸不能串用。
         let pipeSize = model.prefs.value.recordCameraSize
         let bubble = CameraBubbleController(size: pipeSize, placement: .bottomTrailing)
         cameraProbeBubble = bubble

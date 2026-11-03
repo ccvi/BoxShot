@@ -547,7 +547,7 @@ final class DashedFrameView: NSView {
 final class RecordOptionsView: NSView {
 
     private weak var model: AppModel?
-    /// 摄像头录制模式：取景框那行改的是另一套尺寸（600/550/500 而不是 200/180/150）
+    /// 摄像头录制模式：取景框那行改的是另一套尺寸（680/600/500 而不是 200/180/150）
     private let cameraMode: Bool
     /// 取景框大小在弹层里切换时实时改已打开的取景框（工具条负责接线到 cameraBubble）
     var onCameraSizeChange: ((CameraBubbleSize) -> Void)?

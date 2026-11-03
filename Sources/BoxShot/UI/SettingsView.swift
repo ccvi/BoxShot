@@ -443,7 +443,7 @@ private struct RecordPane: View {
                 trailing: prefs.value.recordCamera
                     ? "当前 \(Int(prefs.value.recordCameraSize.side)) pt"
                     : "先勾选下面的摄像头取景框")
-            // 摄像头录制是独立功能：它那个居中大取景框是另一套尺寸（600/550/500）
+            // 摄像头录制是独立功能：它那个居中大取景框是另一套尺寸（680/600/500）
             row("摄像头录制",
                 Picker("", selection: prefs.binding(\.cameraRecordSize)) {
                     ForEach(CameraBubbleSize.allCases) { size in
