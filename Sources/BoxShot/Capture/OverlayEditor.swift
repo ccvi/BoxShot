@@ -1524,11 +1524,11 @@ final class OverlayEditorView: NSView {
         if let existing, let hit = doc.shapes.first(where: { $0.id == existing.id }) {
             shape = hit
         } else {
-            // 新文字先挂进 shapes（不打撤销点）：这样选中框和包围盒跟着实时长
-            var fresh = AnnotationShape(tool: .text, points: [pixelPoint],
+            // 新文字先挂进 shapes（不打撤销点）：这样选中框和包围盒跟着实时长。
+            // 默认字号 30 **点** → 换成图像像素（同一份口径：渲染器按像素画）
+            let fresh = AnnotationShape(tool: .text, points: [pixelPoint],
                                         color: doc.color, lineWidth: 0, text: "",
                                         fontSize: 30 * pixelScale)
-            fresh.fontSize = 30 * pixelScale
             doc.shapes.append(fresh)
             shape = fresh
         }
