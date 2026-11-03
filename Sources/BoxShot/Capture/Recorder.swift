@@ -54,7 +54,15 @@ final class RecorderController: NSObject {
     private var systemAudioInput: AVAssetWriterInput?
     private var micAudioInput: AVAssetWriterInput?
 
-    private var captureSession: AVCaptureSession?
+    /// 麦克风采集会话（`audio == .mic` 时才有）
+    ///
+    /// 🔴 1.0.27 拆字段：这个变量以前**同时**被麦克风和摄像头（画中画）两路赋值 ——
+    /// 谁后赋谁赢，先建的那个 session 再也没人 `stopRunning()`，一直跑着继续往
+    /// writer 上 append。表现在成片里是「同一段声音出现两遍」（回响），
+    /// 收工后是「麦克风/摄像头指示灯还亮着」。两路各有各的会话，别再合并。
+    private var micSession: AVCaptureSession?
+    /// 摄像头采集会话（画中画合成用）
+    private var cameraSession: AVCaptureSession?
     private var ciContext: CIContext?
 
 
@@ -130,7 +138,7 @@ final class RecorderController: NSObject {
         // 🔴 这里以前是 `guard … else { return }`：真正的"点了录制没反应"。
         // 上一路录制还没收完尾就再点一次，函数静默返回，调用方以为已经在录，
         // 按钮变成停止、计时器开始走，可一帧都不会有。宁可抛错让用户看见原因。
-        guard writer == nil, stream == nil, captureSession == nil else {
+        guard writer == nil, stream == nil, micSession == nil, cameraSession == nil else {
             throw NSError(domain: "BoxShot", code: 3, userInfo: [
                 NSLocalizedDescriptionKey: "上一次录制还在收尾，请稍等一秒再试",
             ])
@@ -172,13 +180,13 @@ final class RecorderController: NSObject {
 
         // ── 音频输入（AAC 48k 立体声）──
         let audioSettings = Self.audioOutputSettings
-        if audio == .system {
+        if audio.tracks.system {
             let input = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
             input.expectsMediaDataInRealTime = true
             if writer.canAdd(input) { writer.add(input) }
             systemAudioInput = input
         }
-        if audio == .mic {
+        if audio.tracks.mic {
             let input = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
             input.expectsMediaDataInRealTime = true
             if writer.canAdd(input) { writer.add(input) }
@@ -196,10 +204,10 @@ final class RecorderController: NSObject {
 
         // ── 麦克风 ──
         // 🔴 这里原来连着写了两遍（`audio == .mic && !isGIF` 和 `audio == .mic`，GIF 时代留下的），
-        // 于是每次录音都会建两个 AVCaptureSession：第二个把第一个从 captureSession
+        // 于是每次录音都会建两个 AVCaptureSession：第二个把第一个从（当时共用的）会话字段
         // 上顶掉，第一个就此失控地一直跑着占着麦克风，两路音频输出还同时往同一个
         // writer input 上 append —— 轻则成片音轨错乱，重则 writer 直接报错。
-        if audio == .mic {
+        if audio.tracks.mic {
             requestMicThenCapture()
         }
 
@@ -232,14 +240,23 @@ final class RecorderController: NSObject {
                 config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(max(10, min(60, fps))))
                 config.queueDepth = 8
                 config.showsCursor = showCursor
-                config.capturesAudio = (audio == .system)
+                config.capturesAudio = audio.tracks.system
+                // 显式关掉 SCK 自带的麦克风采集：我们只按设置走一条音频路，
+                // 让它再偷偷抓一路麦，就是"回响"的另一种来法（macOS 15+）
+                if #available(macOS 15.0, *) {
+                    config.captureMicrophone = false
+                }
                 config.sampleRate = 48000
                 config.channelCount = 2
                 config.excludesCurrentProcessAudio = true
 
+                NSLog("[BoxShot] 音频路由：capturesAudio=%d 系统轨=%d 麦克风轨=%d（两者互斥）",
+                      audio.tracks.system ? 1 : 0,
+                      systemAudioInput != nil ? 1 : 0,
+                      micAudioInput != nil ? 1 : 0)
                 let stream = SCStream(filter: filter, configuration: config, delegate: nil)
                 try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: nil)
-                if audio == .system {
+                if audio.tracks.system {
                     try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: nil)
                 }
                 self.stream = stream
@@ -335,8 +352,10 @@ final class RecorderController: NSObject {
     }
 
     private func teardownPipeline() {
-        captureSession?.stopRunning()
-        captureSession = nil
+        micSession?.stopRunning()
+        micSession = nil
+        cameraSession?.stopRunning()
+        cameraSession = nil
         stream = nil
         writer = nil
         videoInput = nil
@@ -396,7 +415,7 @@ final class RecorderController: NSObject {
         if session.canAddOutput(output) { session.addOutput(output) }
         session.commitConfiguration()
         session.startRunning()
-        captureSession = session
+        cameraSession = session
         cameraActive = true
     }
 
@@ -416,6 +435,10 @@ final class RecorderController: NSObject {
     }
 
     private func beginMicCapture() {
+        // 🔴 权限回调是异步的：用户点完"允许"时，这路录制可能早就停了、
+        // 或者已经切到「系统声音」模式。这时候再开麦克风，缓冲会被打进
+        // 当前那一路（以前共用 handler 时是系统音频轨）→ 同一段声音两遍 = 回响。
+        guard writer != nil, micAudioInput != nil, micSession == nil else { return }
         let session = AVCaptureSession()
         guard let device = AVCaptureDevice.default(for: .audio),
               let input = try? AVCaptureDeviceInput(device: device) else {
@@ -429,7 +452,7 @@ final class RecorderController: NSObject {
         if session.canAddOutput(output) { session.addOutput(output) }
         session.commitConfiguration()
         session.startRunning()
-        captureSession = session
+        micSession = session
     }
 }
 
@@ -443,7 +466,7 @@ extension RecorderController: SCStreamOutput {
         case .screen:
             handleScreenBuffer(sampleBuffer)
         case .audio:
-            handleAudioBuffer(sampleBuffer)
+            handleSystemAudio(sampleBuffer)
         default:
             break
         }
@@ -495,22 +518,34 @@ extension RecorderController: SCStreamOutput {
 
     // ── 音频帧 ──
 
-    private func handleAudioBuffer(_ sampleBuffer: CMSampleBuffer) {
-        guard CMSampleBufferDataIsReady(sampleBuffer) else { return }
+    /// 系统音频帧（SCStream 的 `.audio` 输出）
+    ///
+    /// 🔴 1.0.27 修「系统声音有回响」：这里以前是**两路共用**一个 handler ——
+    /// 麦克风那条 `AVCaptureAudioDataOutput` 也调它，而它只按
+    /// "systemAudioInput 有没有"决定往哪 append。于是只要录音时系统声音这一路
+    /// 存在（systemAudioInput != nil），晚到的麦克风缓冲就会被塞进系统音频轨，
+    /// 成片里同一段声音出现两次（一次数字、一次经空气绕回麦克风）—— 听感就是回响。
+    /// 现在两路各管各的，串不进来。
+    private func handleSystemAudio(_ sampleBuffer: CMSampleBuffer) {
+        guard let buffer = audioBuffer(sampleBuffer), let input = systemAudioInput else { return }
+        if input.isReadyForMoreMediaData { input.append(buffer) }
+    }
+
+    /// 麦克风帧（AVCaptureAudioDataOutput）
+    private func handleMicAudio(_ sampleBuffer: CMSampleBuffer) {
+        guard let buffer = audioBuffer(sampleBuffer), let input = micAudioInput else { return }
+        if input.isReadyForMoreMediaData { input.append(buffer) }
+    }
+
+    /// 两路音频共用的前置处理：丢弃暂停期间的帧、恢复后把暂停空隙从 PTS 里减掉
+    private func audioBuffer(_ sampleBuffer: CMSampleBuffer) -> CMSampleBuffer? {
+        guard CMSampleBufferDataIsReady(sampleBuffer) else { return nil }
         stateLock.lock()
         let pausedNow = paused
         let shift = pausedTotal
         stateLock.unlock()
-        guard sessionStarted, !pausedNow else { return }
-
-        let buffer = shift > .zero ? retimed(sampleBuffer, shift: shift) : sampleBuffer
-        guard let buffer else { return }
-        // 系统音频与麦克风各自的 input 独立 ready
-        if let input = systemAudioInput, input.isReadyForMoreMediaData {
-            input.append(buffer)
-        } else if systemAudioInput == nil, let micInput = micAudioInput, micInput.isReadyForMoreMediaData {
-            micInput.append(buffer)
-        }
+        guard sessionStarted, !pausedNow else { return nil }
+        return shift > .zero ? retimed(sampleBuffer, shift: shift) : sampleBuffer
     }
 
     /// 把一个 sample buffer 的整体时间戳往前挪 shift（暂停补偿）
@@ -584,10 +619,11 @@ extension RecorderController: AVCaptureVideoDataOutputSampleBufferDelegate, AVCa
                 cameraLock.unlock()
             }
         } else if output is AVCaptureAudioDataOutput {
-            // 🔴 走 handleAudioBuffer 而不是直接 append：暂停期间收到的音频要丢、
+            // 🔴 走 handleMicAudio 而不是直接 append：暂停期间收到的音频要丢、
             // 恢复后要把暂停那段空隙从 PTS 里减掉。以前这里是裸 append，
             // 成片里"暂停"那几分钟是有声音的，恢复后又对不上嘴型。
-            handleAudioBuffer(sampleBuffer)
+            // 走**麦克风专用**入口，绝不串到系统音频轨（那条路是回响的来源）。
+            handleMicAudio(sampleBuffer)
         }
     }
 }

@@ -31,6 +31,20 @@ enum RecordAudioSource: String, Codable, CaseIterable, Identifiable {
         case .mic:    return "麦克风"
         }
     }
+
+    /// 这条音源要建哪几条音频轨 —— **永远最多一条**。
+    ///
+    /// 🔴 1.0.27 修「系统声音有回响」时立的规矩：回响的根子就是
+    /// "两路音频同时往一条轨上 append"（系统声音那一路 + 麦克风那一路）。
+    /// 现在把"最多一条"写成一个可断言的事实：将来真要加"系统 + 麦克风"混录，
+    /// 必须改这里，自检会先拦下来，而不是让成片里悄悄多出一层回声。
+    var tracks: (system: Bool, mic: Bool) {
+        switch self {
+        case .none:   return (false, false)
+        case .system: return (true, false)
+        case .mic:    return (false, true)
+        }
+    }
 }
 
 /// 录制封装格式

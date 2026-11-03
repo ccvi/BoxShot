@@ -1312,6 +1312,22 @@ enum SelfTest {
             check("窗口录制 rawValue 稳定", ShotAction.recordWindow.rawValue == "recordWindow")
         }
 
+        // ── 录制音轨：每种音源最多建一条轨（1.0.27 修「系统声音有回响」）──
+        // 回响的根子是两路音频（SCStream 系统音频 + AVCapture 麦克风）同时往一条
+        // writer input 上 append。这条断言盯的就是"永远别出现两条轨"。
+        do {
+            check("音源：系统声音只建系统轨",
+                  RecordAudioSource.system.tracks.system && !RecordAudioSource.system.tracks.mic)
+            check("音源：麦克风只建麦克风轨",
+                  RecordAudioSource.mic.tracks.mic && !RecordAudioSource.mic.tracks.system)
+            check("音源：无 不建任何音轨",
+                  !RecordAudioSource.none.tracks.system && !RecordAudioSource.none.tracks.mic)
+            let doubled = RecordAudioSource.allCases.filter {
+                ($0.tracks.system ? 1 : 0) + ($0.tracks.mic ? 1 : 0) > 1
+            }
+            check("没有任何音源会同时建两条轨（\(doubled.count) 个）", doubled.isEmpty)
+        }
+
         // ── 全局热键的可用性门槛 ──
         // 「快捷键设置不可用」有两条独立的病因：一是录制控件根本收不到键盘
         // （NSButton 默认不接受第一响应者），二是录下来的键不符合注册条件

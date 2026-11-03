@@ -101,12 +101,13 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
         let recordTitle = model.isRecording ? "停止录制" : "区域录制"
         menu.addItem(item(recordTitle, .recordRegion, symbol: "record.circle"))
-        menu.addItem(item("全屏录制", .recordFullscreen, symbol: "video.fill"))
-        // 用户指定：入口就放在「全屏录制」正下方
-        menu.addItem(item("摄像头录制", .recordCamera, symbol: "camera.fill"))
-        // 窗口录制放在摄像头录制之后 —— 不能插到中间，否则「摄像头录制」就不在
-        // 「全屏录制」正下方了（那是用户当初点名的位置）
+        // 🔴 1.0.27：用户点名「窗口录制放到区域录制下面」。它俩本质是同一条链路
+        // （窗口录制 = 区域录制 + 点选窗口自动填框），挨在一起更符合语义。
+        // 约定变更：原先「摄像头录制必须紧贴在全屏录制正下方」那条不再强制 —— 现在是
+        // 区域 → 窗口 → 全屏 → 摄像头 的顺序，三种"录哪儿"连成一组。
         menu.addItem(item("窗口录制", .recordWindow, symbol: "macwindow"))
+        menu.addItem(item("全屏录制", .recordFullscreen, symbol: "video.fill"))
+        menu.addItem(item("摄像头录制", .recordCamera, symbol: "camera.fill"))
         menu.addItem(.separator())
 
         menu.addItem(item("贴图", .pinClipboard, symbol: "pin"))
