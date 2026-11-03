@@ -158,6 +158,8 @@ private struct ShotPane: View {
             }
             Toggle("截图后弹出标注浮层（关闭 = 直接复制到剪贴板）", isOn: prefs.binding(\.openEditorAfterShot))
                 .padding(.leading, 90)
+            Toggle("完成后直接关闭截图窗口（OCR / 解码 QR / 贴图 / 复制 / 下载）", isOn: prefs.binding(\.closeAfterAction))
+                .padding(.leading, 90)
             Toggle("智能识别窗口（移动鼠标自动高亮）", isOn: prefs.binding(\.windowHighlight))
                 .padding(.leading, 90)
             Toggle("Retina 截图缩小到 1x 再输出", isOn: prefs.binding(\.downscaleRetina))

@@ -188,6 +188,9 @@ struct Preferences: Codable, Equatable {
     var autoSave: Bool = false
     /// Retina 截图缩小到 1x
     var downscaleRetina: Bool = false
+    /// 完成动作后直接关闭截图浮层（用户 1.0.24 口径：
+    /// "完成" = OCR / 解码 QR / 贴图 / 复制 / 下载任一动作成功）
+    var closeAfterAction: Bool = false
     /// 截图历史保留张数（0 = 不记录）
     var maxShotHistory: Int = 20
 
@@ -271,6 +274,7 @@ struct Preferences: Codable, Equatable {
         saveDirectory = try c.decodeIfPresent(String.self, forKey: .saveDirectory) ?? f.saveDirectory
         autoSave = try c.decodeIfPresent(Bool.self, forKey: .autoSave) ?? f.autoSave
         downscaleRetina = try c.decodeIfPresent(Bool.self, forKey: .downscaleRetina) ?? f.downscaleRetina
+        closeAfterAction = try c.decodeIfPresent(Bool.self, forKey: .closeAfterAction) ?? f.closeAfterAction
         maxShotHistory = try c.decodeIfPresent(Int.self, forKey: .maxShotHistory) ?? f.maxShotHistory
         magnifierEnabled = try c.decodeIfPresent(Bool.self, forKey: .magnifierEnabled) ?? f.magnifierEnabled
         magnifierLineColor = try c.decodeIfPresent(String.self, forKey: .magnifierLineColor) ?? f.magnifierLineColor
@@ -308,6 +312,7 @@ struct Preferences: Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case launchAtLogin, hideDockIcon, playSound, feedbackSound, showCrosshair
         case shotFormat, jpgQuality, openEditorAfterShot, windowHighlight, saveDirectory, autoSave, downscaleRetina
+        case closeAfterAction
         case maxShotHistory
         case magnifierEnabled, magnifierLineColor, magnifierOrigin, magnifierColorFormat, magnifierHashPrefix
         case pinDoubleClick, pinOpacity, pinShadow, maxPinHistory

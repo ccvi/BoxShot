@@ -698,6 +698,19 @@ enum SelfTest {
                                              from: Data(#"{"cameraRecordSize":"small"}"#.bytes)))?
                     .cameraRecordSize == .small)
 
+            // 完成即关（设置 → 截图，1.0.24）：默认关；开了之后动作成功就收浮层
+            check("完成即关默认是关的", Preferences().closeAfterAction == false)
+            check("完成即关读得回来",
+                  (try? JSONDecoder().decode(Preferences.self,
+                                             from: Data(#"{"closeAfterAction":true}"#.bytes)))?
+                    .closeAfterAction == true)
+            check("完成即关老配置缺字段回退默认",
+                  (try? JSONDecoder().decode(Preferences.self, from: Data("{}".bytes)))?
+                    .closeAfterAction == false)
+            check("完成即关纯函数跟开关走",
+                  OverlayEditorController.shouldCloseAfterAction(enabled: true)
+                      && !OverlayEditorController.shouldCloseAfterAction(enabled: false))
+
             // 固定录制框：16:9、居中、不出界、放得下 680 的取景框
             if let screen = NSScreen.main {
                 let visible = screen.visibleFrame

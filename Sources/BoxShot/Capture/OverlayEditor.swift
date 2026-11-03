@@ -52,6 +52,8 @@ final class OverlayEditorController: NSObject {
     private var monitors: [Any] = []
     /// 本次截图是否已落盘（保存过 / 自动保存过就不再重复写）
     private var didPersist = false
+    /// close() 只走一遍：动作后的延迟关 + 用户手点关闭可能撞车，第二遍直接跳过
+    private var didClose = false
     /// 裁剪后要"重开"：这段不许触发自动保存，否则会把裁剪前的图落盘
     private var suppressAutosave = false
 
@@ -305,6 +307,8 @@ final class OverlayEditorController: NSObject {
     }
 
     func close() {
+        guard !didClose else { return }
+        didClose = true
         // 关闭前把没确认的文字收下：自动保存开着的话，那行字要进落盘的图
         contentView?.commitTextEditing()
         autosaveIfNeeded()
@@ -942,11 +946,31 @@ final class OverlayEditorController: NSObject {
         return doc.rendered()
     }
 
+    // ── 完成即关（用户 1.0.24）─────────────────────────────
+    //
+    // 设置里的「完成后直接关闭截图窗口」：OCR / 解码 QR / 贴图 / 复制 / 下载
+    // 任一动作**成功**后就地把浮层收掉。三处细节：
+    // · 延迟 0.5s 再关 —— flashStatus 那句"已复制 / 已保存"得来得及看；
+    // · 延迟还顺手绕开老坑：不能在自己的按钮事件回调里同步拆自己的窗口
+    //   （asyncAfter 闭包强持有 self，close() 全程引用都活着）；
+    // · 失败不关：QR 没认出来、保存编码失败、保存面板点了取消，浮层都留着。
+
+    /// 动作成功后的统一出口：开了开关才关，没开就保持原行为
+    private func finishAfterAction() {
+        guard let model, model.prefs.value.closeAfterAction else { return }
+        let holder = self
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { holder.close() }
+    }
+
+    /// 自检用：给定开关状态，动作成功后应不应该关（纯函数，不碰 UI）
+    static func shouldCloseAfterAction(enabled: Bool) -> Bool { enabled }
+
     func copyToClipboard() {
         guard let image = renderedImage() else { return }
         Support.copyImageToClipboard(image)
         model?.playFeedbackSound()
         contentView?.flashStatus("已复制到剪贴板")
+        finishAfterAction()
     }
 
     func save() {
@@ -956,31 +980,38 @@ final class OverlayEditorController: NSObject {
 
         if prefs.autoSave, let dirPath = prefs.saveDirectory, !dirPath.isEmpty {
             let directory = URL(fileURLWithPath: dirPath, isDirectory: true)
-            write(image: image, format: prefs.shotFormat,
-                  quality: prefs.jpgQuality, to: Support.uniqueFileURL(in: directory, name: suggestedName))
+            if write(image: image, format: prefs.shotFormat,
+                     quality: prefs.jpgQuality, to: Support.uniqueFileURL(in: directory, name: suggestedName)) {
+                finishAfterAction()
+            }
             return
         }
         let panel = NSSavePanel()
         panel.nameFieldStringValue = suggestedName
         panel.allowedContentTypes = prefs.shotFormat == .png ? [.png] : [.jpeg]
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        write(image: image, format: prefs.shotFormat, quality: prefs.jpgQuality, to: url)
+        if write(image: image, format: prefs.shotFormat, quality: prefs.jpgQuality, to: url) {
+            finishAfterAction()
+        }
     }
 
-    private func write(image: CGImage, format: ShotFormat, quality: Double, to url: URL) {
+    @discardableResult
+    private func write(image: CGImage, format: ShotFormat, quality: Double, to url: URL) -> Bool {
         // 编码失败以前是静默 return：用户点「保存」什么都不发生，也看不到任何提示，
         // 看起来就像"保存格式这个设置没用"。宁可报一句，也别当无事发生。
         guard let data = ImageEncode.data(image, format: format, jpgQuality: quality) else {
             contentView?.flashStatus("\(format.title) 编码失败，换 PNG 再试")
-            return
+            return false
         }
         do {
             try data.write(to: url)
             didPersist = true
             model?.playFeedbackSound()
             contentView?.flashStatus("已保存：\(url.lastPathComponent)")
+            return true
         } catch {
             contentView?.flashStatus("保存失败：\(error.localizedDescription)")
+            return false
         }
     }
 
@@ -988,11 +1019,15 @@ final class OverlayEditorController: NSObject {
         guard let image = renderedImage() else { return }
         model?.pinImage(image)
         contentView?.flashStatus("已贴图")
+        finishAfterAction()
     }
 
     func ocr() {
         guard let image = renderedImage() else { return }
         model?.runOCR(image: image)
+        // OCR 没有回调可等：结果窗稍后自己弹出来。识别失败走的是全局报错，
+        // 浮层在这里就算"已交出去"，照样按完成关。
+        finishAfterAction()
     }
 
     func decodeQR() {
@@ -1004,6 +1039,8 @@ final class OverlayEditorController: NSObject {
             guard let self else { return }
             if let first = payloads.first {
                 self.contentView?.flashStatus("已复制：\(first)")
+                // 只在真认出来时才算"完成"：没认出来浮层留着，用户还得再试
+                self.finishAfterAction()
             } else {
                 self.contentView?.flashStatus("没有识别到 QR / 条形码")
             }

@@ -15,7 +15,13 @@ final class AppModel: ObservableObject {
     // 功能控制器（懒建：只有真的用到才创建窗口/流）
     private var regionSelector: RegionSelector?
     private var editorController: EditorWindowController?   // 独立编辑窗口（滚动截图结果等）
-    var overlayEditor: OverlayEditorController?             // 原位钉住浮层（区域/全屏/窗口截图）
+    var overlayEditor: OverlayEditorController?             // 最新一个原位浮层（诊断/自检都用它）
+    /// 全部还活着的原位浮层。
+    /// 🔴 1.0.24 修"僵尸窗口"：以前只留最新一个强引用，连续截图时旧的 controller
+    /// 被释放，但窗口还留在屏幕上 —— 按钮全是 [weak self]（self 已 nil）点了没反应，
+    /// Esc 监听同样失效，contentView 还持着 unowned controller（点了会崩）。
+    /// 现在并存的所有浮层都由这个数组保活，关闭时按身份摘除。
+    var overlayEditors: [OverlayEditorController] = []
     private var measureOverlay: MeasureOverlay?
     private var scrollController: ScrollCaptureController?
     private var recordToolbar: RecordToolbarController?
@@ -316,8 +322,11 @@ final class AppModel: ObservableObject {
                                                  fullDisplay: fullDisplay,
                                                  shapes: shapes)
         overlayEditor = controller
+        overlayEditors.append(controller)
         controller.onClose = { [weak self, weak controller] in
-            if let controller, self?.overlayEditor === controller {
+            guard let controller else { return }
+            self?.overlayEditors.removeAll { $0 === controller }
+            if self?.overlayEditor === controller {
                 self?.overlayEditor = nil
             }
         }
@@ -467,7 +476,7 @@ final class AppModel: ObservableObject {
         func presence(_ object: AnyObject?) -> String { object == nil ? "无" : "在！" }
         var lines: [String] = []
         lines.append("footprint: \(ByteCountFormatter.string(fromByteCount: Self.currentFootprint(), countStyle: .memory))")
-        lines.append("原位标注浮层: \(presence(overlayEditor))")
+        lines.append("原位标注浮层: \(overlayEditors.isEmpty ? "无" : "\(overlayEditors.count) 个")")
         lines.append("独立编辑窗口: \(presence(editorController))")
         lines.append("历史面板: \(presence(historyWindow))")
         lines.append("识别结果窗: \(presence(resultWindow))")
