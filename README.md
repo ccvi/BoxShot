@@ -690,6 +690,22 @@ container.appearance = Self.toolbarAppearance     // 工具条、颜色面板、
 
 复现/验证别靠肉眼看 app：写个 40 行的离屏渲染脚本，同一套深色底 + 模板图标分别渲染「不指定 tint」与「`.white`」两张 PNG 对比，前者发灰、后者纯白，一眼就分得清。
 
+## 编辑窗口的工具条：宁可滚，不许压（1.0.27）
+
+用户截图："按钮变形了" —— `OCR` 只剩个 `C`、`保存` 剩半个字、`完成` 被挤成 `完`。
+
+根因是**宽度账算不过来**：工具条自然宽度（14 个工具 + 6 色 + 取色器 + 粗细 + 撤销 + 6 个输出按钮）超过 1100pt，而编辑窗口宽度是**按图片自适应**的（`max(640, displayW)`，小图只有 640）。HStack 空间不够时 SwiftUI 的默认行为就是压缩子视图，压的正是 `Label` 里的文字。
+
+三层修法，缺一不可：
+
+1. **外面套一层横向 `ScrollView`**（+ 内层 `HStack.fixedSize(horizontal: true)`）。子视图按自然宽度排，压不动了；窄到放不下就横向滚。按钮永远不会变形。
+2. **「完成」钉在 ScrollView 外面**，固定在最右边。它是主操作、唯一带强调色的按钮，跟着一起滚到看不见就等于没有。
+3. **6 个色块 + 取色器 + 粗细滑杆收进"颜色圆点"的弹出面板**（`.popover`），跟截图浮层同一个交互（那边是 `colorDotAnchorButton` + `colorPanel` 一套）。这一下省 230pt，1000 宽的窗口里所有按钮都能一行放下，多数时候根本不需要滚。
+
+输出按钮（OCR / 美化 / 贴图 / 保存 / 复制）同时改成**图标 + tooltip**，只有「完成」保留文字 —— 再次省 200pt。
+
+> 顺带一条口径：常驻的「删除」按钮已按用户要求去掉（"不管有没有输文字，这个一直显示"）。删除能力没丢，挪到 `EditorWindowController` 的按键监听里：⌫ / Delete 删选中标注。🔴 那里判断"是不是在打字"必须是 `(firstResponder as? NSTextView)?.window === window` —— 只看类型不够：文字框被 SwiftUI 拆掉后，窗口的 firstResponder 可能还指着那个已经脱离层级的 NSTextView，于是 ⌫ 被当成"在打字"而放行，结果什么都没发生。另外 `CanvasTextEditor.dismantleNSView` 里要把第一响应者还给窗口。
+
 ## 文字原地编辑：输入时就是最终效果
 
 用户口径「输入的文字，在输入时就直接显示最终效果，输完确认，之后还可以点击修改」。以前是弹一个
@@ -733,6 +749,8 @@ container.appearance = Self.toolbarAppearance     // 工具条、颜色面板、
   `performClose`）。必须放行 `window.firstResponder is NSTextView`，让文本视图走 `cancelOperation:`——
   否则用户打一半按 Esc 整个窗口就没了。也别改成判 keyCode 53：输入法组字时的 Esc 是"取消候选"，
   抢掉会把拼音弄丢（浮层那边踩过）。
+- **输入时不许把这条文字再画一遍**（`for shape in doc.shapes where shape.id != editingID`）。两边都画会叠出重影：渲染的字和 NSTextView 的字差半个像素，看着像描了一层灰边（用户 1.0.27 截图："输入文字时显示重影"）。浮层那边一直是这么做的。
+- **输入框必须挂在 `.overlay` 里，不能当 ZStack 的兄弟视图**。NSTextView 有 `intrinsicContentSize`（宽度跟着文本长），摆在 ZStack 里会参与尺寸计算 → 容器被撑宽 → 画布右边多出一块空白（用户截图红框："一输入文字，布局变形了"）。overlay 不参与父视图布局，位置交给 `offset`，坐标原点跟画布一致。
 - **字号与浮层同源**：`EditorDocument.fontSizeOptions` 直接引用 `OverlayEditorController.fontSizeOptions`，
   换算走 `pixelFontSize(points:fitScale:)`（像素 = 点 ÷ fitScale，2x 屏 30pt → 60px，跟浮层
   `fontSize * pixelScale` 同一个口径）。下拉只在**文字工具 / 选中文字**时出现 —— 文字不吃 `lineWidth`，
