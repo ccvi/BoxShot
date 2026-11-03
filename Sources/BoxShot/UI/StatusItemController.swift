@@ -104,6 +104,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         menu.addItem(item("全屏录制", .recordFullscreen, symbol: "video.fill"))
         // 用户指定：入口就放在「全屏录制」正下方
         menu.addItem(item("摄像头录制", .recordCamera, symbol: "camera.fill"))
+        // 窗口录制放在摄像头录制之后 —— 不能插到中间，否则「摄像头录制」就不在
+        // 「全屏录制」正下方了（那是用户当初点名的位置）
+        menu.addItem(item("窗口录制", .recordWindow, symbol: "macwindow"))
         menu.addItem(.separator())
 
         menu.addItem(item("贴图", .pinClipboard, symbol: "pin"))

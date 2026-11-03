@@ -120,6 +120,9 @@ final class RecorderController: NSObject {
     // ── 启动 ────────────────────────────────────────────────
 
     /// region 为 nil = 全屏；否则为显示器局部坐标（点）
+    ///
+    /// 「窗口录制」走的就是这里：用户点选的窗口框被换算成一个普通区域
+    /// （见 AppModel.regionSelector(_:didConfirmWindow:)），和拉框选区完全同一条路。
     func startRecording(displayID: CGDirectDisplayID, region: CGRect?, audio: RecordAudioSource,
                         camera: Bool, fps: Int, showCursor: Bool,
                         format: RecordFileFormat = .mov, quality: RecordQuality = .high,

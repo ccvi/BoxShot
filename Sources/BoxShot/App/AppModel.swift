@@ -79,6 +79,8 @@ final class AppModel: ObservableObject {
             startRecording(fullscreen: false)
         case .recordFullscreen:
             startRecording(fullscreen: true)
+        case .recordWindow:
+            startWindowRecording()
         case .recordCamera:
             startFixedFrameRecording()
         case .pinClipboard:
@@ -135,10 +137,11 @@ final class AppModel: ObservableObject {
         case qr
     }
 
-    /// 选区结果的用途：截成图 / 作为录制区域 / 作为滚动截图的取景框
+    /// 选区结果的用途：截成图 / 作为录制区域 / 作为滚动截图的取景框 / 窗口录制点选
     private enum RegionMode {
         case capture
         case record
+        case recordWindow   // 窗口录制：点选窗口，不拉框
         case scroll
     }
 
@@ -594,6 +597,25 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 窗口录制：**就是区域录制 + 点选窗口自动填框**，两个动作后续完全同一条路
+    /// （虚线框、工具条、全屏/重选、系统声音、摄像头取景框全都一样）。
+    ///
+    /// 拾取方式复用窗口截图那套（强制高亮 + 无十字线 + 抓底图兜底）。
+    private func startWindowRecording() {
+        guard ScreenCapture.ensurePermission() else { return }
+        if let existing = recordToolbar {
+            let wasRecording = isRecording
+            existing.close(stopRecording: true)
+            if wasRecording { return }
+        }
+        discardActiveSelector()
+        regionMode = .recordWindow
+        let selector = RegionSelector()
+        selector.delegate = self
+        regionSelector = selector
+        selector.begin(highlightWindows: true, crosshair: false, loupe: nil, needBackdrop: true)
+    }
+
     private func showRecordToolbar(displayID: CGDirectDisplayID, region: CGRect?,
                                    autoCamera: Bool = false) {
         let controller = RecordToolbarController(model: self)
@@ -683,6 +705,10 @@ extension AppModel: RegionSelectionDelegate {
         case .record:
             regionMode = .capture
             showRecordToolbar(displayID: displayID, region: rect)
+        case .recordWindow:
+            // 窗口录制模式下用户改成拉框选区：按区域录制走，别让这次操作白费
+            regionMode = .capture
+            showRecordToolbar(displayID: displayID, region: rect)
         case .scroll:
             regionMode = .capture
             beginScrollCapture(displayID: displayID, region: rect)
@@ -704,6 +730,15 @@ extension AppModel: RegionSelectionDelegate {
     }
 
     func regionSelector(_ selector: RegionSelector, didConfirmWindow window: ScreenWindowInfo, displayID: CGDirectDisplayID) {
+        // 窗口录制：点完窗口就把它的框换算成选区，直接出录制工具条（不抓图）
+        if regionMode == .recordWindow {
+            regionMode = .capture
+            let frame = ScreenCapture.appKitFrame(fromGlobalTopLeft: window.frame)
+            let local = ScreenCapture.displayLocalRect(fromAppKit: frame, displayID: displayID)
+            showRecordToolbar(displayID: displayID, region: local)
+            releaseSelector(selector)
+            return
+        }
         Task { @MainActor in
             var image: CGImage?
             do {

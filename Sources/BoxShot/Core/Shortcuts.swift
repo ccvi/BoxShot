@@ -112,6 +112,7 @@ enum ShotAction: String, Codable, CaseIterable, Identifiable {
     case measure            // 屏幕测量
     case recordRegion       // 区域录制
     case recordFullscreen   // 全屏录制
+    case recordWindow       // 窗口录制（点选一个窗口，只录它自己）
     case recordCamera       // 摄像头录制（只录摄像头，不录屏幕）
     case pinClipboard       // 剪贴板贴图
     case openSettings       // 偏好设置
@@ -131,6 +132,7 @@ enum ShotAction: String, Codable, CaseIterable, Identifiable {
         case .measure:           return "屏幕测量"
         case .recordRegion:      return "区域录制"
         case .recordFullscreen:  return "全屏录制"
+        case .recordWindow:      return "窗口录制"
         case .recordCamera:      return "摄像头录制"
         case .pinClipboard:      return "剪贴板贴图"
         case .openSettings:      return "偏好设置"

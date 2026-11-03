@@ -23,6 +23,7 @@ final class RecordToolbarController: NSObject {
     private var displayID: CGDirectDisplayID = 0
     private var region: CGRect?          // nil = 全屏
     /// 摄像头录制模式：固定录制框，没有"全屏 / 重选区域"两个按钮
+    /// （窗口录制**不算**这个模式：它跟区域录制一模一样，只是框由点选窗口自动填好）
     private var isCameraMode = false
     private var framePanel: NSPanel?
     private var toolbarPanel: NSPanel?
@@ -53,6 +54,9 @@ final class RecordToolbarController: NSObject {
     }
 
     /// `autoCamera` = 进来就把摄像头取景框打开（「摄像头录制」的固定框用它）
+    ///
+    /// 🔴 窗口录制**不传任何新参数**：它进来时 region 已经是"点选窗口"换算出的
+    /// 区域，所以虚线框、工具条、全屏/重选、摄像头、系统声音全都跟区域录制一样。
     func begin(displayID: CGDirectDisplayID, region: CGRect?, autoCamera: Bool = false) {
         self.displayID = displayID
         self.region = region
@@ -144,10 +148,9 @@ final class RecordToolbarController: NSObject {
 
         let mic = add("mic", "麦克风声音", tag: 5)
         let sys = add("speaker.wave.2", "系统声音", tag: 6)
-        let cam = add("video", "摄像头取景框", tag: 8)
         micButton = mic
         systemButton = sys
-        cameraButton = cam
+        cameraButton = add("video", "摄像头取景框", tag: 8)
         stack.addArrangedSubview(makeDivider())
 
         add("slider.horizontal.3", "录屏选项", tag: 7)

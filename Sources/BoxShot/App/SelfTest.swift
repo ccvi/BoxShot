@@ -1302,6 +1302,16 @@ enum SelfTest {
             try? FileManager.default.removeItem(at: first)
         }
 
+        // ── 窗口录制：动作在表里、rawValue 稳定（1.0.27）──
+        // 它跟区域录制共用同一根工具条，唯一的新东西就是"这个动作要能被菜单/设置/热键
+        // 正常列出来"；rawValue 是写进设置文件的接口，改了就丢用户的热键绑定。
+        do {
+            check("窗口录制在动作表里",
+                  ShotAction.allCases.contains(.recordWindow)
+                    && ShotAction.recordWindow.title == "窗口录制")
+            check("窗口录制 rawValue 稳定", ShotAction.recordWindow.rawValue == "recordWindow")
+        }
+
         // ── 全局热键的可用性门槛 ──
         // 「快捷键设置不可用」有两条独立的病因：一是录制控件根本收不到键盘
         // （NSButton 默认不接受第一响应者），二是录下来的键不符合注册条件
