@@ -136,16 +136,38 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
         removeEscMonitor()
         escMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, let window = self.window, event.window === window else { return event }
+            // 焦点在"还在窗口里的"文本视图上 = 正在输入文字。
+            // 🔴 必须连 `tv.window === window` 一起判：文字框被拆掉后，窗口的
+            // firstResponder 可能还指着那个已经脱离层级的 NSTextView，
+            // 只看类型会把 ⌫ / Esc 全部误判成"在打字"而放行。
+            let editingText = (window.firstResponder as? NSTextView).map { $0.window === window } ?? false
             if event.keyCode == 53 {
                 // 🔴 正在输入文字时 Esc 是"取消这段文字"，不是"关窗口"。
                 // 文本视图自己会处理 cancelOperation:（并回调 Viewer 的取消），
                 // 这里放行就对了 —— 抢掉的话用户打一半按 Esc 整个窗口就没了。
-                if window.firstResponder is NSTextView { return event }
+                if editingText { return event }
                 window.performClose(nil)
                 return nil
             }
+            // ⌫ / Delete：删选中标注。
+            // 工具条上那个"删除"按钮已按用户要求去掉（"一直显示，去掉"），
+            // 但删除能力不能跟着丢 —— 挪到这里，选中标注照样 ⌫ 一下就没。
+            if event.keyCode == 51 || event.keyCode == 117 {
+                // 焦点在文字框里时 ⌫ 是删字符，别把整条标注吃了
+                if editingText { return event }
+                let handled = MainActor.assumeIsolated { self.deleteSelectedShape() }
+                if handled { return nil }
+            }
             return event
         }
+    }
+
+    /// 有选中标注就删掉（⌫）。返回是否吃掉这次按键。
+    @MainActor
+    private func deleteSelectedShape() -> Bool {
+        guard let doc, doc.selectedShape != nil else { return false }
+        doc.deleteSelected()
+        return true
     }
 
     private func removeEscMonitor() {

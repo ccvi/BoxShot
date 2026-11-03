@@ -273,6 +273,8 @@ struct EditorView: View {
     @State private var statusMessage: String = ""
     /// 选择工具拖动中的上一次像素坐标
     @State private var selectDragLast: CGPoint?
+    /// 颜色圆点的弹出面板（配色 + 粗细）
+    @State private var showColorPanel = false
     /// 裁剪：拖出的保留范围（图像像素坐标）
     @State private var cropRect: CGRect?
     @State private var cropAnchor: CGPoint?
@@ -451,7 +453,11 @@ struct EditorView: View {
                     // 之后的标注一律画在"底图坐标"空间（美化时 = 平移 padding）
                     context.translateBy(x: pad, y: pad)
 
-                    for shape in doc.shapes {
+                    // 🔴 跳过"正在输入的那条文字"：它由上面的 NSTextView 实时画着，
+                    // 这里再画一遍就是重影（用户 1.0.27 截图："输入文字时显示重影"——
+                    // 渲染的字跟文本视图的字差半个像素，看着像描了一层边）。
+                    // 浮层那边早就是这个做法（draw 里 filter { $0.id != editingShapeID }）。
+                    for shape in doc.shapes where shape.id != editingID {
                         drawShape(shape, in: &context)
                     }
                     if let draft {
@@ -477,10 +483,15 @@ struct EditorView: View {
                     }
                 }
                 .frame(width: displaySize.width, height: displaySize.height)
-
-                // 文字输入：就地铺一个 NSTextView（跟截图浮层同一套），不是 TextField
-                if let shape = editingShape {
-                    textEditorOverlay(for: shape)
+                // 🔴 文字输入框必须挂在 `.overlay` 里，不能当 ZStack 的兄弟视图。
+                // NSTextView 有 intrinsicContentSize（宽度跟着文本长），放进 ZStack
+                // 会参与尺寸计算 → 容器被撑宽 → 画布右边多出一块空白（用户 1.0.27
+                // 截图红框："一输入文字，布局变形了"）。overlay 不参与父视图布局，
+                // 位置交给 offset，跟画布同一个坐标原点。
+                .overlay(alignment: .topLeading) {
+                    if let shape = editingShape {
+                        textEditorOverlay(for: shape)
+                    }
                 }
             }
             // 手势直接挂在画布容器上：坐标就是画布局部坐标（点），
@@ -679,7 +690,8 @@ struct EditorView: View {
             onCancel: { cancelEditingText() }
         )
         .frame(width: width, height: height)
-        .position(x: originX + width / 2, y: originY + height / 2)
+        .fixedSize()
+        .offset(x: originX, y: originY)
     }
 
     // ── 坐标换算 ──
@@ -839,7 +851,16 @@ struct EditorView: View {
     // ── 工具条 ──
 
     private var toolbar: some View {
-        HStack(spacing: 10) {
+        // 🔴 1.0.27：外面套一层横向 ScrollView。
+        //
+        // 工具条的自然宽度（14 个工具 + 6 色 + 取色器 + 字号 + 撤销 + 6 个输出按钮）
+        // 已经超过 1000pt，而编辑窗口宽度是**按图片自适应**的（小图只有 640）。
+        // 以前直接摆 HStack，空间不够 SwiftUI 只能压缩 —— 压的正是 `Label` 里的文字，
+        // 于是"OCR"剩个"C"、"保存"剩半个字（用户截图："按钮变形了"）。
+        // ScrollView 里的子视图按自然宽度排版，压不动；窗口窄了就横向滚，按钮永远是完整的。
+        HStack(spacing: 0) {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
             // 工具
             HStack(spacing: 2) {
                 ForEach(EditorTool.allCases) { tool in
@@ -861,7 +882,7 @@ struct EditorView: View {
                                     .font(.system(size: 14))
                             }
                         }
-                        .frame(width: 30, height: 28)
+                        .frame(width: 28, height: 28)
                         .background(doc.tool == tool ? Color.accentColor.opacity(0.18) : .clear)
                         .cornerRadius(6)
                     }
@@ -875,39 +896,17 @@ struct EditorView: View {
 
             Divider().frame(height: 22)
 
-            // 颜色（有选中标注时直接改它）—— 与截图工具条同一份 6 色调色板
-            HStack(spacing: 5) {
-                ForEach(RGBColor.palette, id: \.hexString) { c in
-                    Circle()
-                        .fill(Color(nsColor: c.nsColor))
-                        .frame(width: 16, height: 16)
-                        .overlay(Circle().strokeBorder(doc.color == c ? Color.accentColor : Color.gray.opacity(0.4), lineWidth: 2))
-                        .onTapGesture { doc.applyToSelected(color: c) }
-                        .help(c.hexString)
-                }
-                ColorPicker("", selection: Binding(
-                    get: { Color(nsColor: doc.color.nsColor) },
-                    set: { new in
-                        let ns = NSColor(new).usingColorSpace(.sRGB) ?? .red
-                        doc.color = RGBColor(red: ns.redComponent, green: ns.greenComponent, blue: ns.blueComponent)
-                    }), supportsOpacity: false)
-                    .labelsHidden()
-                    // 🔴 布局宽度必须给够：macOS 取色控件的胶囊本体比 26pt 宽，
-                    // frame 限窄它不会缩、只会画出去压住左边的紫色圆点
-                    //（2026-11-02 用户样张「颜色调整挡住了其他颜色」）。
-                    // 44pt 是它的自然宽度，宁可留点空隙别再叠上去。
-                    .padding(.leading, 3)
-                    .frame(width: 46, height: 22)
-            }
+            // 颜色 + 粗细收进一个圆点（点开是弹出面板）—— 跟截图浮层同一个交互。
+            //
+            // 🔴 1.0.27 改的：以前 6 个色块 + 取色器 + 粗细滑杆平铺在工具条上，
+            // 一共占 260pt 左右；加上 14 个工具和 5 个输出按钮，自然宽度超过 1100，
+            // 而编辑窗口宽度是按图片自适应的 —— 结果就是按钮被压变形（用户截图）。
+            // 收进弹出层后工具条窄了 230pt，1000 宽的窗口里所有按钮都放得下。
+            colorAnchor
 
-            // 文字上下文给字号，其它工具给粗细。
-            // 🔴 字看不看得见全靠字号，而粗细**不参与**文字渲染（渲染器只用 fontSize），
-            // 两个都摆出来既没用也放不下 —— 1080 宽的窗口里工具条已经排满了。
+            // 文字上下文给字号（只在文字工具 / 选中文字时出现，不占常驻宽度）
             if doc.tool == .text || doc.selectedShape?.tool == .text {
                 fontSizeMenu
-            } else {
-                Slider(value: $doc.lineWidth, in: 2...24, step: 1)
-                    .frame(width: 90)
             }
 
             Divider().frame(height: 22)
@@ -925,38 +924,110 @@ struct EditorView: View {
             }
             .buttonStyle(.plain)
 
-            Spacer()
+            Divider().frame(height: 22)
 
             // 输出
-            HStack(spacing: 8) {
-                if doc.selectedShape != nil {
-                    Button(role: .destructive) { doc.deleteSelected() } label: {
-                        Label("删除", systemImage: "trash")
-                    }
-                    .keyboardShortcut(.delete, modifiers: [])
-                    .help("删除选中标注 ⌫")
-                }
-                Button { onOCR() } label: { Label("OCR", systemImage: "text.below.photo") }
+            //
+            // 🔴 1.0.27：除了「完成」，全部改成**图标 + tooltip**。
+            // 原因：窗口宽度是按图片自适应的，而工具条的自然宽度早就超过 1000pt，
+            // 摆满"OCR / 美化 / 贴图 / 保存 / 复制 / 完成"六个带文字的按钮，窄窗口里
+            // SwiftUI 只能压缩文字 → "OCR"剩个"C"、"保存"剩半个字（用户截图
+            // "按钮变形了"）。去掉标签能省 200pt 左右，常见宽度（≥900）就不必滚动。
+            // 「完成」保留文字：它是主操作，也是唯一带强调色的按钮。
+            //
+            // 用户 1.0.27 还要求去掉常驻的"删除"按钮（"一直显示，去掉"）——
+            // 删除能力保留在 ⌫ / Delete 上（见 EditorWindowController 的按键监听）。
+            HStack(spacing: 6) {
+                Button { onOCR() } label: { Image(systemName: "text.below.photo") }
                     .help("识别图中文字并复制")
                 Button {
                     withAnimation { doc.beautify = doc.beautify == nil ? BeautifyOptions() : nil }
-                } label: { Label("美化", systemImage: "wand.and.stars") }
+                } label: { Image(systemName: "wand.and.stars") }
                     .help("截图美化（背景 / 圆角 / 阴影 / 边距）")
-                Button { onPin() } label: { Label("贴图", systemImage: "pin") }
+                Button { onPin() } label: { Image(systemName: "pin") }
                     .help("把当前图钉到桌面")
-                Button { onSave() } label: { Label("保存", systemImage: "square.and.arrow.down") }
+                Button { onSave() } label: { Image(systemName: "square.and.arrow.down") }
                     .keyboardShortcut("s", modifiers: .command)
                     .help("保存 ⌘S")
-                Button { onCopy() } label: { Label("复制", systemImage: "doc.on.doc") }
+                Button { onCopy() } label: { Image(systemName: "doc.on.doc") }
                     .keyboardShortcut("c", modifiers: .command)
                     .help("复制 ⌘C")
-                Button { onClose() } label: { Label("完成", systemImage: "checkmark") }
-                    .buttonStyle(.borderedProminent)
-                    .help("完成并关闭 ⎋")
+            }
+            }
+            .fixedSize(horizontal: true, vertical: false)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+        }
+        .fixedSize(horizontal: false, vertical: true)
+
+        // 「完成」钉在最右边，**不跟着滚动**。
+        // 它是主操作、也是唯一带强调色的按钮，滚到看不见就等于没有。
+        // 左边那堆窄了可以横向滚，这个永远在原地。
+        Divider().frame(height: 22)
+        Button { onClose() } label: { Label("完成", systemImage: "checkmark") }
+            .buttonStyle(.borderedProminent)
+            .help("完成并关闭 ⎋")
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+        }
+    }
+
+    // ── 颜色圆点 + 弹出面板 ──────────────────────────────
+
+    /// 工具条上那颗"当前颜色"圆点，点开是 6 色调色板 + 自选色 + 粗细。
+    /// 口径与截图浮层一致（那边是 `colorDotAnchorButton` + `colorPanel`）。
+    private var colorAnchor: some View {
+        Button {
+            showColorPanel.toggle()
+        } label: {
+            Circle()
+                .fill(Color(nsColor: doc.color.nsColor))
+                .frame(width: 21, height: 21)
+                .overlay(Circle().strokeBorder(Color.white.opacity(0.75), lineWidth: 1.5))
+        }
+        .buttonStyle(.plain)
+        .help("颜色与粗细")
+        .popover(isPresented: $showColorPanel, arrowEdge: .bottom) {
+            colorPanel
+        }
+    }
+
+    private var colorPanel: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                ForEach(RGBColor.palette, id: \.hexString) { c in
+                    Circle()
+                        .fill(Color(nsColor: c.nsColor))
+                        .frame(width: 18, height: 18)
+                        .overlay(Circle().strokeBorder(doc.color == c ? Color.accentColor
+                                                                   : Color.gray.opacity(0.4),
+                                                       lineWidth: 2))
+                        .onTapGesture { doc.applyToSelected(color: c) }
+                        .help(c.hexString)
+                }
+                ColorPicker("", selection: Binding(
+                    get: { Color(nsColor: doc.color.nsColor) },
+                    set: { new in
+                        let ns = NSColor(new).usingColorSpace(.sRGB) ?? .red
+                        doc.color = RGBColor(red: ns.redComponent,
+                                             green: ns.greenComponent,
+                                             blue: ns.blueComponent)
+                    }), supportsOpacity: false)
+                    .labelsHidden()
+                    .frame(width: 44, height: 22)
+            }
+            Divider()
+            HStack(spacing: 8) {
+                Text("粗细").font(.caption).foregroundStyle(.secondary)
+                Slider(value: $doc.lineWidth, in: 2...24, step: 1)
+                    .frame(width: 120)
+                Text("\(Int(doc.lineWidth))").font(.caption)
+                    .monospacedDigit().foregroundStyle(.secondary)
+                    .frame(width: 18, alignment: .trailing)
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        .padding(12)
+        .frame(width: 240)
     }
 
     // ── 字号（与截图浮层同一份 6 档）────────────────────────
@@ -1053,9 +1124,26 @@ struct CanvasTextEditor: NSViewRepresentable {
         view.isContinuousSpellCheckingEnabled = false
         view.isGrammarCheckingEnabled = false
         view.smartInsertDeleteEnabled = false
+        // 🔴 让 NSTextView 永远"可以被压缩"：它的 intrinsicContentSize 会跟着文本变宽，
+        // 优先级高点就会把外层布局撑开（同一条 emoji/长句能顶出半屏空白）。
+        view.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        view.setContentHuggingPriority(.defaultLow, for: .vertical)
+        view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        view.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
         view.string = text
         apply(fontSize: fontSize, color: color, to: view)
         return view
+    }
+
+    /// 文字框被 SwiftUI 拆掉时，把第一响应者还给窗口。
+    ///
+    /// 🔴 不还的话焦点一直挂在这个已经离开视图层级的小 NSTextView 上：
+    /// 后续 ⌫ / Esc 都被当成"还在输入文字"而放行，结果什么都没发生
+    /// （1.0.27 实测：确认文字后选中标注按 ⌫ 删不掉）。
+    static func dismantleNSView(_ nsView: NSTextView, coordinator: Coordinator) {
+        if nsView.window?.firstResponder === nsView {
+            nsView.window?.makeFirstResponder(nil)
+        }
     }
 
     func updateNSView(_ view: NSTextView, context: Context) {
