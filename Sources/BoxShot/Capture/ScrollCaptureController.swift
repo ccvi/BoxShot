@@ -56,13 +56,13 @@ final class ScrollCaptureController: NSObject {
     /// 拼接画布（增量，只画新增行）。**不再持有整幅累积图**：
     /// 老写法每帧新开一块整幅位图重画全图，O(N²) 拷贝 + 两份全图常驻。
     private var canvas: ImageStitch.StitchCanvas?
-    /// 缩略图用的低分辨率画布（180 宽）。每帧只多画一条 180 宽的窄带，
+    /// 缩略图用的低分辨率画布（200 宽）。每帧只多画一条 200 宽的窄带，
     /// 这样刷新预览不必为了一张缩略图去合成整幅长图。
     private var previewCanvas: ImageStitch.StitchCanvas?
     /// 画布当前所处的空间（0 未旋转 / 1 旋转 90°）。第一帧抓下来时还不知道
     /// 用户要横着滚还是竖着滚，方向变了得把画布搬到另一个空间（只搬一次）。
     private var canvasDirection = 0
-    static let previewWidth = 180
+    static let previewWidth = 200
     /// 上一帧原图：对齐只拿"上一帧 vs 当前帧"算。
     /// 拿整张累积图去搜索的话，累积越长搜索范围越大，越容易匹配到错误的周期上
     /// —— 而且一旦错一帧，错误就永久留在图里，后面全跟着错。
@@ -83,7 +83,10 @@ final class ScrollCaptureController: NSObject {
     private var previewImageView: NSImageView?
     private var previewTitle: NSTextField?
     /// 缩略图尺寸（用户指定）
-    static let previewSize = NSSize(width: 180, height: 600)
+    /// 用户 2026-11-04：缩略图窗从 180×600 改成 **200×700**（之前的窗口偏窄偏矮，
+    /// 长图一进来就缩成细条）。previewWidth 跟着从 180 提到 200，不然 200 宽的框里
+    /// 贴的是 180 宽的位图，边缘会发虚。
+    static let previewSize = NSSize(width: 200, height: 700)
 
     init(model: AppModel?) {
         self.model = model
@@ -160,12 +163,15 @@ final class ScrollCaptureController: NSObject {
             return button
         }
 
-        add("xmark", "取消", tint: .systemRed)
-        add("checkmark", "完成", tint: .systemGreen)
-        stack.addArrangedSubview(makeDivider())
+        // 用户 2026-11-04：顺序改成 贴图 → 复制 → 保存 → 完成 → 取消。
+        // 以前是"取消 / 完成 打头 + 分隔线 + 三个输出动作"—— 决策键在左边、
+        // 输出动作在右边，手指要先横跨半个工具条。现在按"输出在前、决策在后"排，
+        // 且不再需要分隔线（同一条流水线的五步，不分两组）。
         add("pin", "贴图")
-        add("arrow.down.circle", "保存")
         add("doc.on.doc", "复制")
+        add("arrow.down.circle", "保存")
+        add("checkmark", "完成", tint: .systemGreen)
+        add("xmark", "取消", tint: .systemRed)
 
         stack.layoutSubtreeIfNeeded()
         let size = stack.fittingSize
@@ -498,7 +504,7 @@ final class ScrollCaptureController: NSObject {
     // ── 缩略图（常驻，不能关闭） ─────────────────────────────
 
     /// 用户要求：滚动截图时缩略图**强制打开、不能关闭**，默认贴在截图框右边，
-    /// 右边没位置就换左边，大小固定 180 × 600。
+    /// 右边没位置就换左边，大小固定 200 × 700。
     ///
     /// 所以它是个无边框面板：没有标题栏、没有关闭按钮，也不接收鼠标事件
     /// （`ignoresMouseEvents`）—— 鼠标从它上面滚过去时，滚轮事件直接落到
@@ -790,7 +796,10 @@ final class ScrollFrameView: NSView {
         ctx.fill(CGRect(x: 0, y: r.minY, width: 2, height: r.height))               // 左
         ctx.fill(CGRect(x: bounds.width - 2, y: r.minY, width: 2, height: r.height))// 右
 
-        // 状态条：画在上方留白带里
+        // 状态条：画在上方留白带里。
+        // 🔴 底色必须跟着文字色走：1.0.27 把前景换成 ToolbarTheme.foreground（纯黑）时，
+        // 这里还留着写死的 `black 0.78`，于是黑字压黑底——用户截图「文字提示黑得都看不见了」。
+        // 现在统一成主题的浅灰实底 + 黑字，跟另外几条工具条一个口径。
         let attributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold),
             .foregroundColor: ToolbarTheme.foreground,
@@ -800,9 +809,15 @@ final class ScrollFrameView: NSView {
         let barRect = CGRect(x: 2, y: 3,
                              width: min(size.width + 20, bounds.width - 4),
                              height: Self.bandHeight - 6)
-        ctx.setFillColor(NSColor.black.withAlphaComponent(0.78).cgColor)
-        ctx.addPath(CGPath(roundedRect: barRect, cornerWidth: 6, cornerHeight: 6, transform: nil))
+        // 浅灰实底压在浅色网页上也容易糊成一片，补一圈描边把边界勾出来
+        let pill = CGPath(roundedRect: barRect, cornerWidth: 6, cornerHeight: 6, transform: nil)
+        ctx.setFillColor(ToolbarTheme.background.cgColor)
+        ctx.addPath(pill)
         ctx.fillPath()
+        ctx.setStrokeColor(ToolbarTheme.divider.cgColor)
+        ctx.setLineWidth(1)
+        ctx.addPath(pill)
+        ctx.strokePath()
         ctx.saveGState()
         ctx.clip(to: barRect)
         (text as NSString).draw(at: CGPoint(x: barRect.minX + 10, y: barRect.minY + 4),
