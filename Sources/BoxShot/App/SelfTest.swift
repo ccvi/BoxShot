@@ -502,19 +502,35 @@ enum SelfTest {
             check("分隔线跟着色块一起缩（不高于色块）",
                   OverlayEditorController.colorPanelDividerHeight <= OverlayEditorController.swatchSide)
 
-            // 粗细档位：用户 2026-11-04「改为一共 5 项：3 / 6 / 9 / 12 / 15 px」
-            // （原 3/6/12 三档 → 中间补 9、末尾补 15，步长 3）
+            // 粗细档位：用户 2026-11-04「改为一共 5 项：3 / 6 / 9 / 12 / 15 px」，
+            // 随后「把这个做成下拉选项，并注明多少 px，默认落在最近选择的档位上」。
             check("粗细五档是 3 / 6 / 9 / 12 / 15 px",
                   OverlayEditorController.lineWidthOptions == [3, 6, 9, 12, 15])
-            // 五档画在面板里还得能看出区别：封顶后不能全长一样，也不能顶出按钮
-            let samples = OverlayEditorController.lineWidthOptions.map {
-                OverlayEditorController.lineWidthSampleWidth(for: $0,
-                                                             boxHeight: OverlayEditorController.swatchSide)
-            }
-            check("五档示意线粗细各不相同（\(samples.map { String(format: "%.1f", $0) })）",
-                  Set(samples.map { Int($0 * 10) }).count == samples.count)
-            check("示意线不溢出按钮高度",
-                  samples.allSatisfy { $0 < OverlayEditorController.swatchSide })
+            check("下拉标题注明 px（\(OverlayEditorController.lineWidthTitle(12))）",
+                  OverlayEditorController.lineWidthTitle(12) == "12 px"
+                    && OverlayEditorController.lineWidthTitle(3) == "3 px")
+            // 形状上的线宽可能是编辑窗口滑杆调出来的 7 / 12.5，取最近一档而不是精确匹配
+            check("线宽取最近档位（7 → 第 2 档 6px）",
+                  OverlayEditorController.lineWidthIndex(for: 7) == 1)
+            check("线宽超范围时夹到两端",
+                  OverlayEditorController.lineWidthIndex(for: 0) == 0
+                    && OverlayEditorController.lineWidthIndex(for: 999) == 4)
+            // 「默认落在最近选择的档位上」：存在 UserDefaults，跨启动还在
+            let widthSuite = "com.pcxx.boxshot.selftest.linewidth"
+            let widthDefaults = UserDefaults(suiteName: widthSuite)!
+            widthDefaults.removePersistentDomain(forName: widthSuite)
+            // 历史默认 4px 不在档位表里 → 落到最近的一档（3px）；
+            // 下拉显示的东西必须就是实际线宽，不能"显示 3px 实际画 4px"
+            check("没选过时落到最近的 3px 档",
+                  OverlayEditorController.rememberedLineWidth(widthDefaults) == 3)
+            OverlayEditorController.rememberLineWidth(12, widthDefaults)
+            check("记住的档位读得回来",
+                  OverlayEditorController.rememberedLineWidth(widthDefaults) == 12)
+            // 存进去的值不在档位表里（老版本存的 12.5 之类）→ 取最近的一档
+            widthDefaults.set(12.5, forKey: OverlayEditorController.lastLineWidthKey)
+            check("存的不是档位值时取其最近一档",
+                  OverlayEditorController.rememberedLineWidth(widthDefaults) == 12)
+            widthDefaults.removePersistentDomain(forName: widthSuite)
 
             let toolbar = CGRect(x: 300, y: 500, width: 700, height: 64)
             let p1 = OverlayEditorController.colorPanelOrigin(toolbar: toolbar,

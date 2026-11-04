@@ -45,7 +45,7 @@ final class OverlayEditorController: NSObject {
     private var contentView: OverlayEditorView!
     private var toolButtons: [EditorTool: NSButton] = [:]
     private var swatchButtons: [String: NSButton] = [:]
-    private var widthButtons: [CGFloat: NSButton] = [:]
+    private var lineWidthPopup: NSPopUpButton?
     private var fontSizePopup: NSPopUpButton?
     private var colorAnchorButton: NSButton?
     private var colorPanel: NSPanel?
@@ -168,7 +168,11 @@ final class OverlayEditorController: NSObject {
     init(model: AppModel, image: CGImage, selectionFrameAppKit frame: CGRect,
          fullDisplay: FullDisplay? = nil, shapes: [AnnotationShape] = []) {
         self.model = model
-        self.doc = EditorDocument(image: image, shapes: shapes)
+        let document = EditorDocument(image: image, shapes: shapes)
+        // 用户口径「默认落在最近选择的档位上」：新截图一打开就是上次选的粗细，
+        // 不用每次去面板里再点一遍。
+        document.lineWidth = Self.rememberedLineWidth()
+        self.doc = document
         self.selectionFrame = frame
         self.fullDisplay = fullDisplay
         self.displayScale = fullDisplay?.pixelScale
@@ -581,11 +585,12 @@ final class OverlayEditorController: NSObject {
             stack.addArrangedSubview(dot)
         }
         stack.addArrangedSubview(divider())
-        for width in Self.lineWidthOptions {
-            let button = lineWidthButton(width)
-            widthButtons[width] = button
-            stack.addArrangedSubview(button)
-        }
+        // 粗细：用户 2026-11-04 口径「把这个做成下拉选项，并注明多少 px，
+        // 默认落在最近选择的档位上」。原来是 5 颗示意线小按钮平铺，
+        // 现在收成一个下拉（跟右边的字号下拉同款），标题直接写 "12 px"。
+        let widthPopup = lineWidthPopUp()
+        lineWidthPopup = widthPopup
+        stack.addArrangedSubview(widthPopup)
         // 字号：跟颜色 / 粗细同一条面板（用户 2026-11-03 口径「在颜色控制工具条那里加上
         // 字号控制，下拉，分 6 个档」）。放最右边，中间隔一条竖线 —— 左边三组是"笔画长什么样"，
         // 右边这个是"文字多大"，语义上本来就不是一类。
@@ -666,12 +671,51 @@ final class OverlayEditorController: NSObject {
     /// 不是点 —— 2x 截图上 12px = 屏幕上 6pt）。
     static let lineWidthOptions: [CGFloat] = [3, 6, 9, 12, 15]
 
-    /// 档位示意线的粗细（pt，画在面板里那颗小按钮上）。
+    /// 下拉标题：用户口径「注明多少 px」→ `"12 px"`。
+    static func lineWidthTitle(_ width: CGFloat) -> String {
+        "\(Int(width.rounded())) px"
+    }
+
+    /// 线宽 → 档位序号：取**最近**的一档（跟 `fontSizeIndex` 同一个理由）。
     ///
-    /// 封顶 `boxHeight * 0.6`：按钮高 = 色块直径（18.72），不封顶的话最粗一档会顶满整个按钮；
-    /// 下限 1.5 是"再细也得看得见"。抽成纯函数是为了自检能验"五档画出来还得有区别、且不溢出"。
-    static func lineWidthSampleWidth(for width: CGFloat, boxHeight: CGFloat) -> CGFloat {
-        min(boxHeight * 0.6, max(1.5, width / 2))
+    /// 形状上的线宽不一定是档位值 —— 编辑窗口那颗滑杆是 2…24 连续可调，
+    /// 用精确相等匹配会一档都对不上，下拉永远显示第一档，看着像"没记住"。
+    static func lineWidthIndex(for width: CGFloat) -> Int {
+        var best = 0
+        var bestDelta = CGFloat.greatestFiniteMagnitude
+        for (index, option) in lineWidthOptions.enumerated() {
+            let delta = abs(option - width)
+            if delta < bestDelta {
+                bestDelta = delta
+                best = index
+            }
+        }
+        return best
+    }
+
+    // ── 「最近选择的粗细」──────────────────────────────────
+    //
+    // 用户 2026-11-04 口径：「默认落在最近选择的档位上」。
+    // 存 UserDefaults 而不是 Preferences：这是浮层的粘性 UI 状态，不是设置项
+    // （设置页里没有对应控件，塞进 Preferences 只会多一个没人看的字段）。
+    // 用独立 key，读写都收在这两个函数里，自检可以喂注入的 defaults 验。
+
+    static let lastLineWidthKey = "boxshot.lastLineWidth"
+    /// 历史默认线宽（`AnnotationDocument.lineWidth` 出厂值 4px）。
+    /// 🔴 它**不在档位表**里，所以只在"从没选过"时用来挑最近的一档（4 → 3px）。
+    /// 不能直接拿它当默认值：下拉会显示「3 px」而实际画 4px，用户看到的就是"显示的和画出来的不一样"。
+    static let defaultLineWidth: CGFloat = 4
+
+    /// 上次选的档位；没选过 → 取历史默认值最近的一档；存的数不在表里 → 同样取最近的一档。
+    static func rememberedLineWidth(_ defaults: UserDefaults = .standard) -> CGFloat {
+        let stored = defaults.object(forKey: lastLineWidthKey) != nil
+            ? CGFloat(defaults.double(forKey: lastLineWidthKey))
+            : defaultLineWidth
+        return lineWidthOptions[lineWidthIndex(for: stored)]
+    }
+
+    static func rememberLineWidth(_ width: CGFloat, _ defaults: UserDefaults = .standard) {
+        defaults.set(Double(width), forKey: lastLineWidthKey)
     }
 
     /// 调色板：6 个颜色（1.0.10 用户口径「颜色 6 个颜色」，顺序按他给的色卡）。
@@ -816,16 +860,30 @@ final class OverlayEditorController: NSObject {
                 button.layer?.borderWidth = 0
             }
         }
-        for (width, button) in widthButtons {
-            if abs(doc.lineWidth - width) < 0.5 {
-                button.layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.35).cgColor
-            } else {
-                button.layer?.backgroundColor = NSColor.clear.cgColor
-            }
-        }
+        syncLineWidthPopup()
         syncFontSizePopup()
         updateColorAnchor()
         contentView?.needsDisplay = true
+    }
+
+    /// 粗细下拉显示哪一档：同样的口径 —— **选中了形状就看那条形状的线宽**，
+    /// 否则看默认值（也就是"最近选择的档位"）。
+    /// 形状上的线宽可能是编辑窗口滑杆调出来的 7px、12.5px 这种，不在档位表里 →
+    /// 取**最近**的一档（跟字号下拉同一个理由，见 `lineWidthIndex`）。
+    private func syncLineWidthPopup() {
+        guard let popup = lineWidthPopup else { return }
+        // 🔴 选中一条**文字**标注时 `lineWidth` 是 0（文字不吃线宽），不能拿它去查档位 ——
+        // 否则四舍五入到第一档 "3 px"，而实际默认线宽是别的值。
+        let width: CGFloat
+        if let selected = doc.selectedShape, selected.lineWidth > 0 {
+            width = selected.lineWidth
+        } else {
+            width = doc.lineWidth
+        }
+        let index = Self.lineWidthIndex(for: width)
+        if popup.indexOfSelectedItem != index {
+            popup.selectItem(at: index)
+        }
     }
 
     /// 下拉显示哪一档：选中了文字就看**那条文字**的字号，否则看默认值。
@@ -925,41 +983,48 @@ final class OverlayEditorController: NSObject {
         refresh()
     }
 
-    private func lineWidthButton(_ width: CGFloat) -> NSButton {
-        let button = FirstMouseButton(title: "", target: nil, action: nil)
-        button.bezelStyle = .regularSquare
-        button.isBordered = false
-        button.wantsLayer = true
-        button.layer?.cornerRadius = 3
-        button.toolTip = "粗细 \(Int(width)) px"
-        button.setButtonType(.momentaryChange)
-        // 示意线：跟色块同高，否则这几颗比色块高，面板会被它们撑住不跟着缩
-        let boxH = Self.swatchSide
-        let boxW = (Self.swatchSide * 1.3).rounded()
-        let image = NSImage(size: NSSize(width: boxW, height: boxH))
-        image.lockFocus()
-        if let ctx = NSGraphicsContext.current?.cgContext {
-            ctx.setStrokeColor(NSColor.white.cgColor)
-            ctx.setLineWidth(Self.lineWidthSampleWidth(for: width, boxHeight: boxH))
-            ctx.setLineCap(.round)
-            ctx.move(to: CGPoint(x: 2, y: boxH / 2))
-            ctx.addLine(to: CGPoint(x: boxW - 2, y: boxH / 2))
-            ctx.strokePath()
-        }
-        image.unlockFocus()
-        button.image = image
-        button.onAction = { [weak self] in
-            self?.contentView?.commitTextEditing()
-            self?.doc.applyToSelected(lineWidth: width)
-            self?.refresh()
-        }
-        button.frame = NSRect(x: 0, y: 0, width: boxW, height: boxH)
-        button.translatesAutoresizingMaskIntoConstraints = false
+    // ── 粗细下拉（5 档）──────────────────────────────────
+
+    /// 下拉宽度：`15 px` 比 `68 pt` 窄，给 60 不会截断。
+    /// （同字号下拉：AppKit 控件的自然宽度进窗口后才准，初始化测量偏窄 → 宁可写宽。）
+    static let lineWidthPopupWidth: CGFloat = 60
+
+    private func lineWidthPopUp() -> NSPopUpButton {
+        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0,
+                                                width: Self.lineWidthPopupWidth, height: 22),
+                                  pullsDown: false)
+        popup.isBordered = false
+        popup.controlSize = .small
+        popup.font = .systemFont(ofSize: 12 * Self.toolbarScale, weight: .medium)
+        popup.contentTintColor = Self.toolbarForegroundColor
+        // 用户口径「注明多少 px」：标题直接写 "12 px"，别只画一根示意线
+        popup.addItems(withTitles: Self.lineWidthOptions.map(Self.lineWidthTitle))
+        popup.toolTip = "粗细（" + Self.lineWidthOptions.map { Self.lineWidthTitle($0) }.joined(separator: " / ") + "）"
+        popup.target = self
+        popup.action = #selector(lineWidthChanged(_:))
+        popup.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            button.widthAnchor.constraint(equalToConstant: boxW),
-            button.heightAnchor.constraint(equalToConstant: boxH),
+            popup.widthAnchor.constraint(equalToConstant: Self.lineWidthPopupWidth),
+            popup.heightAnchor.constraint(equalToConstant: 22),
         ])
-        return button
+        popup.selectItem(at: Self.lineWidthIndex(for: doc.lineWidth))
+        return popup
+    }
+
+    @objc private func lineWidthChanged(_ sender: NSPopUpButton) {
+        let index = sender.indexOfSelectedItem
+        guard Self.lineWidthOptions.indices.contains(index) else { return }
+        changeLineWidth(Self.lineWidthOptions[index])
+    }
+
+    /// 改粗细。跟改字号同一条路子：先落盘正在输入的文字，再作用到选中形状，
+    /// 同时把默认值换成这一档 —— 下一张截图（乃至下次启动）就落在这里。
+    private func changeLineWidth(_ width: CGFloat) {
+        contentView?.commitTextEditing()
+        doc.lineWidth = width
+        doc.applyToSelected(lineWidth: width)
+        Self.rememberLineWidth(width)
+        refresh()
     }
 
     // ── 输出动作 ────────────────────────────────────────────
