@@ -359,7 +359,7 @@ enum SelfTest {
         do {
             let visible = CGRect(x: 0, y: 0, width: 1710, height: 1077)
             let size = ScrollCaptureController.previewSize
-            check("缩略图尺寸 200×700", size.width == 200 && size.height == 700)
+            check("缩略图尺寸 180×700", size.width == 180 && size.height == 700)
             // 预览位图宽度必须跟着面板宽度走，否则 200 宽的框里贴 180 宽的图会发虚
             check("缩略图画布宽度与面板同宽", ScrollCaptureController.previewWidth == Int(size.width))
 

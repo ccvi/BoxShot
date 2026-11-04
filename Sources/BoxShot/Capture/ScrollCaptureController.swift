@@ -77,7 +77,7 @@ final class ScrollCaptureController: NSObject {
     /// 画布当前所处的空间（0 未旋转 / 1 旋转 90°）。第一帧抓下来时还不知道
     /// 用户要横着滚还是竖着滚，方向变了得把画布搬到另一个空间（只搬一次）。
     private var canvasDirection = 0
-    static let previewWidth = 200
+    static let previewWidth = 180
     /// 上一帧原图：对齐只拿"上一帧 vs 当前帧"算。
     /// 拿整张累积图去搜索的话，累积越长搜索范围越大，越容易匹配到错误的周期上
     /// —— 而且一旦错一帧，错误就永久留在图里，后面全跟着错。
@@ -99,9 +99,10 @@ final class ScrollCaptureController: NSObject {
     private var previewTitle: NSTextField?
     /// 缩略图尺寸（用户指定）
     /// 用户 2026-11-04：缩略图窗从 180×600 改成 **200×700**（之前的窗口偏窄偏矮，
-    /// 长图一进来就缩成细条）。previewWidth 跟着从 180 提到 200，不然 200 宽的框里
-    /// 贴的是 180 宽的位图，边缘会发虚。
-    static let previewSize = NSSize(width: 200, height: 700)
+    /// 长图一进来就缩成细条）。2026-11-04 又调成 **180 × 700**：宽度回到 180，高度留 700。
+    /// previewWidth（缩略图专用低分辨率画布）必须跟面板同宽，否则位图会被拉伸发虚 ——
+    /// 自检里有一条断言把两者锁死。
+    static let previewSize = NSSize(width: 180, height: 700)
 
     init(model: AppModel?) {
         self.model = model
@@ -634,7 +635,9 @@ final class ScrollCaptureController: NSObject {
         let container = NSView(frame: NSRect(origin: .zero, size: size))
         container.wantsLayer = true
         container.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.82).cgColor
-        container.layer?.cornerRadius = 10
+        // 用户 2026-11-04：「缩略图窗去掉圆角」—— 之前 10pt 圆角 + 描边。
+        // 现在方角，描边留着（面板是深色、下面又是任意网页内容，全靠这圈边分界）。
+        container.layer?.cornerRadius = 0
         container.layer?.borderWidth = 1
         container.layer?.borderColor = NSColor.white.withAlphaComponent(0.22).cgColor
         container.layer?.masksToBounds = true
