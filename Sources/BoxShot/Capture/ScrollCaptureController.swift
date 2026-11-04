@@ -39,6 +39,21 @@ final class ScrollCaptureController: NSObject {
     private var frameView: ScrollFrameView?
     private var direction = 0                   // 0 竖向 / 1 横向
     private var isRunning = false
+    /// 还处在"可以拖边框改大小"的阶段。
+    ///
+    /// 用户 2026-11-04：「只要还没开始滚动，截图框的大小都可以调整大小。滚动开始就不能调整了。」
+    /// 判定用**第一次真实滚轮位移**（见 noteScroll），不是"点没点开始"—— 这个功能本来就没有
+    /// 开始按钮，滚动本身就是开始信号。锁定之后手柄和拖动一起收掉，避免拼到一半改尺寸。
+    private var isAdjusting = true
+    /// 拖动过程中只改几何、不重新抓帧；松手才重置基准（一次拖动会触发几十次 mouseDragged，
+    /// 每次都整屏抓一遍会卡成一帧一卡）。
+    private var adjustDirty = false
+    /// 选区版本号：每改一次 +1。抓帧是异步的，回来时选区可能已经变了 ——
+    /// 那一帧的尺寸跟现在的画布对不上，只能作废，否则第一段就会拼错位。
+    private var regionVersion = 0
+    /// 松手时正好有一帧在飞（`isBusy`）→ 那时重开会直接被 `grabFrame` 的守卫吃掉，
+    /// 只能记下来，等这一帧回来再补。不记的话就没有基准帧了。
+    private var pendingRebaseline = false
     private var isBusy = false
     private var pendingGrab = false             // 忙时滚过 → 忙完补抓
     private var pendingGrabInMotion = false     // 补抓的那帧当时页面还在动吗
@@ -99,6 +114,8 @@ final class ScrollCaptureController: NSObject {
         showToolbar()
         showPreview()
         startCapturing()
+        // 提示怎么用：这一段只在上屏那一刻说，之后由 handleFrame 接管
+        frameView?.status = ScrollFrameView.adjustHint
     }
 
     // 选区框在 AppKit 坐标系里的位置（点）
@@ -109,12 +126,15 @@ final class ScrollCaptureController: NSObject {
 
     // ── 钉住的取景框 ────────────────────────────────────────
 
-    /// 取景框面板的矩形（AppKit 坐标）：选区四周各留 2px 画边框，上方留一条状态带。
-    /// 选区本身必须完全落在面板的**透明区域**里，不能有任何绘制。
+    /// 取景框面板的矩形（AppKit 坐标）：选区四周留出 `panelInset`，上方再加一条状态带。
+    /// 选区本身必须完全落在面板的**透明区域**里，不能有任何绘制 —— 面板盖在选区上，
+    /// 抓帧时自己也会被拍进去（1.0.5 的血案）。
     static func panelRect(forRegion region: NSRect,
                           band: CGFloat = ScrollFrameView.bandHeight) -> NSRect {
-        NSRect(x: region.minX - 2, y: region.minY - 2,
-               width: region.width + 4, height: region.height + band + 4)
+        let inset = ScrollFrameView.panelInset
+        return NSRect(x: region.minX - inset, y: region.minY - inset,
+                      width: region.width + inset * 2,
+                      height: region.height + band + inset * 2)
     }
 
     private func showFrame() {
@@ -194,7 +214,16 @@ final class ScrollCaptureController: NSObject {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.contentView = container
 
-        // 放取景框下方（放不下放上方），水平居中
+        toolbarPanel = panel
+        positionToolbar()
+        panel.makeKeyAndOrderFront(nil)
+    }
+
+    /// 工具条落位：放取景框下方（放不下放上方），水平居中。抽成方法是因为
+    /// 拖边框改选区大小之后要跟着重排一次，不能只在 showToolbar 里算一遍。
+    private func positionToolbar() {
+        guard let panel = toolbarPanel else { return }
+        let size = panel.frame.size
         let frame = selectionFrameAppKit
         guard let screen = framePanel?.screen ?? NSScreen.main else { return }
         let visible = screen.visibleFrame
@@ -202,9 +231,6 @@ final class ScrollCaptureController: NSObject {
         let y = belowY >= visible.minY + 4 ? belowY : frame.maxY + 10
         let x = min(max(frame.midX - size.width / 2, visible.minX + 4), visible.maxX - size.width - 4)
         panel.setFrameOrigin(NSPoint(x: x, y: y))
-
-        toolbarPanel = panel
-        panel.makeKeyAndOrderFront(nil)
     }
 
     private static func buttonTag(_ title: String) -> Int {
@@ -231,18 +257,87 @@ final class ScrollCaptureController: NSObject {
     private func startCapturing() {
         guard !isRunning else { return }
         isRunning = true
+        resetCaptureState()
+        grabFrame()
+        installScrollMonitor()
+        installEscMonitor()
+    }
+
+    /// 清空累积状态，回到"只有第一帧基准"的样子。
+    /// 改选区大小之后要重来一遍：画布是按旧选区尺寸开的，尺寸一变整幅都得重开。
+    private func resetCaptureState() {
         canvas = nil
         previewCanvas = nil
         canvasDirection = 0
+        direction = 0
         lastFrame = nil
         lastOffset = nil
         frameCount = 0
         segmentCount = 0
         consecutiveFailures = 0
         scrollDistance = 0
+        previewImageView?.image = nil
+    }
+
+    // ── 开始滚动前的选区调整 ─────────────────────────────────
+
+    /// 拖手柄时用的选区矩形（AppKit 屏幕坐标），转个子类好读
+    var selectionRectForAdjusting: NSRect { selectionFrameAppKit }
+
+    /// 拖动过程中：只改几何 + 重排面板，不重新抓帧。
+    func adjustRegionLive(to rect: NSRect) {
+        guard isAdjusting, isRunning else { return }
+        let screen = framePanel?.screen ?? NSScreen.main
+        let clamped = Self.clampRegion(rect, visible: screen?.visibleFrame ?? Self.screenVisibleFrame())
+        guard clamped.width >= Self.minRegionSide, clamped.height >= Self.minRegionSide else { return }
+        region = ScreenCapture.displayLocalRect(fromAppKit: clamped, displayID: displayID)
+        regionVersion += 1
+        relayoutPanels()
+        adjustDirty = true
+    }
+
+    /// 松手：拿新选区重开一次捕获（清空画布 → 重新抓基准帧）。
+    func endRegionAdjust() {
+        guard adjustDirty, isAdjusting else { return }
+        adjustDirty = false
+        if isBusy {
+            pendingRebaseline = true
+            return
+        }
+        resetCaptureState()
         grabFrame()
-        installScrollMonitor()
-        installEscMonitor()
+    }
+
+    /// 第一次真实滚动 = 锁定选区。之后手柄与拖动一起失效。
+    private func lockAdjusting() {
+        guard isAdjusting else { return }
+        isAdjusting = false
+        frameView?.isAdjusting = false
+    }
+
+    /// 选区变了要把三块面板全部重排：取景框、工具条、缩略图。
+    private func relayoutPanels() {
+        framePanel?.setFrame(Self.panelRect(forRegion: selectionFrameAppKit), display: false)
+        frameView?.needsDisplay = true
+        positionToolbar()
+        previewPanel?.setFrameOrigin(previewOrigin(for: Self.previewSize))
+    }
+
+    /// 选区下限：太小了根本拼不出东西，也给手柄留不出位置
+    static let minRegionSide: CGFloat = 80
+
+    static func screenVisibleFrame() -> NSRect {
+        (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+    }
+
+    /// 夹进屏幕可见区（先按最小尺寸收，再整体挪进来），纯几何，自检可喂数字。
+    static func clampRegion(_ rect: NSRect, visible: NSRect) -> NSRect {
+        var r = rect
+        r.size.width = max(minRegionSide, min(r.width, visible.width))
+        r.size.height = max(minRegionSide, min(r.height, visible.height))
+        r.origin.x = min(max(r.minX, visible.minX), visible.maxX - r.width)
+        r.origin.y = min(max(r.minY, visible.minY), visible.maxY - r.height)
+        return r
     }
 
     /// 滚轮监听：全局（其他应用的内容）+ 本地（本应用窗口）各装一个，
@@ -267,6 +362,9 @@ final class ScrollCaptureController: NSObject {
         guard isRunning else { return }
         let dx = event.deltaX, dy = event.deltaY
         let ax = abs(dx), ay = abs(dy)
+        // 第一次真实位移 = 开始滚了 → 选区锁死。
+        // 阈值 2pt：触控板放上去常有 0.1~0.5 的抖动，用 1 会在用户还没动的时候就把框锁掉。
+        if ax > 2 || ay > 2 { lockAdjusting() }
         if ax > 1 && ax > ay + 0.5 {
             if direction != 1 {
                 direction = 1
@@ -317,6 +415,7 @@ final class ScrollCaptureController: NSObject {
         scrollDistance = 0
         let displayID = self.displayID
         let region = self.region
+        let version = self.regionVersion
         Task.detached(priority: .userInitiated) { [weak self] in
             let frame: CGImage?
             do {
@@ -329,8 +428,18 @@ final class ScrollCaptureController: NSObject {
             }
             await MainActor.run { [weak self] in
                 guard let self else { return }
-                self.handleFrame(frame, inMotion: inMotion)
                 self.isBusy = false
+                // 选区在抓帧途中被改了：这一帧的尺寸已经不对，直接作废
+                if version == self.regionVersion {
+                    self.handleFrame(frame, inMotion: inMotion)
+                }
+                // 松手时正好有帧在飞 → 这里补上基准帧
+                if self.pendingRebaseline {
+                    self.pendingRebaseline = false
+                    self.resetCaptureState()
+                    self.grabFrame()
+                    return
+                }
                 // 忙的时候用户又滚了 → 补一帧，保证滚动结果不丢
                 if self.pendingGrab {
                     let motion = self.pendingGrabInMotion
@@ -354,7 +463,7 @@ final class ScrollCaptureController: NSObject {
             openCanvas(with: frame)
             lastFrame = frame
             segmentCount = 1
-            frameView?.status = "已捕获 1 段，滚动页面继续"
+            frameView?.status = isAdjusting ? ScrollFrameView.adjustHint : "已捕获 1 段，滚动页面继续"
             refreshPreview()
             return
         }
@@ -770,17 +879,138 @@ final class ScrollFrameView: NSView {
     /// 选区上方的状态带高度（状态条画在这里）
     static let bandHeight: CGFloat = 30
 
+    /// 还处在"可以拖边框改大小"的阶段（第一次滚动之前）。
+    /// 由 controller 在第一次真实滚轮位移时置 false。
+    var isAdjusting = true {
+        didSet { if isAdjusting != oldValue { needsDisplay = true } }
+    }
+
+    /// 调整阶段的提示语。单独提出来是因为 handleFrame 首帧成功时也要说这句，
+    /// 两处写死字符串迟早会不一致。
+    static let adjustHint = "拖边框调大小 · 开始滚动后自动锁定"
+
     var status: String = "正在捕获…" {
         didSet { if status != oldValue { needsDisplay = true } }
     }
 
     override var isFlipped: Bool { true }
 
+    /// 面板比选区大出来的那一圈（pt）。
+    ///
+    /// 从 2 改成 14 是为了把**调整手柄放到选区外面**：手柄画在选区里侧会被
+    /// 抓进基准帧（面板正好盖在选区上），第一张基准图就带 8 个白方块。
+    /// 14 = 边框 2 + 手柄 9 + 1pt 余量。
+    static let panelInset: CGFloat = 14
+
     /// 选区（要被截进画面的那块）在本视图里的位置
     var regionRect: CGRect {
-        CGRect(x: 2, y: Self.bandHeight + 2,
-               width: max(0, bounds.width - 4),
-               height: max(0, bounds.height - Self.bandHeight - 4))
+        let i = Self.panelInset
+        return CGRect(x: i, y: Self.bandHeight + i,
+                      width: max(0, bounds.width - i * 2),
+                      height: max(0, bounds.height - Self.bandHeight - i * 2))
+    }
+
+    // ── 开始滚动前的可见手柄 ──────────────────────────────
+
+    /// 手柄方块边长
+    static let gripSide: CGFloat = 9
+    /// 手柄中心离选区边缘的距离 —— **朝外**。手柄必须整颗落在选区外，
+    /// 否则会被抓进基准帧（见 panelInset 的注释）。9/2 + 1.5 = 6。
+    static let gripOffset: CGFloat = 6
+
+    enum Grip {
+        case topLeft, top, topRight, right, bottomRight, bottom, bottomLeft, left
+        var movesLeft: Bool { self == .topLeft || self == .left || self == .bottomLeft }
+        var movesRight: Bool { self == .topRight || self == .right || self == .bottomRight }
+        /// 视图是 flipped：视觉上的"上"= 更小的 y；换算到屏幕（AppKit）时对应 maxY
+        var movesTop: Bool { self == .topLeft || self == .top || self == .topRight }
+        var movesBottom: Bool { self == .bottomLeft || self == .bottom || self == .bottomRight }
+    }
+
+    /// 手柄中心（视图坐标，flipped）。纯几何，自检可以直接验"整颗在选区外"。
+    static func gripCenters(in r: CGRect) -> [(Grip, CGPoint)] {
+        let o = gripOffset
+        return [
+            (.topLeft,     CGPoint(x: r.minX - o, y: r.minY - o)),
+            (.top,         CGPoint(x: r.midX,     y: r.minY - o)),
+            (.topRight,    CGPoint(x: r.maxX + o, y: r.minY - o)),
+            (.right,       CGPoint(x: r.maxX + o, y: r.midY)),
+            (.bottomRight, CGPoint(x: r.maxX + o, y: r.maxY + o)),
+            (.bottom,      CGPoint(x: r.midX,     y: r.maxY + o)),
+            (.bottomLeft,  CGPoint(x: r.minX - o, y: r.maxY + o)),
+            (.left,        CGPoint(x: r.minX - o, y: r.midY)),
+        ]
+    }
+
+    private func gripCenters() -> [(Grip, CGPoint)] { Self.gripCenters(in: regionRect) }
+
+    private func drawGrips(_ ctx: CGContext) {
+        let side = Self.gripSide
+        ctx.setFillColor(NSColor.white.cgColor)
+        ctx.setStrokeColor(NSColor.controlAccentColor.cgColor)
+        ctx.setLineWidth(1.5)
+        for (_, c) in gripCenters() {
+            let rect = CGRect(x: c.x - side / 2, y: c.y - side / 2, width: side, height: side)
+            ctx.addPath(CGPath(roundedRect: rect, cornerWidth: 2, cornerHeight: 2, transform: nil))
+            ctx.drawPath(using: .fillStroke)
+        }
+    }
+
+    private func grip(at point: CGPoint) -> Grip? {
+        let hit: CGFloat = 9
+        for (grip, center) in gripCenters()
+        where abs(point.x - center.x) <= hit && abs(point.y - center.y) <= hit {
+            return grip
+        }
+        return nil
+    }
+
+    private var activeGrip: Grip?
+    private var dragOriginScreen: NSPoint = .zero
+    private var dragStartRect: NSRect = .zero
+
+    /// 面板是 nonactivating 的，别的应用抢了焦点时第一下点击会被吞 ——
+    /// 手柄必须一下就能抓住（跟家族里其它程序化窗口的坑同源）。
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    private func screenPoint(of event: NSEvent) -> NSPoint {
+        guard let window else { return .zero }
+        // 视图是 flipped：先转成窗口坐标（非 flipped），再转屏幕
+        let inWindow = convert(event.locationInWindow, from: nil)
+        return window.convertPoint(toScreen: convert(inWindow, to: nil))
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard isAdjusting, let controller else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        guard let grip = grip(at: point) else { return }
+        activeGrip = grip
+        dragOriginScreen = screenPoint(of: event)
+        dragStartRect = controller.selectionRectForAdjusting
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let grip = activeGrip, let controller else { return }
+        let now = screenPoint(of: event)
+        let dx = now.x - dragOriginScreen.x
+        let dy = now.y - dragOriginScreen.y
+        let start = dragStartRect
+        let minSide = ScrollCaptureController.minRegionSide
+        var minX = start.minX, maxX = start.maxX
+        var minY = start.minY, maxY = start.maxY
+        // 屏幕坐标是 y 向上，所以"视觉上边"= maxY、"视觉下边"= minY
+        if grip.movesLeft   { minX = min(start.maxX - minSide, start.minX + dx) }
+        if grip.movesRight  { maxX = max(start.minX + minSide, start.maxX + dx) }
+        if grip.movesBottom { minY = min(start.maxY - minSide, start.minY + dy) }
+        if grip.movesTop    { maxY = max(start.minY + minSide, start.maxY + dy) }
+        controller.adjustRegionLive(to: NSRect(x: minX, y: minY,
+                                               width: maxX - minX, height: maxY - minY))
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard activeGrip != nil else { return }
+        activeGrip = nil
+        controller?.endRegionAdjust()
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -789,12 +1019,18 @@ final class ScrollFrameView: NSView {
         // 边框：四条**实心**细条，全部画在选区外侧。
         // 不用 stroke（2pt 描边居中，一半会压进选区，最终图片边缘多一条蓝线），
         // 也不用 fill + clear（万一视图被 layer 化，clear 擦不穿，整块会糊住选区）。
+        // ⚠️ 四条边框必须贴着 regionRect 画，**不能**用 bounds.width - 2 这种
+        // "面板边缘减 2"的写法：面板留白从 2pt 改成 14pt（给手柄腾位置）之后，
+        // 那样画出来的蓝框比真实选区大一圈 12pt —— 用户看到的框和截到的内容对不上。
         let r = regionRect
         ctx.setFillColor(NSColor.controlAccentColor.cgColor)
-        ctx.fill(CGRect(x: 0, y: r.minY - 2, width: bounds.width, height: 2))       // 上
-        ctx.fill(CGRect(x: 0, y: r.maxY, width: bounds.width, height: 2))           // 下
-        ctx.fill(CGRect(x: 0, y: r.minY, width: 2, height: r.height))               // 左
-        ctx.fill(CGRect(x: bounds.width - 2, y: r.minY, width: 2, height: r.height))// 右
+        ctx.fill(CGRect(x: r.minX - 2, y: r.minY - 2, width: r.width + 4, height: 2))   // 上
+        ctx.fill(CGRect(x: r.minX - 2, y: r.maxY, width: r.width + 4, height: 2))       // 下
+        ctx.fill(CGRect(x: r.minX - 2, y: r.minY, width: 2, height: r.height))          // 左
+        ctx.fill(CGRect(x: r.maxX, y: r.minY, width: 2, height: r.height))              // 右
+
+        // 可调整阶段：四角 + 四边中点各一颗手柄
+        if isAdjusting { drawGrips(ctx) }
 
         // 状态条：画在上方留白带里。
         // 🔴 底色必须跟着文字色走：1.0.27 把前景换成 ToolbarTheme.foreground（纯黑）时，

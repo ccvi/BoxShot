@@ -237,17 +237,32 @@ enum SelfTest {
             // 取景框几何：选区必须**整个**落在面板的透明区里。
             // 1.0.5 的血案是面板盖在选区上还画了预览，抓帧把自己拍进去了。
             let region = NSRect(x: 300, y: 200, width: 480, height: 500)
+            let inset = ScrollFrameView.panelInset
             let panel = ScrollCaptureController.panelRect(forRegion: region)
-            check("取景框面板把选区包在透明区里（左/右/下各留 2px，上方留状态带）",
-                  panel.minX == region.minX - 2
-                    && panel.maxX == region.maxX + 2
-                    && panel.minY == region.minY - 2
-                    && panel.maxY == region.maxY + ScrollFrameView.bandHeight + 2)
+            check("取景框面板把选区包在透明区里（四周留 panelInset，上方再加状态带）",
+                  panel.minX == region.minX - inset
+                    && panel.maxX == region.maxX + inset
+                    && panel.minY == region.minY - inset
+                    && panel.maxY == region.maxY + ScrollFrameView.bandHeight + inset)
 
             let probe = ScrollFrameView(frame: NSRect(x: 0, y: 0,
-                                                      width: region.width + 4,
-                                                      height: region.height + ScrollFrameView.bandHeight + 4))
+                                                      width: region.width + inset * 2,
+                                                      height: region.height + ScrollFrameView.bandHeight + inset * 2))
             let inner = probe.regionRect
+            check("视图里的选区矩形与传入的选区一致",
+                  inner.width == region.width && inner.height == region.height)
+            // 🔴 手柄必须整颗在选区外：面板盖在选区上，画在里侧会被抓进基准帧
+            let half = ScrollFrameView.gripSide / 2
+            let gripsOutside = ScrollFrameView.gripCenters(in: inner).allSatisfy { _, c in
+                c.x + half <= inner.minX || c.x - half >= inner.maxX
+                    || c.y + half <= inner.minY || c.y - half >= inner.maxY
+            }
+            check("8 颗调整手柄都在选区外（不会被拍进画面）", gripsOutside)
+            check("手柄也都在面板范围内",
+                  ScrollFrameView.gripCenters(in: inner).allSatisfy { _, c in
+                      c.x - half >= 0 && c.x + half <= probe.bounds.width
+                          && c.y - half >= 0 && c.y + half <= probe.bounds.height
+                  })
             check("视图里的选区矩形不贴边（四周至少留 2px 给边框）",
                   inner.minX >= 2 && inner.minY >= 2
                     && inner.maxX <= probe.bounds.width - 2
@@ -384,6 +399,23 @@ enum SelfTest {
                                                                      viewWidth: 178, viewHeight: 573)
             check("正方形按宽度铺满且不超高",
                   abs(square.width - 178) < 0.5 && square.height <= 573)
+
+            // 滚动开始前可调选区（1.0.28）：夹进屏幕 + 最小边长
+            let clampVisible = CGRect(x: 0, y: 0, width: 1000, height: 800)
+            let over = ScrollCaptureController.clampRegion(
+                CGRect(x: 900, y: 700, width: 400, height: 300), visible: clampVisible)
+            check("拖出屏幕右下会被夹回来",
+                  over.maxX <= clampVisible.maxX && over.maxY <= clampVisible.maxY)
+            check("夹回来时尺寸不被改小", over.width == 400 && over.height == 300)
+            let tiny = ScrollCaptureController.clampRegion(
+                CGRect(x: 100, y: 100, width: 10, height: 12), visible: clampVisible)
+            check("缩得比下限还小就抬到 80",
+                  tiny.width == ScrollCaptureController.minRegionSide
+                  && tiny.height == ScrollCaptureController.minRegionSide)
+            let offTopLeft = ScrollCaptureController.clampRegion(
+                CGRect(x: -200, y: -100, width: 500, height: 400), visible: clampVisible)
+            check("拖出左上会被夹回原点", offTopLeft.minX == 0 && offTopLeft.minY == 0)
+            check("选区下限是 80", ScrollCaptureController.minRegionSide == 80)
 
             // 触摸板距离抓帧（1.0.25）：触发距离 = 区域高 × 0.4，再矮也不低于 48pt
             check("距离抓帧按区域高四成",
