@@ -43,6 +43,9 @@ final class RecordToolbarController: NSObject {
     private var cameraBubble: CameraBubbleController?
     private var popover: NSPopover?
     private var escMonitor: Any?
+    /// 用户亲手拖过工具条（`DraggableToolbarContainer.onDrag` 置位）。
+    /// 拖过之后就不再按选区重新落位 —— 否则点到「全屏录制」时它会自己弹回屏幕中间。
+    private var toolbarMoved = false
 
     // 暂停：计时要把暂停时长扣掉，否则成片 30 秒、显示 3 分钟
     private var isPaused = false
@@ -103,7 +106,24 @@ final class RecordToolbarController: NSObject {
 
     // ── 工具条 ──────────────────────────────────────────────
 
+    /// 工具条容器：一块 #E6E6E6 实底 + 圆角，**并且能拖着走**。
+    ///
+    /// 用户 2026-11-04 口径：「录制的工具条可以拖动调整位置（跟截图工具条一样的拖动效果）」。
+    /// 用 `DraggableToolbarContainer`（见 KeyablePanel.swift）—— 它在 `mouseDown` 里调
+    /// `window?.performDrag(with:)`，跟系统窗口拖动完全同一套，所以松手、吸边、多屏这些
+    /// 行为不用自己写。按钮自己会吃掉 mouseDown，能抓的是按钮间隙和上下内边距。
+    static func makeToolbarContainer(size: CGSize) -> DraggableToolbarContainer {
+        let container = DraggableToolbarContainer(frame: NSRect(origin: .zero, size: size))
+        container.wantsLayer = true
+        container.appearance = ToolbarTheme.appearance
+        container.layer?.backgroundColor = ToolbarTheme.background.cgColor
+        container.layer?.cornerRadius = 14
+        return container
+    }
+
     private func showToolbar() {
+        // 新工具条一律从默认位置开始（老位置属于上一次录制，不该继承）
+        toolbarMoved = false
         let stack = NSStackView()
         stack.orientation = .horizontal
         stack.spacing = 10
@@ -163,11 +183,15 @@ final class RecordToolbarController: NSObject {
         let size = stack.fittingSize
         // 用户 2026-11-04：所有工具条统一 #E6E6E6 实底 + 黑图标（见 ToolbarTheme）。
         // 以前这里是 `.hudWindow` 毛玻璃：材质本身带深色，跟另外几条工具条不是一套。
-        let container = NSView(frame: NSRect(origin: .zero, size: size))
-        container.wantsLayer = true
-        container.appearance = ToolbarTheme.appearance
-        container.layer?.backgroundColor = ToolbarTheme.background.cgColor
-        container.layer?.cornerRadius = 14
+        //
+        // 🔴 容器必须是 `DraggableToolbarContainer` 而不是普通 `NSView`：用户同一天又要求
+        // 「录制的工具条可以拖动调整位置（跟截图工具条一样的拖动效果）」—— 录屏工具条常
+        // 横在录制框正下方，正好压住要讲解的那块内容，得能挪开。这里以前是 `NSView`，
+        // 无边框面板也没有标题栏，于是**整条工具条拖不动**。
+        // 抽成 `makeToolbarContainer(size:)` 是为了自检能断言它确实是那个类 ——
+        // 改回 `NSView` 不会报任何错，只有用户手上一试才发现。
+        let container = Self.makeToolbarContainer(size: size)
+        container.onDrag = { [weak self] in self?.toolbarMoved = true }
         container.addSubview(stack)
         stack.frame = container.bounds
 
@@ -260,7 +284,8 @@ final class RecordToolbarController: NSObject {
         case 2: // 全屏：去框，等"记录"
             region = nil
             hideFrame()
-            if let panel = toolbarPanel { position(panel) }
+            // 用户拖过就不再动它 —— 手已经放好了位置，切个模式又弹回中间最恼人。
+            if let panel = toolbarPanel, !toolbarMoved { position(panel) }
             if let bubble = cameraBubble, bubble.isVisible { bubble.show(anchor: cameraAnchorFrame) }
         case 3: // 重选区域：先收掉自己，让 AppModel 重新走选区
             close(stopRecording: true)
@@ -383,9 +408,14 @@ final class RecordToolbarController: NSObject {
             timeLabel?.textColor = ToolbarTheme.foreground
             timeLabel?.isHidden = false
             timeLabel?.stringValue = "启动中…"
-            timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            // 🔴 必须挂 `.common` 模式，不能用 `Timer.scheduledTimer`（默认只进 `.default`）：
+            // 工具条能拖之后，按住拖动的这几秒 runloop 跑在 `.eventTracking` 里，
+            // 只挂 `.default` 的 timer 会停摆 —— 用户看到的是秒表在拖动时冻住、松手猛跳一截。
+            let ticker = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
                 DispatchQueue.main.async { self?.tick() }
             }
+            RunLoop.main.add(ticker, forMode: .common)
+            timer = ticker
             onRecordingChange?(true)
         } catch {
             recorder = nil

@@ -486,6 +486,39 @@ enum SelfTest {
                   abs(OverlayEditorController.colorAnchorSide / 30 - 0.7) < 0.001)
         }
 
+        // ── 工具条可拖动（1.0.29 用户口径：录屏工具条跟截图工具条一样能拖）──
+        do {
+            let size = CGSize(width: 602, height: 58)
+            let container = RecordToolbarController.makeToolbarContainer(size: size)
+            // 改回裸 NSView 不会报任何错，只有用户手上一试才发现拖不动 —— 所以按类型钉住
+            check("录屏工具条容器是可拖的那个类（不是裸 NSView）",
+                  container.isKind(of: DraggableToolbarContainer.self))
+            check("录屏工具条容器：实底 + 圆角 14 + 图层开启",
+                  container.wantsLayer
+                    && abs((container.layer?.cornerRadius ?? 0) - 14) < 0.01
+                    && container.layer?.backgroundColor == ToolbarTheme.background.cgColor)
+            check("容器尺寸跟着工具条内容走（602 × 58）", container.frame.size == size)
+
+            // 拖动语义：按下 → 交给窗口的 performDrag（跟系统窗口拖动同一套）。
+            // 假窗口把 performDrag 截下来，不进拖动循环，所以脱离界面也能验。
+            let probe = DragProbeWindow()
+            probe.contentView = container
+            var dragCallbacks = 0
+            container.onDrag = { dragCallbacks += 1 }
+            let event = NSEvent.mouseEvent(with: .leftMouseDown, location: .zero,
+                                           modifierFlags: [], timestamp: 0,
+                                           windowNumber: probe.windowNumber, context: nil,
+                                           eventNumber: 1, clickCount: 1, pressure: 1)
+            check("能造出鼠标按下事件（造不出就没法验拖动）", event != nil)
+            if let event {
+                container.mouseDown(with: event)
+                check("按下工具条把拖动交给窗口（performDrag 收到 1 次）",
+                      probe.dragCount == 1)
+                check("拖过一次会回调 onDrag（切全屏时靠它不再弹回中间）",
+                      dragCallbacks == 1)
+            }
+        }
+
         // ── 颜色面板落位（1.0.10：贴在工具条下面，6 个颜色）──
         do {
             let visible = CGRect(x: 0, y: 0, width: 1710, height: 1077)
@@ -1751,4 +1784,21 @@ enum SelfTest {
 
 private extension String {
     var bytes: [UInt8] { Array(utf8) }
+}
+
+/// 自检专用窗口：把 `performDrag(with:)` 截下来只记次数。
+///
+/// 真窗口的 `performDrag` 会**进入拖动事件循环**，自检里调一次就卡死；
+/// 覆写之后既不进循环、又能证明"容器的 mouseDown 确实把活交给了窗口"。
+private final class DragProbeWindow: NSWindow {
+    private(set) var dragCount = 0
+
+    init() {
+        super.init(contentRect: NSRect(x: 0, y: 0, width: 200, height: 100),
+                   styleMask: [.borderless], backing: .buffered, defer: false)
+        // 程序化窗口默认 close() 会自我释放，跟 ARC 抢着放
+        isReleasedWhenClosed = false
+    }
+
+    override func performDrag(with event: NSEvent) { dragCount += 1 }
 }

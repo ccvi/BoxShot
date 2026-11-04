@@ -32,7 +32,8 @@ final class KeyableWindow: NSWindow {
 /// 可以拖着走的工具条容器。
 ///
 /// 用户口径（1.0.27）：「截图时，工具条可以拖动调整位置」—— 工具条常横在选区正下方，
-/// 正好压住要标注的那块内容，得能挪开。
+/// 正好压住要标注的那块内容，得能挪开。1.0.29 起**录屏工具条也用它**（用户口径
+/// 「录制的工具条可以拖动调整位置，跟截图工具条一样的拖动效果」）。
 ///
 /// 🔴 无边框 `NSPanel` 默认**不响应拖动**（没有标题栏，`isMovableByWindowBackground`
 /// 也是 false），所以要在容器视图上自己接 `mouseDown` 调 `performDrag(with:)`。
@@ -42,7 +43,14 @@ final class KeyableWindow: NSWindow {
 /// 拖过之后位置就固定在那儿（`positionToolbar` 只在建工具条时算一次）；
 /// 换一张截图会重新按 `toolbarOrigin` 算回默认位置 —— 那是新浮层，不该继承旧位置。
 final class DraggableToolbarContainer: NSView {
+    /// 用户真的按下拖动时回调一次。
+    ///
+    /// 截图工具条不设它（默认位置算完就不管了）；录屏工具条靠它区分"还没动过"和
+    /// "用户亲手挪过"—— 后者不该在切换全屏录制时被 `position()` 弹回中间。
+    var onDrag: (() -> Void)?
+
     override func mouseDown(with event: NSEvent) {
+        onDrag?()
         window?.performDrag(with: event)
     }
 }
