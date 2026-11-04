@@ -19,17 +19,22 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     ///
     /// 🔴 尺寸必须走 `pointSize`，不能写 `image.size = 18×18`。
     ///
-    /// 用户 2026-11-04：「让实际画出来的图形是 18×18 pt」。
+    /// 用户 2026-11-04：「让实际画出来的图形是 18×18 pt 看看」→ 隔一句又改成
+    /// 「16×16 pt 看看」，两个值都试过。
     /// SF Symbol 的图像自带内边距（em box / alignmentRect），`image.size` 改的只是
     /// **画布**，图形按原比例缩在中间 —— 实测：设 18×18 时墨迹只有 14×16，而且原
     /// symbol 是 16×15（宽>高），拉进正方形画布反而变得"高>宽"，比例也被带歪了。
-    /// `pointSize` 控制的是图形本体：18 → 墨迹正好 18×18 pt（画布 22×20 pt，
-    /// 菜单栏 24pt 高放得下）。菜单项图标用的是同一种写法（pointSize 12）。
+    ///
+    /// `pointSize` 控制的是图形本体，14 以上是**一比一**的（实测扫过 12…20）：
+    /// pointSize 16 → 墨迹 16×16（画布 20×18），18 → 墨迹 18×18（画布 22×20）。
+    /// 菜单栏图标用 16，菜单项图标用的是同一种写法（pointSize 12）。
     ///
     /// 抽成函数是为了自检能把它渲染出来量墨迹 —— 改回 `.size` 写法那条断言会红。
+    static let menuBarIconPointSize: CGFloat = 16
+
     static func menuBarIcon() -> NSImage? {
         NSImage(systemSymbolName: "camera.viewfinder", accessibilityDescription: "BoxShot")?
-            .withSymbolConfiguration(.init(pointSize: 18, weight: .regular))
+            .withSymbolConfiguration(.init(pointSize: menuBarIconPointSize, weight: .regular))
     }
 
     func install() {

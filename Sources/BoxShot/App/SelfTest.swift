@@ -535,16 +535,16 @@ enum SelfTest {
                   Set(BeautifyOptions.solidPresets.map { $0.hexString }).count
                     == BeautifyOptions.solidPresets.count)
 
-            // ── 菜单栏图标（1.0.31 用户口径：实际画出来的图形要 18×18 pt）──
+            // ── 菜单栏图标（1.0.32 用户口径：实际画出来的图形要 16×16 pt）──
             // 钉的是"墨迹"而不是 `image.size`：设 size = 18×18 时墨迹只有 14×16，
             // 图形自带内边距，光看 size 会以为已经对了。
             if let icon = StatusItemController.menuBarIcon() {
                 let ink = SelfTest.inkBounds(icon)
-                check("菜单栏图标墨迹 18×18 pt（实测 \(ink.width)×\(ink.height)）",
-                      abs(ink.width - 18) <= 0.5 && abs(ink.height - 18) <= 0.5)
-                // 菜单栏高 24pt：画布（含内边距）不能顶满，否则上下会被裁
-                check("图标画布高度不超过 22pt（菜单栏 24pt 放得下，实际 \(icon.size.height)）",
-                      icon.size.height <= 22)
+                check("菜单栏图标墨迹 16×16 pt（实测 \(ink.width)×\(ink.height)）",
+                      abs(ink.width - 16) <= 0.5 && abs(ink.height - 16) <= 0.5)
+                // 画布要跟着墨迹走：pointSize 16 → 20×18，菜单栏 35pt 高绰绰有余
+                check("图标画布不超过墨迹 + 4pt（实际 \(icon.size.width)×\(icon.size.height)）",
+                      icon.size.width <= 20 && icon.size.height <= 20)
             } else {
                 check("取不到 camera.viewfinder 这个 SF Symbol", false)
             }
