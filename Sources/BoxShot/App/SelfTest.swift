@@ -1466,6 +1466,38 @@ enum SelfTest {
             check("贴屏幕顶边的框像素 y = 0", top.minY == 0)
         }
 
+        // ── 抓帧边界：小数选区对齐 + 透明边裁剪（1.0.29「成品图全是 1px 白线」）──
+        // 白线的根因是抓帧回来了 alpha=0 的边行，不是拼接算错。
+        do {
+            let fractional = CGRect(x: 120.25, y: 620.75, width: 644.5, height: 620.3)
+            let snapped = ScreenCapture.snapToDevicePixels(fractional, scale: 2)
+            func onGrid(_ v: CGFloat) -> Bool { abs(v * 2 - (v * 2).rounded()) < 0.0001 }
+            check("小数选区四条边都对齐到整设备像素",
+                  onGrid(snapped.minX) && onGrid(snapped.minY)
+                    && onGrid(snapped.maxX) && onGrid(snapped.maxY))
+            check("对齐最多挪动 1 个设备像素",
+                  abs(snapped.width - fractional.width) <= 0.5
+                    && abs(snapped.height - fractional.height) <= 0.5)
+            check("已经对齐的矩形原样返回",
+                  ScreenCapture.snapToDevicePixels(snapped, scale: 2) == snapped)
+            let tiny = ScreenCapture.snapToDevicePixels(
+                CGRect(x: 10.2, y: 10.2, width: 0.01, height: 0.01), scale: 2)
+            check("对齐后尺寸不会归零", tiny.width >= 0.5 && tiny.height >= 0.5)
+        }
+        if let withEdge = transparentEdgeImage(width: 40, height: 30) {
+            let trimmed = ScreenCapture.trimmingTransparentEdges(withEdge)
+            check("透明底行 + 右列都被裁掉（\(trimmed.width)×\(trimmed.height)）",
+                  trimmed.width == 39 && trimmed.height == 29)
+            let again = ScreenCapture.trimmingTransparentEdges(trimmed)
+            check("裁过一次后再裁不会再缩", again.width == 39 && again.height == 29)
+        } else {
+            check("造透明边测试图", false)
+        }
+        if let opaque = syntheticPage(width: 40, height: 20) {
+            let same = ScreenCapture.trimmingTransparentEdges(opaque)
+            check("不透明的图原样返回", same.width == 40 && same.height == 20)
+        }
+
             print(failures == 0 ? "\n全部通过" : "\n\(failures) 项失败")
             return failures == 0 ? 0 : 1
         }
@@ -1526,6 +1558,21 @@ enum SelfTest {
             ctx.fill(CGRect(x: CGFloat(start), y: CGFloat(row),
                             width: CGFloat(min(len, width - start)), height: 1))
         }
+        return ctx.makeImage()
+    }
+
+    /// 造一张"右列 + 底行全是 alpha=0"的图，模拟 ScreenCaptureKit 少填的那 1 行/1 列。
+    /// 缓冲区第 0 行是图像顶部，所以透明的是 y=0 那一行（图像**底边**）与 x=width-1 那一列。
+    private static func transparentEdgeImage(width: Int, height: Int) -> CGImage? {
+        guard width > 1, height > 1,
+              let ctx = CGContext(data: nil, width: width, height: height,
+                                  bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                                    | CGBitmapInfo.byteOrder32Little.rawValue) else { return nil }
+        // 只画内部 (width-1) × (height-1)，最右一列与最下一行留成 alpha=0
+        ctx.setFillColor(CGColor(red: 0.2, green: 0.35, blue: 0.8, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 1, width: width - 1, height: height - 1))
         return ctx.makeImage()
     }
 

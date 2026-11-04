@@ -137,13 +137,101 @@ enum ScreenCapture {
         let filter = SCContentFilter(display: display, excludingWindows: ownWindows)
         let config = SCStreamConfiguration()
         config.captureResolution = .best
-        config.sourceRect = rect
         let scale = scaleFactor(for: displayID)
-        config.width = Int(rect.width * scale)
-        config.height = Int(rect.height * scale)
+        // 🔴 区域必须先对齐整设备像素再交给 ScreenCaptureKit。
+        // 选区来自鼠标拖动，`rect.width` 常年是 644.5 / 620.3 这种小数：
+        //   · 小数 sourceRect 会被 SCK 重采样，帧本身发虚，拼接对齐精度掉到亚像素；
+        //   · `Int(rect.width * scale)` 取整后要的像素数跟真实能给的经常差 1 行/1 列。
+        let snapped = snapToDevicePixels(rect, scale: scale)
+        config.sourceRect = snapped
+        config.width = Int((snapped.width * scale).rounded())
+        config.height = Int((snapped.height * scale).rounded())
         config.showsCursor = false
-        return try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+        let raw = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+        // 🔴 必须裁掉透明边，否则滚动截图成品里全是 1px 白线。见 trimmingTransparentEdges。
+        return trimmingTransparentEdges(raw)
     }
+
+    /// 把矩形四条边对齐到**整设备像素**（scale = 2 时对齐到 0.5pt）。
+    ///
+    /// 纯几何，自检直接喂数字。尺寸只可能差 1 个设备像素。
+    static func snapToDevicePixels(_ rect: CGRect, scale: CGFloat) -> CGRect {
+        guard scale > 0 else { return rect }
+        let x0 = (rect.minX * scale).rounded() / scale
+        let y0 = (rect.minY * scale).rounded() / scale
+        let x1 = (rect.maxX * scale).rounded() / scale
+        let y1 = (rect.maxY * scale).rounded() / scale
+        return CGRect(x: x0, y: y0,
+                      width: max(1 / scale, x1 - x0),
+                      height: max(1 / scale, y1 - y0))
+    }
+
+    /// 裁掉图像**右边缘/下边缘**完全透明的行与列。
+    ///
+    /// 🔴 这是「滚动截图成品图里全是 1px 白线」的根因（1.0.29）。
+    ///
+    /// `SCScreenshotManager` 在 `config.width/height` 比它实际填充的像素多的时候，
+    /// 不会报错，而是**把差的那 1 行/1 列留成 alpha = 0**。实测（macOS 26 / scale 2）：
+    /// 同一个矩形重复抓 8 次，脏的永远是同一边、同样的像素数（确定性，不是偶发）；
+    /// 只要 sourceRect 四条边不在整设备像素上，或者尺寸换算取整对不上，就会中招。
+    ///
+    /// 后果分两步放大：
+    ///   ① 画布是透明底，`StitchCanvas.append` 只拷每帧**底部 off 行**，
+    ///      正好把最后那行透明一起拼了进去 → 每个拼接缝埋一条透明行；
+    ///   ② `CGImageDestination` 编 JPEG 时 alpha = 0 被铺成**纯白 255**
+    ///      （实测：透明行存 JPEG 读回来就是 (255,255,255)）→ 用户看到的就是白线。
+    ///      存 PNG 则是透明缝，在预览/白底网页上照样是一片白。
+    ///
+    /// 裁掉的这 1px 里本来就没有画面数据，且同一个区域每帧裁掉的量完全一致，
+    /// 所以拼接几何不受影响（帧与帧的 overlap 依然连续）。
+    static func trimmingTransparentEdges(_ image: CGImage) -> CGImage {
+        // 没有 alpha 通道就没什么可裁的
+        switch image.alphaInfo {
+        case .none, .noneSkipFirst, .noneSkipLast: return image
+        default: break
+        }
+        let w = image.width, h = image.height
+        guard w > 1, h > 1 else { return image }
+
+        var rowsToTrim = 0
+        while rowsToTrim < min(8, h - 1),
+              edgeIsClear(image, rect: CGRect(x: 0, y: h - 1 - rowsToTrim, width: w, height: 1)) {
+            rowsToTrim += 1
+        }
+        var colsToTrim = 0
+        while colsToTrim < min(8, w - 1),
+              edgeIsClear(image, rect: CGRect(x: w - 1 - colsToTrim, y: 0, width: 1, height: h)) {
+            colsToTrim += 1
+        }
+        guard rowsToTrim > 0 || colsToTrim > 0 else { return image }
+        let cropped = CGRect(x: 0, y: 0, width: w - colsToTrim, height: h - rowsToTrim)
+        return image.cropping(to: cropped) ?? image
+    }
+
+    /// 这一小块（一行或一列）是不是**全透明**。
+    ///
+    /// 逐像素扫，不抽样：一行才 ~1800 个像素，抽样万一把"基本全透明但有一处画面"
+    /// 的边判成空，就会把真内容裁掉。
+    private static func edgeIsClear(_ image: CGImage, rect: CGRect) -> Bool {
+        guard let slice = image.cropping(to: rect) else { return false }
+        let sw = slice.width, sh = slice.height
+        guard sw > 0, sh > 0,
+              let ctx = CGContext(data: nil, width: sw, height: sh,
+                                  bitsPerComponent: 8, bytesPerRow: sw * 4,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                                    | CGBitmapInfo.byteOrder32Little.rawValue) else { return false }
+        ctx.draw(slice, in: CGRect(x: 0, y: 0, width: sw, height: sh))
+        guard let base = ctx.data else { return false }
+        let data = base.bindMemory(to: UInt8.self, capacity: sw * sh * 4)
+        var i = 3
+        while i < sw * sh * 4 {
+            if data[i] != 0 { return false }
+            i += 4
+        }
+        return true
+    }
+
 
     /// 截取单个窗口（点选窗口模式）
     static func captureWindow(_ window: ScreenWindowInfo) async throws -> CGImage {
