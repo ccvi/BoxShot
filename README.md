@@ -4,7 +4,7 @@
 
 零第三方依赖——截图走 ScreenCaptureKit，识别走 Vision，热键走 Carbon，编码走 AVFoundation。
 
-- 当前版本：**1.0.30**
+- 当前版本：**1.0.31**
 - 作者：ccvi1223 · ccvi1223@qq.com
 - 工程最低版本：`.macOS(.v14)`（`Package.swift`）
 - 常驻形态：`LSUIElement = true`，只在菜单栏，不占 Dock
@@ -555,6 +555,38 @@ let ownWindows = content.windows.filter {
 窗口大小只影响显示，不动数据：`fitScale` 由 `GeometryReader` 的实测尺寸算，标注坐标一直存在图像像素空间，拉大拉小之后位置和字号自动跟着换算（`pixelFontSize` / `pointFontSize`）。每次 `show()` 仍按图片尺寸重算并居中，所以"拖好的大小"不会跨截图保留 —— 这是有意的，每张图比例不一样。
 
 诊断：`--editorbar`（或 `/tmp/boxshot-editorbar.trigger`）用一张 900×600 合成渐变图直接开编辑窗口。正路要「截图 → 浮层 → 点编辑」，验一次得先有截屏权限、还得点中那颗按钮。
+
+## 菜单栏图标：`image.size` 改的不是图形大小（1.0.31）
+
+用户先问了句「现在使用的这个菜单图标是多大的？」——顺着这个问题量出来一件事：
+代码里写的是 18×18 pt，**实际画出来的图形只有 14×16 pt**。
+
+```swift
+// 改之前（看着像 18，其实不是）
+button.image = NSImage(systemSymbolName: "camera.viewfinder", accessibilityDescription: "BoxShot")
+button.image?.size = NSSize(width: 18, height: 18)
+```
+
+把三种写法都渲染成 2x 位图量**墨迹**（非透明像素的外接框）：
+
+| 写法 | 画布 | 图形本身（墨迹） |
+| --- | --- | --- |
+| SF Symbol 默认 | 32×30 px | 12×13 pt |
+| `image.size = 18×18` | 36×36 px | **14×16 pt** |
+| `withSymbolConfiguration(pointSize: 18)` | 44×40 px | **18×18 pt** |
+
+- 🔴 **SF Symbol 的图像自带内边距**（em box / alignmentRect），`image.size` 改的只是画布，
+  图形按原比例缩在中间。所以"设了 18×18"和"看起来 18×18"是两件事。
+- 更歪的是比例：原 symbol 是 16×15（宽 > 高），拉进正方形画布之后变成 14×16（高 > 宽），
+  图形被横向压窄了一点。
+- **`pointSize` 才控制图形本体**：18 → 墨迹正好 18×18 pt（画布 22×20 pt）。菜单项图标
+  用的就是这种写法（pointSize 12），只是没人注意状态栏那个用的是另一套。
+- 顺带量清一个数：**这台机器的菜单栏高 35pt（70px），不是 24pt** —— 刘海屏。按 24pt 去裁
+  截图会误判成"图标被裁掉了"（我第一次就是这么判错的）。
+
+自检两条盯住（`inkBounds`）：墨迹必须是 18×18（±0.5），画布高 ≤ 22（菜单栏放得下）。
+量墨迹用的是"把 image 画进 2x 位图，扫非透明像素的外接框" —— 🔴 alpha 在 BGRA
+little-endian 的第 4 个字节上，取错会全 0、断言变成永远通过。
 
 ## 工具条配色：四条用 ToolbarTheme，编辑窗口不动（1.0.27 / 1.0.28）
 

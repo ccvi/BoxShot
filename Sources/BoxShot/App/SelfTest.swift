@@ -534,6 +534,20 @@ enum SelfTest {
             check("美化预设里没有重复色（黑只出现一次）",
                   Set(BeautifyOptions.solidPresets.map { $0.hexString }).count
                     == BeautifyOptions.solidPresets.count)
+
+            // ── 菜单栏图标（1.0.31 用户口径：实际画出来的图形要 18×18 pt）──
+            // 钉的是"墨迹"而不是 `image.size`：设 size = 18×18 时墨迹只有 14×16，
+            // 图形自带内边距，光看 size 会以为已经对了。
+            if let icon = StatusItemController.menuBarIcon() {
+                let ink = SelfTest.inkBounds(icon)
+                check("菜单栏图标墨迹 18×18 pt（实测 \(ink.width)×\(ink.height)）",
+                      abs(ink.width - 18) <= 0.5 && abs(ink.height - 18) <= 0.5)
+                // 菜单栏高 24pt：画布（含内边距）不能顶满，否则上下会被裁
+                check("图标画布高度不超过 22pt（菜单栏 24pt 放得下，实际 \(icon.size.height)）",
+                      icon.size.height <= 22)
+            } else {
+                check("取不到 camera.viewfinder 这个 SF Symbol", false)
+            }
             check("色块是圆形（圆角取半径）", OverlayEditorController.swatchSide > 0)
             // 用户口径：1.0.10「小 20%」→ 1.0.11「再小 10%」：26 × 0.8 × 0.9 = 18.72。
             // 钉死数字，防止以后谁手滑又调回 26
@@ -1865,6 +1879,39 @@ enum SelfTest {
         ctx.drawLinearGradient(gradient, start: CGPoint(x: 0, y: 0),
                                end: CGPoint(x: 0, y: CGFloat(height)), options: [])
         return ctx.makeImage()
+    }
+
+    /// 把 NSImage 画进 2x 位图，返回**非透明像素**的外接尺寸（pt）。
+    ///
+    /// 用来验"菜单栏图标实际画出来多大"—— SF Symbol 的 `image.size` 只改画布，
+    /// 图形自带内边距缩在中间，光看 `size` 会以为它真的 18×18（实测墨迹只有 14×16）。
+    /// alpha 在 BGRA little-endian 的第 4 个字节上，取错会全 0、断言变成永远通过。
+    private static func inkBounds(_ image: NSImage, scale: Int = 2) -> CGSize {
+        let w = Int(image.size.width) * scale, h = Int(image.size.height) * scale
+        guard w > 0, h > 0,
+              let ctx = CGContext(data: nil, width: w, height: h,
+                                  bitsPerComponent: 8, bytesPerRow: w * 4,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                                    | CGBitmapInfo.byteOrder32Little.rawValue) else { return .zero }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: false)
+        image.draw(in: CGRect(x: 0, y: 0, width: w, height: h))
+        NSGraphicsContext.restoreGraphicsState()
+        guard let data = ctx.data else { return .zero }
+        let buf = data.bindMemory(to: UInt8.self, capacity: w * h * 4)
+        var minX = w, maxX = -1, minY = h, maxY = -1
+        for y in 0..<h {
+            for x in 0..<w where buf[(y * w + x) * 4 + 3] > 8 {
+                if x < minX { minX = x }
+                if x > maxX { maxX = x }
+                if y < minY { minY = y }
+                if y > maxY { maxY = y }
+            }
+        }
+        guard maxX >= 0 else { return .zero }
+        return CGSize(width: CGFloat(maxX - minX + 1) / CGFloat(scale),
+                      height: CGFloat(maxY - minY + 1) / CGFloat(scale))
     }
 
     private static func solidImage(width: Int, height: Int, color: CGColor) -> CGImage {
