@@ -502,6 +502,19 @@ enum SelfTest {
             check("分隔线跟着色块一起缩（不高于色块）",
                   OverlayEditorController.colorPanelDividerHeight <= OverlayEditorController.swatchSide)
 
+            // 粗细档位：用户 2026-11-04「粗细增加 9 px」→ 3/6/12 各 +9 = 12/15/21
+            check("粗细三档是 12 / 15 / 21 px（原 3/6/12 各 +9）",
+                  OverlayEditorController.lineWidthOptions == [12, 15, 21])
+            // 三档画在面板里还得能看出区别：封顶后不能全长一样，也不能顶出按钮
+            let samples = OverlayEditorController.lineWidthOptions.map {
+                OverlayEditorController.lineWidthSampleWidth(for: $0,
+                                                             boxHeight: OverlayEditorController.swatchSide)
+            }
+            check("三档示意线粗细各不相同（\(samples.map { String(format: "%.1f", $0) })）",
+                  Set(samples.map { Int($0 * 10) }).count == samples.count)
+            check("示意线不溢出按钮高度",
+                  samples.allSatisfy { $0 < OverlayEditorController.swatchSide })
+
             let toolbar = CGRect(x: 300, y: 500, width: 700, height: 64)
             let p1 = OverlayEditorController.colorPanelOrigin(toolbar: toolbar,
                                                               panelSize: panelSize, visible: visible)

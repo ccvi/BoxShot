@@ -581,7 +581,7 @@ final class OverlayEditorController: NSObject {
             stack.addArrangedSubview(dot)
         }
         stack.addArrangedSubview(divider())
-        for width: CGFloat in [3, 6, 12] {
+        for width in Self.lineWidthOptions {
             let button = lineWidthButton(width)
             widthButtons[width] = button
             stack.addArrangedSubview(button)
@@ -657,6 +657,21 @@ final class OverlayEditorController: NSObject {
 
     /// 颜色面板里那条分隔线的高度：跟着色块一起缩，否则会顶出一截
     static let colorPanelDividerHeight: CGFloat = 18
+
+    /// 3 档粗细（**图像像素**）。
+    ///
+    /// 用户 2026-11-04 口径「粗细增加 9 px」：原档位 `3 / 6 / 12` 各 +9 → `12 / 15 / 21`。
+    /// 这里的 px 就是 tooltip 上写的那个（`AnnotationShape.lineWidth` 存的是**图像像素**，
+    /// 不是点 —— 2x 截图上 21px = 屏幕上 10.5pt）。
+    static let lineWidthOptions: [CGFloat] = [12, 15, 21]
+
+    /// 档位示意线的粗细（pt，画在面板里那颗小按钮上）。
+    ///
+    /// 封顶 `boxHeight * 0.6`：按钮高 = 色块直径（18.72），不封顶的话最粗一档会顶满整个按钮；
+    /// 下限 1.5 是"再细也得看得见"。抽成纯函数是为了自检能验"三档画出来还得有区别、且不溢出"。
+    static func lineWidthSampleWidth(for width: CGFloat, boxHeight: CGFloat) -> CGFloat {
+        min(boxHeight * 0.6, max(1.5, width / 2))
+    }
 
     /// 调色板：6 个颜色（1.0.10 用户口径「颜色 6 个颜色」，顺序按他给的色卡）。
     /// 真身在 RGBColor.palette（编辑窗口共用同一份）；这里留常量别名，
@@ -924,7 +939,7 @@ final class OverlayEditorController: NSObject {
         image.lockFocus()
         if let ctx = NSGraphicsContext.current?.cgContext {
             ctx.setStrokeColor(NSColor.white.cgColor)
-            ctx.setLineWidth(min(boxH * 0.6, max(1.5, width / 2)))
+            ctx.setLineWidth(Self.lineWidthSampleWidth(for: width, boxHeight: boxH))
             ctx.setLineCap(.round)
             ctx.move(to: CGPoint(x: 2, y: boxH / 2))
             ctx.addLine(to: CGPoint(x: boxW - 2, y: boxH / 2))
