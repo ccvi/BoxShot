@@ -113,6 +113,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.model.perform(.recordFullscreen)
             }
         }
+        // 诊断入口：--editorbar 用合成图直接开一个「编辑标注」窗口。
+        // 正路要「截图 → 浮层 → 点工具条上的编辑」，验一次配色 / 能不能拖边框得先有
+        // 截屏权限、还得点中那颗按钮（非 key 窗口第一下点击会被吞）。这条路直接给窗口。
+        let editorBarTrigger = "/tmp/boxshot-editorbar.trigger"
+        if CommandLine.arguments.contains("--editorbar")
+            || FileManager.default.fileExists(atPath: editorBarTrigger) {
+            try? FileManager.default.removeItem(atPath: editorBarTrigger)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                self?.showDiagnosticEditorWindow()
+            }
+        }
         // 诊断入口：--esctest 打开区域截图遮罩 → 自己投一个 Esc 进去 → 看遮罩有没有收掉。
         // 「Esc 没生效」这种问题，光读代码看不出是"判断写错"还是"按键根本没进来"。
         let escTrigger = "/tmp/boxshot-esctest.trigger"
@@ -1567,6 +1578,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// `--pintest` 放出来的那张文本贴图（只为诊断期间不被回收）
     private var textPinHolder: PinWindow?
+
+    /// 诊断入口：`--editorbar` 直接开一个编辑标注窗口（合成图，跟浮层诊断同一张）。
+    /// 用来核对工具条配色、以及「拖边框能不能改窗口大小」「最小尺寸有没有兜住」。
+    private func showDiagnosticEditorWindow() {
+        let w = 900, h = 600
+        let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                            space: CGColorSpaceCreateDeviceRGB(),
+                            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)!
+        for y in 0..<h {
+            let t = Double(y) / Double(h)
+            ctx.setFillColor(CGColor(srgbRed: 0.9, green: 1 - t * 0.8, blue: 0.2 + t * 0.5, alpha: 1))
+            ctx.fill(CGRect(x: 0, y: y, width: w, height: 1))
+        }
+        // 两块实色，方便肉眼判断缩放后坐标有没有跟着变
+        ctx.setFillColor(CGColor(srgbRed: 0.1, green: 0.1, blue: 0.6, alpha: 1))
+        ctx.fill(CGRect(x: 80, y: 80, width: 260, height: 160))
+        ctx.setFillColor(CGColor(srgbRed: 0.85, green: 0.2, blue: 0.35, alpha: 1))
+        ctx.fill(CGRect(x: 520, y: 340, width: 300, height: 180))
+        guard let image = ctx.makeImage() else { return }
+        model.openEditorForDiagnostics(image: image)
+    }
 
     private func showDiagnosticOverlay(tall: Bool = false, colors: Bool = false) {
         let w = 800, h = 500

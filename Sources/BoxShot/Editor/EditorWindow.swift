@@ -15,13 +15,23 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
     private weak var appModel: AppModel?
     private var escMonitor: Any?
 
+    /// 内容区最小尺寸。工具条本身 ~1100pt 宽，低于 640 横向滚起来太难受；
+    /// 高度给画布留 ~350（工具条 62 + 画布 358），再小就只剩一条缝。
+    static let minContentSize = NSSize(width: 640, height: 420)
+
     init(model: AppModel) {
         self.appModel = model
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 640),
-                              styleMask: [.titled, .closable, .miniaturizable],
+                              styleMask: [.titled, .closable, .miniaturizable, .resizable],
                               backing: .buffered, defer: false)
         window.title = "BoxShot 编辑"
         window.isReleasedWhenClosed = false
+        // 用户 2026-11-04：「编辑标注窗口能不能拖拉边框改变窗口大小」——
+        // 之前 styleMask 里没有 .resizable，四边都拖不动。
+        window.contentMinSize = Self.minContentSize
+        // 不要全屏：这个窗口是"改完就走"的临时工作区，进全屏既不常见也会把
+        // 工具条的横向布局撑得很怪。绿灯保留缩放（zoom）语义就够。
+        window.collectionBehavior = [.fullScreenNone]
         super.init(window: window)
         window.delegate = self
     }
@@ -61,6 +71,9 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
                                   self?.show(image: image, shapes: shapes)
                               })
         window.contentView = NSHostingView(rootView: view)
+        // 🔴 装在 contentView 之后**再设一次**：换 contentView 会让 SwiftUI 重算容器
+        // 约束，前面 init 里那份 contentMinSize 会被盖掉（绿灯缩放也会因此失效）。
+        window.contentMinSize = Self.minContentSize
 
         installEscMonitor()
         window.makeKeyAndOrderFront(nil)
@@ -181,5 +194,17 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
         removeEscMonitor()
         doc = nil
         appModel?.editorDidClose(self)
+    }
+
+    /// 拖边框的下限在这里兜住。
+    ///
+    /// 🔴 光设 `window.contentMinSize` 不管用：`contentView` 换成 `NSHostingView` 之后，
+    /// SwiftUI 会把窗口的最小尺寸按自己的 fitting 尺寸重算，实测能一路拖到 596×286
+    /// （工具条被压成一团）。delegate 这一层是最后一道，一定拦得住。
+    func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {
+        let minFrame = sender.frameRect(forContentRect:
+            NSRect(origin: .zero, size: Self.minContentSize)).size
+        return NSSize(width: max(frameSize.width, minFrame.width),
+                      height: max(frameSize.height, minFrame.height))
     }
 }
