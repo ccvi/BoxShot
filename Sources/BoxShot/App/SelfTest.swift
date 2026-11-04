@@ -523,10 +523,17 @@ enum SelfTest {
         do {
             let visible = CGRect(x: 0, y: 0, width: 1710, height: 1077)
             let panelSize = CGSize(width: 200, height: 48)
-            check("调色板正好 6 个颜色", OverlayEditorController.colorPalette.count == 6)
-            check("色卡是 黄绿蓝红橙紫 六色（含色值）",
+            // 2026-11-04 用户口径「颜色增加一个色：黑色」→ 六色后面补黑，共 7 个
+            check("调色板正好 7 个颜色（六色 + 黑）",
+                  OverlayEditorController.colorPalette.count == 7)
+            check("色卡是 黄绿蓝红橙紫黑 七色（含色值）",
                   OverlayEditorController.colorPalette.map { $0.hexString }
-                    == ["#F8CE43", "#62C563", "#3887FB", "#EB4259", "#F3933D", "#BD3DDD"])
+                    == ["#F8CE43", "#62C563", "#3887FB", "#EB4259", "#F3933D", "#BD3DDD", "#000000"])
+            // 美化背景的纯色预设本来是"色卡 + 白 + 黑 + 灰"，黑色进了调色板之后
+            // 不能出现两个一模一样的黑块 —— 靠 filter 去重，这条盯着它
+            check("美化预设里没有重复色（黑只出现一次）",
+                  Set(BeautifyOptions.solidPresets.map { $0.hexString }).count
+                    == BeautifyOptions.solidPresets.count)
             check("色块是圆形（圆角取半径）", OverlayEditorController.swatchSide > 0)
             // 用户口径：1.0.10「小 20%」→ 1.0.11「再小 10%」：26 × 0.8 × 0.9 = 18.72。
             // 钉死数字，防止以后谁手滑又调回 26

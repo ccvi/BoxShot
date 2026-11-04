@@ -1683,11 +1683,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // 两边都是现读的同一个值，永远相等 → 每次都会误报"没换色"。
                 let before = editor.docColorForDiagnostics
 
-                // 合成一次点击：第 6 个色块（黑，最不容易和默认色撞）。
+                // 合成一次点击：点**最后一个**色块（黑色，最不容易和默认红撞）。
                 // 坐标是 AppKit 左下原点 → 全局左上原点。
-                // 面板内边距 10、色块 21 宽、间距 6：第 n 个色块中心 = minX+10+(21+6)*n+10.5
+                // 面板内边距 10、色块 21 宽、间距 6：第 n 个（0 起）中心 = minX+10+(21+6)*n+10.5
+                // 🔴 下标取 `palette.count - 1` 而不是写死数字：2026-11-04 加了黑色之后
+                // 原来写死的 5 就点到紫色上了，日志还写着"选了黑色"。
                 let side = OverlayEditorController.swatchSide
-                let cx = panel.minX + 10 + (side + 6) * 5 + side / 2
+                let lastIndex = OverlayEditorController.colorPalette.count - 1
+                let cx = panel.minX + 10 + (side + 6) * CGFloat(lastIndex) + side / 2
                 let cy = panel.midY
                 let screenH = ScreenCapture.activeScreen().frame.height
                 let src = CGEventSource(stateID: .hidSystemState)

@@ -433,7 +433,7 @@ final class OverlayEditorController: NSObject {
         }
         stack.addArrangedSubview(divider(Self.toolbarDividerHeight))
 
-        // 颜色圆点：点开是 6 色 + 3 档粗细
+        // 颜色圆点：点开是 7 色 + 粗细 / 字号下拉
         let colorAnchor = colorDotAnchorButton()
         stack.addArrangedSubview(colorAnchor)
         stack.addArrangedSubview(divider(Self.toolbarDividerHeight))
@@ -550,7 +550,8 @@ final class OverlayEditorController: NSObject {
 
     // ── 颜色面板：固定在工具条下面 ──────────────────────────
 
-    /// 1.0.10 用户口径：颜色面板显示在**工具条下面**，6 个颜色。
+    /// 1.0.10 用户口径：颜色面板显示在**工具条下面**，颜色若干（现为 7 个，
+    /// 2026-11-04 在六色后面补了黑）。
     /// 以前是 NSPopover，弹在颜色圆点旁边、压住截图内容，位置还跟着圆点跑；
     /// 现在是一块独立的浮层，贴在工具条下方（下面放不下就贴上方），
     /// 顺带把 3 档粗细也收在一起。
@@ -718,7 +719,8 @@ final class OverlayEditorController: NSObject {
         defaults.set(Double(width), forKey: lastLineWidthKey)
     }
 
-    /// 调色板：6 个颜色（1.0.10 用户口径「颜色 6 个颜色」，顺序按他给的色卡）。
+    /// 调色板：7 个颜色（1.0.10 用户口径「颜色 6 个颜色」，顺序按他给的色卡；
+    /// 2026-11-04 用户口径「颜色增加一个色：黑色」→ 末尾补黑）。
     /// 真身在 RGBColor.palette（编辑窗口共用同一份）；这里留常量别名，
     /// 自检盯着数量 —— 以前是散在这里的数组字面量，加一个减一个没人会发现。
     static let colorPalette: [RGBColor] = RGBColor.palette

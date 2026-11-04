@@ -323,11 +323,15 @@ struct RGBColor: Equatable {
                Int(round(red * 255)), Int(round(green * 255)), Int(round(blue * 255)))
     }
 
-    // 截图工具条与编辑窗口**共用**的 6 色调色板（顺序 = 用户色卡顺序）。
+    // 截图工具条与编辑窗口**共用**的调色板（顺序 = 用户色卡顺序）。
     // 以前编辑窗口另写一份 [.red,.blue,.yellow,.green,.white,.black]，
     // 两处各自漂移：工具条刚统一完色卡，编辑器还是老六色 —— 2026-11-02
     // 用户口径「编辑功能…跟截图的工具条颜色对应」。以后加色只改这一处。
-    static let palette: [RGBColor] = [.yellow, .green, .blue, .red, .orange, .purple]
+    //
+    // 2026-11-04 用户口径「颜色增加一个色：黑色」→ 六色后面补黑。
+    // 黑色放在**最后**：前面六个是他最早给的色卡顺序，插在中间等于把
+    // 他已经形成的肌肉记忆打乱；补在末尾只是多一颗。
+    static let palette: [RGBColor] = [.yellow, .green, .blue, .red, .orange, .purple, .black]
 }
 
 // ── 截图美化（Xnapper 式：背景 + 圆角 + 阴影 + padding） ──────
@@ -352,9 +356,14 @@ struct BeautifyOptions: Equatable {
         case gradient(RGBColor, RGBColor)
     }
 
-    /// 纯色预设：6 色色卡 + 白 + 黑 + 苹果灰（跟调色板同一套色值来源）
+    /// 纯色预设：色卡 + 白 + 黑 + 苹果灰（跟调色板同一套色值来源）
+    ///
+    /// 黑色 2026-11-04 进了调色板，而这里本来就有一个黑 —— 直接相加会让
+    /// 美化背景的预设里出现两个一模一样的黑块。所以白/黑/灰这组先滤掉调色板里
+    /// 已有的，保证"每个预设看上去都不一样"。
     static let solidPresets: [RGBColor] = RGBColor.palette
         + [RGBColor.white, RGBColor.black, RGBColor.srgb(245, 245, 247)]
+            .filter { !RGBColor.palette.contains($0) }
 
     /// 渐变预设：蓝紫 / 橙黄 / 白灰（对角线）
     static let gradientPresets: [(RGBColor, RGBColor)] = [
