@@ -374,7 +374,13 @@ final class AppModel: ObservableObject {
     // 这两条是探针唯一没覆盖的用户路径，而它们恰好都会让"整屏尺寸的图层"
     // 进过场（编辑窗口里摆整屏原图、QuickLook 预览整屏截图）。
 
-    func openEditorForDiagnostics(image: CGImage) { openEditor(image: image) }
+    func openEditorForDiagnostics(image: CGImage, shapes: [AnnotationShape] = [],
+                                  select: UUID? = nil, tool: EditorTool = .select) {
+        let controller = EditorWindowController(model: self)
+        editorControllers.append(controller)
+        controller.show(image: image, shapes: shapes,
+                        diagnostics: select.map { ($0, tool) })
+    }
     func closeEditorForDiagnostics() { editorController?.window?.close() }
     func showHistoryForDiagnostics() { showShotHistory() }
     func historyPreviewForDiagnostics(index: Int) -> Bool {

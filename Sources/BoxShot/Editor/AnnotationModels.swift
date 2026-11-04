@@ -190,6 +190,91 @@ struct AnnotationShape: Equatable {
         return copy
     }
 
+    // ── 可拖节点（用户 2026-11-04：「截图和编辑时，标注的箭头、矩形、椭圆、直线，
+    //    有修改的节点可以修改」，配的样张是矩形四角 + 四边中点共 8 个白色方块）──
+    //
+    // 只有这四种给节点：
+    //   · 矩形 / 椭圆 8 个（4 角 + 4 边中点）—— 任一条边都能单独拉；
+    //   · 直线 / 箭头 2 个端点 —— 它们本来就只有两个点，给边中点没有意义。
+    // 其余（画笔 / 马克笔 / 文字 / 高亮 / 马赛克 / 模糊 / 测距 / 步骤 / 取色）不参与：
+    // 高亮和马赛克虽然也是矩形语义，但用户这次点名的只有这四种，先不扩。
+
+    /// 这个形状的节点（**图像像素坐标**），顺序固定 —— 模型层、浮层、编辑窗口
+    /// 三处都按这个下标取，别再各写一套。
+    ///
+    /// 矩形 / 椭圆一律先规范化成"左上 → 右下"，所以从左下往右上拉出来的框，
+    /// 节点位置也对得上（点序本身不规整，但 8 个点永远是这 8 个位置）。
+    var handlePoints: [CGPoint] {
+        guard points.count >= 2 else { return [] }
+        switch tool {
+        case .rect, .ellipse:
+            let r = rect(from: points[0], to: points[points.count - 1])
+            return [
+                CGPoint(x: r.minX, y: r.minY),   // 0 左上
+                CGPoint(x: r.midX, y: r.minY),   // 1 上
+                CGPoint(x: r.maxX, y: r.minY),   // 2 右上
+                CGPoint(x: r.maxX, y: r.midY),   // 3 右
+                CGPoint(x: r.maxX, y: r.maxY),   // 4 右下
+                CGPoint(x: r.midX, y: r.maxY),   // 5 下
+                CGPoint(x: r.minX, y: r.maxY),   // 6 左下
+                CGPoint(x: r.minX, y: r.midY),   // 7 左
+            ]
+        case .line, .arrow:
+            return [points[0], points[points.count - 1]]
+        default:
+            return []
+        }
+    }
+
+    /// 命中哪个节点；`tolerance` 是**图像像素**（调用方按自己的缩放换算成屏幕 9pt 左右）。
+    /// 手柄压在形状边缘上，稍微点偏一点也得能抓住，所以容差比手柄本身大一圈。
+    func handleIndex(near point: CGPoint, tolerance: CGFloat) -> Int? {
+        for (index, handle) in handlePoints.enumerated()
+        where hypot(handle.x - point.x, handle.y - point.y) <= tolerance {
+            return index
+        }
+        return nil
+    }
+
+    /// 把第 `index` 个节点拖到 `point`（图像像素）之后的形状。
+    ///
+    /// 矩形 / 椭圆：**对角保持不动**，只挪被拖的那条边（边中点只改一个轴）。
+    /// 拖过头会翻面 —— 用 min/max 归一，不做事先拦截，跟系统里拖框的手感一致。
+    /// 直线 / 箭头：改对应那个端点。
+    func adjusting(handle index: Int, to point: CGPoint) -> AnnotationShape {
+        var copy = self
+        guard points.count >= 2 else { return copy }
+        switch tool {
+        case .line, .arrow:
+            if index == 0 {
+                copy.points[0] = point
+            } else if index == points.count - 1 {
+                copy.points[points.count - 1] = point
+            }
+        case .rect, .ellipse:
+            let r = rect(from: points[0], to: points[points.count - 1])
+            var minX = r.minX, minY = r.minY, maxX = r.maxX, maxY = r.maxY
+            switch index {
+            case 0: minX = point.x; minY = point.y     // 左上
+            case 1: minY = point.y                     // 上
+            case 2: maxX = point.x; minY = point.y     // 右上
+            case 3: maxX = point.x                     // 右
+            case 4: maxX = point.x; maxY = point.y     // 右下
+            case 5: maxY = point.y                     // 下
+            case 6: minX = point.x; maxY = point.y     // 左下
+            case 7: minX = point.x                     // 左
+            default: return copy
+            }
+            // 点序统一成 [左上, 右下]：拖过对角之后 min/max 会自动交换，
+            // 形状不会消失、也不会变成负宽高（负宽高的 rect 渲染出来是空的）。
+            copy.points = [CGPoint(x: min(minX, maxX), y: min(minY, maxY)),
+                           CGPoint(x: max(minX, maxX), y: max(minY, maxY))]
+        default:
+            break
+        }
+        return copy
+    }
+
     private func distance(_ p: CGPoint, toSegment segment: (CGPoint, CGPoint)) -> CGFloat {
         let (a, b) = segment
         let dx = b.x - a.x, dy = b.y - a.y

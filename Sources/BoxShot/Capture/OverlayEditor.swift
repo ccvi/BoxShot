@@ -1274,6 +1274,9 @@ final class OverlayEditorView: NSView {
     /// 选择工具：正在拖动选中标注
     private var draggingSelection = false
     private var dragLastPoint: CGPoint?
+    /// 正在拖某个标注的节点（矩形 / 椭圆 / 直线 / 箭头）。
+    /// 存**按下时**那份形状：拖动全程都以它为基准算，见 `adjustSelected` 的注释。
+    private var shapeHandleDrag: (index: Int, origin: AnnotationShape)?
     /// 裁剪：拖出的保留范围（图像像素坐标），⏎ 应用 / ⎋ 取消
     private var pendingCrop: CGRect?
     private var cropAnchor: CGPoint?
@@ -1362,6 +1365,9 @@ final class OverlayEditorView: NSView {
         }
         ctx.restoreGState()
 
+        // 选中标注的可拖节点（用户 2026-11-04 口径）
+        drawShapeHandles(ctx)
+
         // 边框 + 手柄
         ctx.setStrokeColor(NSColor.controlAccentColor.cgColor)
         ctx.setLineWidth(2)
@@ -1383,6 +1389,41 @@ final class OverlayEditorView: NSView {
 
         // 尺寸条：贴在当前框的正上方（跟着框走，用户要的"工具条跟着框"）
         drawSizeBar(ctx, above: previewRect ?? imageRect)
+    }
+
+    /// 选中标注的可拖节点（用户 2026-11-04：「标注的箭头、矩形、椭圆、直线，有修改的节点可以修改」）。
+    ///
+    /// 🔴 画在**视图坐标**里（`restoreGState` 之后），不进 `EditorRenderer`：
+    /// 手柄是交互 UI，不能跟着图片缩放变粗变细，更不能出现在导出的成品图里。
+    /// 大小固定 9pt，判命中用 11pt —— 手柄压在形状边缘上，点偏一点也得抓得住。
+    private func drawShapeHandles(_ ctx: CGContext) {
+        guard doc.tool == .select, let selected = doc.selectedShape else { return }
+        let points = selected.handlePoints
+        guard !points.isEmpty else { return }
+        let side: CGFloat = 9
+        ctx.setStrokeColor(selected.color.nsColor.cgColor)
+        ctx.setLineWidth(1.5)
+        for handle in points {
+            let v = viewPoint(fromPixel: handle)
+            let box = CGRect(x: v.x - side / 2, y: v.y - side / 2, width: side, height: side)
+            ctx.setFillColor(NSColor.white.cgColor)
+            ctx.fill(box)
+            ctx.stroke(box)
+        }
+    }
+
+    /// 图像像素 → 视图点（flipped 视图，两个坐标系的 y 同向，只有缩放差）
+    private func viewPoint(fromPixel p: CGPoint) -> CGPoint {
+        CGPoint(x: imageRect.minX + p.x / pixelScale,
+                y: imageRect.minY + p.y / pixelScale)
+    }
+
+    /// 按下点命中了选中标注的哪个节点（`point` 是视图坐标）
+    private func shapeHandleHit(at point: CGPoint, shape: AnnotationShape) -> Int? {
+        let tolerance = 11 / max(pixelScale, 0.01)   // 11pt 换算成图像像素
+        let pixel = CGPoint(x: (point.x - imageRect.minX) * pixelScale,
+                            y: (point.y - imageRect.minY) * pixelScale)
+        return shape.handleIndex(near: pixel, tolerance: tolerance)
     }
 
     /// 八个手柄：白底 + 蓝环，跟系统截图那个观感一致
@@ -1629,7 +1670,17 @@ final class OverlayEditorView: NSView {
         }
 
         if doc.tool == .select {
-            // 双击文字 = 接着改（单击仍然是选中/拖动）
+            // ① 按在选中形状的节点上 → 拖这个节点改形状。
+            //    🔴 必须排在点选前面：手柄就压在形状边缘 / 角上，`select(at:)` 一定
+            //    也会命中那条形状，先走点选就变成"平移整个形状"，节点等于抓不住。
+            if let selected = doc.selectedShape,
+               let index = shapeHandleHit(at: viewPoint, shape: selected) {
+                shapeHandleDrag = (index, selected)
+                doc.beginMoveSelected()   // 复用「记下原始形状、松手压一个撤销点」
+                needsDisplay = true
+                return
+            }
+            // ② 双击文字 = 接着改（单击仍然是选中/拖动）
             if event.clickCount >= 2, let hit = editableTextShape(at: p) {
                 beginTextEditing(at: hit.points.first ?? p, existing: hit)
                 return
@@ -1683,6 +1734,12 @@ final class OverlayEditorView: NSView {
             return
         }
         let p = clampToImage(pixelPoint(event))
+        // 拖节点改形状：全程以按下时那份 origin 为基准，不按当前形状累加
+        if let drag = shapeHandleDrag {
+            doc.adjustSelected(handle: drag.index, to: p, from: drag.origin)
+            needsDisplay = true
+            return
+        }
         if doc.tool == .crop {
             let anchor = cropAnchor ?? p
             pendingCrop = CGRect(x: min(anchor.x, p.x), y: min(anchor.y, p.y),
@@ -1723,6 +1780,12 @@ final class OverlayEditorView: NSView {
             cropAnchor = nil
             // 太小就是误触：清掉，别留个几像素的框
             if let crop = pendingCrop, crop.width < 8 || crop.height < 8 { pendingCrop = nil }
+            needsDisplay = true
+            return
+        }
+        if shapeHandleDrag != nil {
+            shapeHandleDrag = nil
+            doc.endMoveSelected()
             needsDisplay = true
             return
         }

@@ -40,9 +40,16 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
 
     var isVisible: Bool { window?.isVisible ?? false }
 
-    func show(image: CGImage, shapes: [AnnotationShape] = []) {
+    func show(image: CGImage, shapes: [AnnotationShape] = [],
+              diagnostics: (select: UUID, tool: EditorTool)? = nil) {
         guard let window else { return }
         let document = EditorDocument(image: image, shapes: shapes)
+        // 诊断入口（--editorbar-handles）用：指定初始工具和选中的形状。
+        // 正路上没有这个需求（工具和选中都是用户点出来的），所以只在诊断时传。
+        if let diagnostics {
+            document.tool = diagnostics.tool
+            document.selectedID = diagnostics.select
+        }
         doc = document
 
         // 窗口尺寸：图像显示尺寸（适配屏幕可用区域）+ 工具条高度

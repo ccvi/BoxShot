@@ -124,6 +124,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.showDiagnosticEditorWindow()
             }
         }
+        // 诊断入口：--editorbar-handles 打开编辑窗口，里面预置矩形 / 椭圆 / 直线 / 箭头
+        // 四个标注并选中矩形 —— 验「矩形和椭圆 8 个节点、直线和箭头 2 个端点」。
+        // 正路要先点工具条选工具再画，而编辑窗口工具条是 SwiftUI Button：
+        // 合成鼠标点击在非 key 状态下不生效（画布上的拖动却生效），验一次全卡在第一步。
+        let editorHandlesTrigger = "/tmp/boxshot-editorbar-handles.trigger"
+        if CommandLine.arguments.contains("--editorbar-handles")
+            || FileManager.default.fileExists(atPath: editorHandlesTrigger) {
+            try? FileManager.default.removeItem(atPath: editorHandlesTrigger)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                self?.showDiagnosticEditorWindowWithHandles()
+            }
+        }
         // 诊断入口：--esctest 打开区域截图遮罩 → 自己投一个 Esc 进去 → 看遮罩有没有收掉。
         // 「Esc 没生效」这种问题，光读代码看不出是"判断写错"还是"按键根本没进来"。
         let escTrigger = "/tmp/boxshot-esctest.trigger"
@@ -1598,6 +1610,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ctx.fill(CGRect(x: 520, y: 340, width: 300, height: 180))
         guard let image = ctx.makeImage() else { return }
         model.openEditorForDiagnostics(image: image)
+    }
+
+    /// 诊断：带四个可改节点的标注打开编辑窗口（矩形 / 椭圆 / 直线 / 箭头，选中矩形）。
+    /// 用户 2026-11-04 口径「标注的箭头，矩形，椭圆，直线，有修改的节点可以修改」。
+    private func showDiagnosticEditorWindowWithHandles() {
+        let w = 900, h = 600
+        let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                            space: CGColorSpaceCreateDeviceRGB(),
+                            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)!
+        for y in 0..<h {
+            let t = Double(y) / Double(h)
+            ctx.setFillColor(CGColor(srgbRed: 0.9, green: 1 - t * 0.8, blue: 0.2 + t * 0.5, alpha: 1))
+            ctx.fill(CGRect(x: 0, y: y, width: w, height: 1))
+        }
+        guard let image = ctx.makeImage() else { return }
+        // 四个形状分开摆，颜色各不相同，一眼能看出是哪一个的手柄
+        let shapes = [
+            AnnotationShape(tool: .rect,
+                            points: [CGPoint(x: 80, y: 80), CGPoint(x: 300, y: 220)],
+                            color: .red, lineWidth: 4),
+            AnnotationShape(tool: .ellipse,
+                            points: [CGPoint(x: 360, y: 80), CGPoint(x: 580, y: 220)],
+                            color: .blue, lineWidth: 4),
+            AnnotationShape(tool: .line,
+                            points: [CGPoint(x: 80, y: 300), CGPoint(x: 300, y: 420)],
+                            color: .green, lineWidth: 4),
+            AnnotationShape(tool: .arrow,
+                            points: [CGPoint(x: 360, y: 300), CGPoint(x: 580, y: 420)],
+                            color: .orange, lineWidth: 4),
+        ]
+        model.openEditorForDiagnostics(image: image, shapes: shapes, select: shapes[0].id)
     }
 
     private func showDiagnosticOverlay(tall: Bool = false, colors: Bool = false) {

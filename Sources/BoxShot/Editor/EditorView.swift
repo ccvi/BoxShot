@@ -134,6 +134,16 @@ final class EditorDocument: ObservableObject {
         shapes[idx] = shapes[idx].translated(dx: delta.x, dy: delta.y)
     }
 
+    /// 拖动中：把选中形状的第 `index` 个节点拖到 `point`。
+    ///
+    /// 🔴 必须以**按下时**那份 `origin` 为基准算，不能拿"上一帧的结果"当基准：
+    /// 拖过一次对角之后点序会被规范化，再按当前形状算，边中点会跟着跳到另一条边，
+    /// 表现为"拖着上面那条边，下面那条边也跟着动"。
+    func adjustSelected(handle index: Int, to point: CGPoint, from origin: AnnotationShape) {
+        guard let idx = shapes.firstIndex(where: { $0.id == origin.id }) else { return }
+        shapes[idx] = origin.adjusting(handle: index, to: point)
+    }
+
     /// 拖动结束：压一个撤销点（撤销 = 回到拖动前位置）
     func endMoveSelected() {        defer { moveOrigin = nil }
         guard let origin = moveOrigin,
@@ -273,6 +283,9 @@ struct EditorView: View {
     @State private var statusMessage: String = ""
     /// 选择工具拖动中的上一次像素坐标
     @State private var selectDragLast: CGPoint?
+    /// 正在拖标注的节点（矩形 / 椭圆 / 直线 / 箭头）。
+    /// 存**按下时**那份形状：拖动全程以它为基准，见 `EditorDocument.adjustSelected`。
+    @State private var handleDrag: (index: Int, origin: AnnotationShape)?
     /// 颜色圆点的弹出面板（配色 + 粗细）
     @State private var showColorPanel = false
     /// 裁剪：拖出的保留范围（图像像素坐标）
@@ -471,6 +484,25 @@ struct EditorView: View {
                                        style: StrokeStyle(lineWidth: 1.5 / max(fitScale, 0.05),
                                                           dash: [dash, dash * 0.8]))
                     }
+                    // 选中标注的可拖节点（用户 2026-11-04 口径）。
+                    // 尺寸按 fitScale 换算回图像像素 —— 屏幕上永远是 9pt 的方块，
+                    // 不跟着缩放变大变小。只在选择工具下显示：拿别的工具时它拖不动，
+                    // 画出来只会让人以为坏了。
+                    if doc.tool == .select, let selected = doc.selectedShape {
+                        let handles = selected.handlePoints
+                        if !handles.isEmpty {
+                            let side = 9 / max(fitScale, 0.05)
+                            let strokeWidth = 1.5 / max(fitScale, 0.05)
+                            for handle in handles {
+                                let box = CGRect(x: handle.x - side / 2, y: handle.y - side / 2,
+                                                 width: side, height: side)
+                                context.fill(Path(box), with: .color(.white))
+                                context.stroke(Path(box),
+                                               with: .color(Color(nsColor: selected.color.nsColor)),
+                                               lineWidth: strokeWidth)
+                            }
+                        }
+                    }
                     // 裁剪取景：范围外压暗（even-odd 填充做"挖洞"）
                     if let crop = cropRect, crop.width > 1, crop.height > 1 {
                         var mask = Path()
@@ -533,8 +565,22 @@ struct EditorView: View {
                     return
                 }
                 if doc.tool == .select {
+                    // 拖节点改形状优先于平移：手柄压在形状边缘 / 角上，
+                    // 先走 `select(at:)` 就会变成"拖着整个形状跑"，节点抓不住。
+                    if let drag = handleDrag {
+                        doc.adjustSelected(handle: drag.index, to: p, from: drag.origin)
+                        return
+                    }
                     // 拖动选中标注：按下起点命中并锁定，之后按位移平移
                     if selectDragLast == nil {
+                        // 11pt 换算成图像像素当容差（手柄压在边缘上，点偏一点也得抓住）
+                        let tolerance = 11 / max(fitScale, 0.05)
+                        if let selected = doc.selectedShape,
+                           let index = selected.handleIndex(near: p, tolerance: tolerance) {
+                            handleDrag = (index, selected)
+                            doc.beginMoveSelected()
+                            return
+                        }
                         if doc.select(at: p) != nil { doc.beginMoveSelected() }
                         selectDragLast = p
                     } else if doc.selectedID != nil {
@@ -567,6 +613,11 @@ struct EditorView: View {
                     return
                 }
                 if doc.tool == .select {
+                    if handleDrag != nil {
+                        handleDrag = nil
+                        doc.endMoveSelected()
+                        return
+                    }
                     if selectDragLast != nil { doc.endMoveSelected() }
                     selectDragLast = nil
                     return

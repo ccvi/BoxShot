@@ -1114,6 +1114,95 @@ enum SelfTest {
             check("撤销到底回到最早的可见状态（形状数 \(doc.shapes.count) ≥ \(countBefore)）",
                   doc.shapes.count >= countBefore)
 
+            // ── 标注的可拖节点（1.0.29 用户口径）──
+            // 「截图和编辑时，标注的箭头，矩形，椭圆，直线，有修改的节点可以修改」，
+            // 附的样张是矩形四角 + 四边中点共 8 个白色方块。几何全在 AnnotationShape
+            // 的 handlePoints / adjusting 里，能脱离界面验，所以钉在这里。
+            do {
+                // 矩形 (10,20)-(90,70)：宽 80、高 50，中点 x=50 / y=45
+                let box = AnnotationShape(tool: .rect,
+                                          points: [CGPoint(x: 10, y: 20), CGPoint(x: 90, y: 70)],
+                                          color: .red, lineWidth: 3)
+                let handles = box.handlePoints
+                check("矩形给 8 个节点（四角 + 四边中点）", handles.count == 8)
+                check("矩形节点落在该落的位置",
+                      handles[0] == CGPoint(x: 10, y: 20) && handles[1] == CGPoint(x: 50, y: 20)
+                        && handles[2] == CGPoint(x: 90, y: 20) && handles[3] == CGPoint(x: 90, y: 45)
+                        && handles[4] == CGPoint(x: 90, y: 70) && handles[5] == CGPoint(x: 50, y: 70)
+                        && handles[6] == CGPoint(x: 10, y: 70) && handles[7] == CGPoint(x: 10, y: 45))
+
+                var oval = box
+                oval.tool = .ellipse
+                check("椭圆跟矩形共用同一套 8 个节点", oval.handlePoints == handles)
+
+                var straight = box
+                straight.tool = .line
+                check("直线只给 2 个端点",
+                      straight.handlePoints == [CGPoint(x: 10, y: 20), CGPoint(x: 90, y: 70)])
+                var arrowShape = straight
+                arrowShape.tool = .arrow
+                check("箭头同样是 2 个端点", arrowShape.handlePoints == straight.handlePoints)
+
+                var penShape = straight
+                penShape.tool = .pen
+                var highlightShape = box
+                highlightShape.tool = .highlight
+                var textShape = box
+                textShape.tool = .text
+                check("其余工具不给节点（画笔 / 高亮 / 文字）",
+                      penShape.handlePoints.isEmpty
+                        && highlightShape.handlePoints.isEmpty
+                        && textShape.handlePoints.isEmpty)
+
+                // 拖右下角：左上角必须钉住，只有右下跟着鼠标
+                let dragCorner = box.adjusting(handle: 4, to: CGPoint(x: 120, y: 100))
+                check("拖右下角：左上不动、右下跟手",
+                      dragCorner.points[0] == CGPoint(x: 10, y: 20)
+                        && dragCorner.points[1] == CGPoint(x: 120, y: 100))
+
+                // 拖左边中点：只改 x，哪怕鼠标 y 甩出去也不该动上下两条边
+                let dragEdge = box.adjusting(handle: 7, to: CGPoint(x: 30, y: 999))
+                check("拖边中点只改一个轴（y 甩到 999 也不动）",
+                      dragEdge.points[0] == CGPoint(x: 30, y: 20)
+                        && dragEdge.points[1] == CGPoint(x: 90, y: 70))
+
+                // 拖过对角：翻面后必须还是正矩形。负宽高渲染出来是空白的，
+                // 所以 min/max 归一这一步不能省。
+                let flipped = box.adjusting(handle: 4, to: CGPoint(x: 0, y: 0))
+                check("拖过对角翻面也不出负宽高",
+                      flipped.points[0] == CGPoint(x: 0, y: 0)
+                        && flipped.points[1] == CGPoint(x: 10, y: 20))
+
+                // 从左下往右上拖出来的框（点序反的）节点位置必须一致
+                var reversed = box
+                reversed.points = [CGPoint(x: 90, y: 70), CGPoint(x: 10, y: 20)]
+                check("反向拖出来的框，节点位置一致", reversed.handlePoints == handles)
+
+                check("节点判命中：偏 7px 抓住、偏 11px 不抓",
+                      box.handleIndex(near: CGPoint(x: 15, y: 25), tolerance: 8) == 0
+                        && box.handleIndex(near: CGPoint(x: 40, y: 40), tolerance: 8) == nil)
+
+                // 翻面后继续按住同一个下标拖：动的仍然是"当初那个角"。
+                // 这就是两处 UI 都记 origin、不按当前形状累加的理由。
+                let overCorner = box.adjusting(handle: 0, to: CGPoint(x: 150, y: 150))
+                check("拖过对角后，原左上角仍跟手（翻面不换角）",
+                      overCorner.points[0] == CGPoint(x: 90, y: 70)
+                        && overCorner.points[1] == CGPoint(x: 150, y: 150))
+
+                // 拖节点要能撤销：adjustSelected 走 beginMoveSelected / endMoveSelected
+                let nodeBase = solidImage(width: 120, height: 90, color: CGColor(gray: 0.9, alpha: 1))
+                let nodeDoc = EditorDocument(image: nodeBase)
+                nodeDoc.shapes = [box]
+                nodeDoc.selectedID = box.id
+                nodeDoc.beginMoveSelected()
+                nodeDoc.adjustSelected(handle: 4, to: CGPoint(x: 110, y: 80), from: box)
+                nodeDoc.endMoveSelected()
+                check("拖节点后形状变了", nodeDoc.shapes.first?.points[1] == CGPoint(x: 110, y: 80))
+                nodeDoc.undo()
+                check("拖节点可撤销回原形状",
+                      nodeDoc.shapes.first?.points[1] == CGPoint(x: 90, y: 70))
+            }
+
             // ── 文字原地编辑（所见即所得）的撤销语义 ──
             // 用户口径「输入时就直接看到最终效果，输完确认，之后还能点回来改」。
             // 这套动作全压在三条文档方法上，所以这里只测文档语义，不跑 UI：
