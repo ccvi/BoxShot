@@ -375,7 +375,7 @@ final class OverlayEditorController: NSObject {
     /// 以前是 NSVisualEffectView(.hudWindow) 毛玻璃，截图内容（晚霞之类的暖色）
     /// 会从底下透出来，图标看着发脏。改成实心 NSView + layer 底色，
     /// 圆角不变。工具条和颜色面板必须用同一个值，别一处实心一处毛玻璃。
-    static let toolbarBackgroundColor = NSColor(calibratedWhite: 0.13, alpha: 1)
+    static let toolbarBackgroundColor = ToolbarTheme.background
     /// 🔴 工具条容器**强制深色外观**。
     ///
     /// 底色是写死的深灰，但如果容器不切外观，里面的 `NSImage(systemSymbolName:)`
@@ -386,12 +386,12 @@ final class OverlayEditorController: NSObject {
     ///
     /// 切外观比逐个手写前景色更彻底：分隔线（separatorColor）、禁用态、以后
     /// 加进来的控件都跟着对，不会漏一个。
-    static let toolbarAppearance = NSAppearance(named: .darkAqua)
+    static let toolbarAppearance = ToolbarTheme.appearance
     /// 工具条前景色（图标 + 文字）：**纯白，写死**。
     /// 底色是写死的深灰，前景就不能用随外观翻转的颜色。
     /// 也不能只靠切 `.darkAqua`：深色外观下的 `.labelColor` 是带透明度的白，
     /// 图标看起来是浅灰（2026-11-03 用户指着截图说"这些灰色图标改白色"）。
-    static let toolbarForegroundColor = NSColor.white
+    static let toolbarForegroundColor = ToolbarTheme.foreground
     /// 「当前颜色」那颗圆点的直径：**30 的 70% = 21**。
     /// 用户 1.0.11 原话「工具条那个控制颜色的小圆按钮缩小 30%」—— 只缩这颗，
     /// 工具条别的一律不动。它只有 layer 底色、没有图片，内禀尺寸是 0，
@@ -521,7 +521,7 @@ final class OverlayEditorController: NSObject {
         button.wantsLayer = true
         button.layer?.cornerRadius = Self.colorAnchorSide / 2
         button.layer?.borderWidth = 1.5 * Self.toolbarScale
-        button.layer?.borderColor = NSColor.white.withAlphaComponent(0.75).cgColor
+        button.layer?.borderColor = ToolbarTheme.swatchBorder.cgColor
         button.toolTip = "颜色与粗细"
         button.setButtonType(.momentaryChange)
         button.onAction = { [weak self] in self?.toggleColorPanel() }
@@ -765,7 +765,7 @@ final class OverlayEditorController: NSObject {
     private func divider(_ height: CGFloat = OverlayEditorController.colorPanelDividerHeight) -> NSView {
         let view = NSView(frame: NSRect(x: 0, y: 0, width: 1, height: height))
         view.wantsLayer = true
-        view.layer?.backgroundColor = NSColor.separatorColor.cgColor
+        view.layer?.backgroundColor = ToolbarTheme.divider.cgColor
         // 同上：裸 NSView 没有 intrinsicContentSize，在 NSStackView 里会被压成 0 宽
         view.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([

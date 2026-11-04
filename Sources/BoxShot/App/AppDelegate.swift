@@ -101,6 +101,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.runRecordCameraDiagnostics()
             }
         }
+        // 诊断入口：--recordbar 直接出「全屏录制」工具条（**不真开录**）。
+        // 录制工具条只有真录制时才上屏，而真录制会写视频、还要等好几秒，
+        // 想看一眼配色（#E6E6E6 底 / 黑图标）根本没法核对。
+        // 全屏这条路按设计就是"先出工具条，点『记录』才开录"，正好拿来当纯展示入口。
+        let recordBarTrigger = "/tmp/boxshot-recordbar.trigger"
+        if CommandLine.arguments.contains("--recordbar")
+            || FileManager.default.fileExists(atPath: recordBarTrigger) {
+            try? FileManager.default.removeItem(atPath: recordBarTrigger)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                self?.model.perform(.recordFullscreen)
+            }
+        }
         // 诊断入口：--esctest 打开区域截图遮罩 → 自己投一个 Esc 进去 → 看遮罩有没有收掉。
         // 「Esc 没生效」这种问题，光读代码看不出是"判断写错"还是"按键根本没进来"。
         let escTrigger = "/tmp/boxshot-esctest.trigger"

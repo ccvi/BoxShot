@@ -655,10 +655,12 @@ final class RecordHUD: NSPanel {
         isReleasedWhenClosed = false
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
 
-        let container = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: 148, height: 40))
-        container.material = .hudWindow
-        container.state = .active
+        // 录制中的时长条也是"工具条"，跟其他几条统一成 #E6E6E6 实底 + 黑字
+        //（用户 2026-11-04：所有工具条统一底色，见 ToolbarTheme）
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 148, height: 40))
         container.wantsLayer = true
+        container.appearance = ToolbarTheme.appearance
+        container.layer?.backgroundColor = ToolbarTheme.background.cgColor
         container.layer?.cornerRadius = 20
 
         let stopButton = NSButton(title: "", target: self, action: #selector(stopClicked))
@@ -667,7 +669,7 @@ final class RecordHUD: NSPanel {
         stopButton.frame = NSRect(x: 10, y: 8, width: 24, height: 24)
 
         timeLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 14, weight: .semibold)
-        timeLabel.textColor = .white
+        timeLabel.textColor = ToolbarTheme.foreground
         timeLabel.frame = NSRect(x: 42, y: 11, width: 90, height: 18)
 
         container.addSubview(stopButton)

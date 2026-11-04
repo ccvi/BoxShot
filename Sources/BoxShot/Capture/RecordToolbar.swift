@@ -109,7 +109,8 @@ final class RecordToolbarController: NSObject {
         stack.spacing = 10
         stack.edgeInsets = NSEdgeInsets(top: 10, left: 14, bottom: 10, right: 14)
 
-        func add(_ symbol: String, _ title: String, tag: Int, tint: NSColor? = nil) -> NSButton {
+        func add(_ symbol: String, _ title: String, tag: Int,
+                 tint: NSColor? = ToolbarTheme.foreground) -> NSButton {
             let button = NSButton(title: "", target: self, action: #selector(toolbarAction(_:)))
             button.bezelStyle = .regularSquare
             button.isBordered = false
@@ -140,7 +141,7 @@ final class RecordToolbarController: NSObject {
         pauseButton = pause
         let time = NSTextField(labelWithString: "00:00")
         time.font = NSFont.monospacedDigitSystemFont(ofSize: 15, weight: .semibold)
-        time.textColor = .white
+        time.textColor = ToolbarTheme.foreground
         time.isHidden = true
         timeLabel = time
         stack.addArrangedSubview(time)
@@ -160,14 +161,12 @@ final class RecordToolbarController: NSObject {
 
         stack.layoutSubtreeIfNeeded()
         let size = stack.fittingSize
-        let container = NSVisualEffectView(frame: NSRect(origin: .zero, size: size))
-        container.material = .hudWindow
-        container.state = .active
+        // 用户 2026-11-04：所有工具条统一 #E6E6E6 实底 + 黑图标（见 ToolbarTheme）。
+        // 以前这里是 `.hudWindow` 毛玻璃：材质本身带深色，跟另外几条工具条不是一套。
+        let container = NSView(frame: NSRect(origin: .zero, size: size))
         container.wantsLayer = true
-        // `.hudWindow` 的材质是深的，但**子视图的外观要自己切** —— 不切的话
-        // 系统处于浅色外观时，模板图标按 `.labelColor` 解析成黑色，压在深色
-        // 材质上几乎看不见（截图工具条 2026-11-03 就是这么翻车的）。
-        container.appearance = NSAppearance(named: .darkAqua)
+        container.appearance = ToolbarTheme.appearance
+        container.layer?.backgroundColor = ToolbarTheme.background.cgColor
         container.layer?.cornerRadius = 14
         container.addSubview(stack)
         stack.frame = container.bounds
@@ -208,13 +207,13 @@ final class RecordToolbarController: NSObject {
 
     private func refreshAudioButtons() {
         let source = model?.prefs.value.recordAudio ?? .none
-        micButton?.contentTintColor = source == .mic ? .systemBlue : .white
-        systemButton?.contentTintColor = source == .system ? .systemBlue : .white
+        micButton?.contentTintColor = source == .mic ? .systemBlue : ToolbarTheme.foreground
+        systemButton?.contentTintColor = source == .system ? .systemBlue : ToolbarTheme.foreground
     }
 
     private func refreshCameraButton() {
         let on = cameraBubble?.isVisible == true
-        cameraButton?.contentTintColor = on ? .systemBlue : .white
+        cameraButton?.contentTintColor = on ? .systemBlue : ToolbarTheme.foreground
         cameraButton?.toolTip = on ? "关闭摄像头取景框" : "打开摄像头取景框（画面右下角）"
     }
 
@@ -295,7 +294,8 @@ final class RecordToolbarController: NSObject {
                                          accessibilityDescription: "继续录制")?
                 .withSymbolConfiguration(.init(pointSize: 16, weight: .medium))
             pauseButton?.contentTintColor = .systemYellow
-            timeLabel?.textColor = .systemYellow
+            // 暂停态：#E6E6E6 浅底上黄色发飘，换橙色（用户没指定，但黄色等于看不清）
+            timeLabel?.textColor = .systemOrange
         } else {
             if let start = pauseStartedAt {
                 pausedTotal += Date().timeIntervalSince(start)
@@ -304,8 +304,8 @@ final class RecordToolbarController: NSObject {
             pauseButton?.image = NSImage(systemSymbolName: "pause.circle",
                                          accessibilityDescription: "暂停录制")?
                 .withSymbolConfiguration(.init(pointSize: 16, weight: .medium))
-            pauseButton?.contentTintColor = nil
-            timeLabel?.textColor = .white
+            pauseButton?.contentTintColor = ToolbarTheme.foreground
+            timeLabel?.textColor = ToolbarTheme.foreground
         }
         tick()
     }
@@ -379,8 +379,8 @@ final class RecordToolbarController: NSObject {
             pauseButton?.image = NSImage(systemSymbolName: "pause.circle",
                                          accessibilityDescription: "暂停录制")?
                 .withSymbolConfiguration(.init(pointSize: 19, weight: .medium))
-            pauseButton?.contentTintColor = nil
-            timeLabel?.textColor = .white
+            pauseButton?.contentTintColor = ToolbarTheme.foreground
+            timeLabel?.textColor = ToolbarTheme.foreground
             timeLabel?.isHidden = false
             timeLabel?.stringValue = "启动中…"
             timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
@@ -408,8 +408,8 @@ final class RecordToolbarController: NSObject {
         pauseButton?.image = NSImage(systemSymbolName: "pause.circle",
                                      accessibilityDescription: "暂停录制")?
             .withSymbolConfiguration(.init(pointSize: 19, weight: .medium))
-        pauseButton?.contentTintColor = nil
-        timeLabel?.textColor = .white
+        pauseButton?.contentTintColor = ToolbarTheme.foreground
+        timeLabel?.textColor = ToolbarTheme.foreground
         timeLabel?.isHidden = true
     }
 

@@ -143,7 +143,9 @@ final class ScrollCaptureController: NSObject {
         stack.spacing = 10
         stack.edgeInsets = NSEdgeInsets(top: 10, left: 12, bottom: 10, right: 12)
 
-        func add(_ symbol: String, _ title: String, tint: NSColor? = nil, action: Selector? = nil) -> NSButton {
+        func add(_ symbol: String, _ title: String,
+                 tint: NSColor? = ToolbarTheme.foreground,
+                 action: Selector? = nil) -> NSButton {
             let button = NSButton(title: "", target: self,
                                   action: action ?? #selector(toolbarAction(_:)))
             button.bezelStyle = .regularSquare
@@ -167,10 +169,11 @@ final class ScrollCaptureController: NSObject {
 
         stack.layoutSubtreeIfNeeded()
         let size = stack.fittingSize
-        let container = NSVisualEffectView(frame: NSRect(origin: .zero, size: size))
-        container.material = .hudWindow
-        container.state = .active
+        // 用户 2026-11-04：所有工具条统一 #E6E6E6 实底 + 黑图标（见 ToolbarTheme）
+        let container = NSView(frame: NSRect(origin: .zero, size: size))
         container.wantsLayer = true
+        container.appearance = ToolbarTheme.appearance
+        container.layer?.backgroundColor = ToolbarTheme.background.cgColor
         container.layer?.cornerRadius = 12
         container.addSubview(stack)
         stack.frame = container.bounds
@@ -790,7 +793,7 @@ final class ScrollFrameView: NSView {
         // 状态条：画在上方留白带里
         let attributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold),
-            .foregroundColor: NSColor.white,
+            .foregroundColor: ToolbarTheme.foreground,
         ]
         let text = status
         let size = (text as NSString).size(withAttributes: attributes)
