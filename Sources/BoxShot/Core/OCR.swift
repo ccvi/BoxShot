@@ -1,5 +1,6 @@
 import Foundation
 import CoreImage
+import ImageIO
 import Vision
 
 // ============================================================
@@ -41,6 +42,84 @@ enum OCREngine {
     }
 
     private static func recognize(image: CGImage) async throws -> [TextObservation] {
+        // 第一遍：现状（中文优先 + 语言纠正）。中文、中英混排靠这一遍。
+        let primary = try await recognize(image: image,
+                                          languages: ["zh-Hans", "en-US"],
+                                          correction: true)
+        // 🔴 公式 / 代码 / 纯英文界面这类图**没有汉字**，而"中文优先 + 语言纠正"
+        // 会把符号改坏：实测同一张极限公式图，第一遍给出
+        //   `A -0` / `f（n+An） f（z）` / `Az`
+        // 第二遍（只 en-US + 关纠正）给出
+        //   `Ax→0` / `f(x+Ax)-f(x)` / `Ax`
+        // —— 箭头保住了、x 没变成 n/z、括号还是半角。
+        // 所以：第一遍里一个汉字都没有时，再跑一遍并取更完整的那个。
+        // 有汉字就绝不换（中文靠语言纠正断词，换掉只会更差）。
+        guard let ascii = try? await recognize(image: image,
+                                              languages: ["en-US"],
+                                              correction: false),
+              preferASCIIPass(primary: primary, ascii: ascii) else { return primary }
+        return ascii
+    }
+
+    /// 第二遍（en-US + 关语言纠正）要不要采用。
+    ///
+    /// 三个条件缺一不可：第一遍**一个汉字都没有**（有中文就说明这张图是中文内容，
+    /// 关掉语言纠正只会把断词弄坏）、第二遍不为空、第二遍行数没变少
+    /// （少行意味着它把内容认丢了，宁可留第一遍那份"难看的"）。
+    /// 抽成纯函数是为了自检能喂构造的 observation 直接验规则，不用真跑两遍 Vision。
+    static func preferASCIIPass(primary: [TextObservation], ascii: [TextObservation]) -> Bool {
+        guard !primary.contains(where: { hasCJK($0.text) }) else { return false }
+        return !ascii.isEmpty && ascii.count >= primary.count
+    }
+
+    /// 诊断：对一张图跑一遍识别并打印结果（`--ocrfile <图片路径>`）。
+    ///
+    /// 为什么要这个入口：用户反馈"识别得不对"时，隔着界面看不出是**识别错**还是
+    /// **展示错**（行聚类把词拼歪、换行策略不对）。直接对着文件跑，看到的才是
+    /// OCR 真实输出。
+    /// 用信号量把异步调用变成同步：这条入口跑在 `NSApplication.run()` 之前，
+    /// 没有事件循环可以挂 Task 的完成回调。
+    static func printDiagnostics(forImageAt path: String) -> Int32 {
+        guard let data = FileManager.default.contents(atPath: path),
+              let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            print("读不到图：\(path)")
+            return 1
+        }
+        print("图 \(image.width)×\(image.height)：\(path)")
+        let semaphore = DispatchSemaphore(value: 0)
+        Task {
+            do {
+                let observations = try await recognizeObservations(in: image)
+                print("识别到 \(observations.count) 段：")
+                for line in groupIntoLines(observations, overlapThreshold: 0.5) {
+                    print("  \(line)")
+                }
+                if let markdown = tableMarkdown(from: observations) {
+                    print("── 表格 Markdown ──")
+                    print(markdown)
+                }
+            } catch {
+                print("识别失败：\(error.localizedDescription)")
+            }
+            semaphore.signal()
+        }
+        semaphore.wait()
+        return 0
+    }
+
+    /// 串里有没有汉字。只认 CJK 统一表意文字（基本区 / 扩展 A / 兼容区），
+    /// 全角标点、假名、谚文都不算 —— 这里要回答的是"这张图是不是中文内容"。
+    static func hasCJK(_ text: String) -> Bool {
+        text.unicodeScalars.contains { scalar in
+            (0x4E00...0x9FFF).contains(scalar.value)
+                || (0x3400...0x4DBF).contains(scalar.value)
+                || (0xF900...0xFAFF).contains(scalar.value)
+        }
+    }
+
+    private static func recognize(image: CGImage, languages: [String],
+                                  correction: Bool) async throws -> [TextObservation] {
         try await withCheckedThrowingContinuation { continuation in
             let once = OnceContinuation(continuation)
             let request = VNRecognizeTextRequest { request, error in
@@ -62,8 +141,8 @@ enum OCREngine {
                 once.resume(returning: observations)
             }
             request.recognitionLevel = .accurate
-            request.recognitionLanguages = ["zh-Hans", "en-US"]
-            request.usesLanguageCorrection = true
+            request.recognitionLanguages = languages
+            request.usesLanguageCorrection = correction
 
             let handler = VNImageRequestHandler(cgImage: image, options: [:])
             DispatchQueue.global(qos: .userInitiated).async {

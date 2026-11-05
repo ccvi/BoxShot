@@ -799,6 +799,32 @@ enum SelfTest {
                   lineBoxes[1].bounds.height >= 0.04)
         }
 
+        // ── OCR 两遍策略（1.0.33）：没有汉字的图（公式 / 代码 / 英文界面）
+        //    再跑一遍 en-US + 关语言纠正，避免"中文优先"把符号改坏 ──
+        // 用户拿一张极限公式图问"怎么识别不了"，实测第一遍给出的是
+        // `A -0` / `f（n+An） f（z）` / `Az`，第二遍给出
+        // `Ax→0` / `f(x+Ax)-f(x)` / `Ax` —— 箭头和半角括号都回来了。
+        do {
+            func obs(_ text: String) -> OCREngine.TextObservation {
+                OCREngine.TextObservation(text: text, bounds: .zero)
+            }
+            check("汉字判定：中文为真", OCREngine.hasCJK("识别这段中文"))
+            check("汉字判定：英文 / 公式为假", !OCREngine.hasCJK("lim f(x+Ax)"))
+            check("全角标点不算汉字", !OCREngine.hasCJK("（ ） －"))
+
+            let primaryFormula = [obs("lim"), obs("A -0"), obs("f（n+An） f（z）"), obs("Az")]
+            let asciiFormula = [obs("lim"), obs("Ax→0"), obs("f(x+Ax)-f(x)"), obs("Ax")]
+            check("公式图（无汉字）采用第二遍",
+                  OCREngine.preferASCIIPass(primary: primaryFormula, ascii: asciiFormula))
+            check("有汉字时不换（中文断词靠语言纠正）",
+                  !OCREngine.preferASCIIPass(primary: [obs("识别结果"), obs("第二行")],
+                                             ascii: [obs("A"), obs("B")]))
+            check("第二遍少行时不换（宁可留难看的）",
+                  !OCREngine.preferASCIIPass(primary: primaryFormula, ascii: [obs("lim")]))
+            check("第二遍为空时不换",
+                  !OCREngine.preferASCIIPass(primary: primaryFormula, ascii: []))
+        }
+
         // ── 取景框两套尺寸 + 两种落位（1.0.20 再改版）──
         do {
             // 区域 / 全屏录制：200/150/100（贴右下角）

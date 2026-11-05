@@ -17,6 +17,13 @@ if CommandLine.arguments.contains("--version") {
     exit(0)
 }
 
+// 诊断：直接对一张图跑 OCR 并打印真实输出（不弹任何窗口、不进事件循环）。
+// 用户说"识别得不对"时，先看这条，别隔着界面猜。
+if let index = CommandLine.arguments.firstIndex(of: "--ocrfile"),
+   index + 1 < CommandLine.arguments.count {
+    exit(OCREngine.printDiagnostics(forImageAt: CommandLine.arguments[index + 1]))
+}
+
 let application = NSApplication.shared
 let delegate = MainActor.assumeIsolated { AppDelegate() }
 application.delegate = delegate
