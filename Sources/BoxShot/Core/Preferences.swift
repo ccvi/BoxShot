@@ -189,6 +189,11 @@ struct Preferences: Codable, Equatable {
     var feedbackSound: String = SoundFeedback.defaultName
     var showCrosshair: Bool = true      // 选区时显示放大取色十字线
 
+    // ── 内存 ──
+    /// 内存自愈重启（规则见 `MemoryGuard`）：占用到线 + 空闲够久 → 重开一次自己。
+    /// 默认**开**：这是用户 2026-11-05 点名要的常驻能力，设置里给的是关掉它的开关。
+    var autoRestartOnMemory: Bool = true
+
     // ── 截图 ──
     var shotFormat: ShotFormat = .png
     var jpgQuality: Double = 0.9
@@ -291,6 +296,7 @@ struct Preferences: Codable, Equatable {
         let storedSound = try c.decodeIfPresent(String.self, forKey: .feedbackSound) ?? f.feedbackSound
         feedbackSound = SoundFeedback.availableNames.contains(storedSound) ? storedSound : f.feedbackSound
         showCrosshair = try c.decodeIfPresent(Bool.self, forKey: .showCrosshair) ?? f.showCrosshair
+        autoRestartOnMemory = try c.decodeIfPresent(Bool.self, forKey: .autoRestartOnMemory) ?? f.autoRestartOnMemory
         shotFormat = try c.decodeIfPresent(ShotFormat.self, forKey: .shotFormat) ?? f.shotFormat
         jpgQuality = try c.decodeIfPresent(Double.self, forKey: .jpgQuality) ?? f.jpgQuality
         openEditorAfterShot = try c.decodeIfPresent(Bool.self, forKey: .openEditorAfterShot) ?? f.openEditorAfterShot
@@ -335,6 +341,7 @@ struct Preferences: Codable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case launchAtLogin, hideDockIcon, playSound, feedbackSound, showCrosshair
+        case autoRestartOnMemory
         case shotFormat, jpgQuality, openEditorAfterShot, windowHighlight, saveDirectory, autoSave, downscaleRetina
         case closeAfterAction
         case maxShotHistory

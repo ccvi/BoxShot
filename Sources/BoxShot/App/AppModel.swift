@@ -36,6 +36,11 @@ final class AppModel: ObservableObject {
     private var resultWindow: ResultWindowController?
     private var historyWindow: HistoryWindowController?
 
+    /// 内存自愈重启（规则全在 `MemoryGuard`，这里只负责接线）
+    let memoryGuard = MemoryGuardRunner()
+    /// 熔断后设置页要说明"本次运行已停用"
+    @Published private(set) var memoryGuardDisabled = false
+
     /// 录制中状态（状态栏菜单显示"停止录制"）
     @Published private(set) var isRecording = false
 
@@ -54,14 +59,106 @@ final class AppModel: ObservableObject {
         pinManager.onRequestEdit = { [weak self] pin in
             self?.editPin(pin)
         }
+        wireMemoryGuard()
     }
 
     func bootstrap() {
         pinManager.restoreHistory(limit: prefs.value.maxPinHistory)
+        memoryGuard.start()
     }
 
     func shutdown() {
+        memoryGuard.stop()
         recordToolbar?.close(stopRecording: true)
+    }
+
+    // ── 内存自愈重启 ────────────────────────────────────────
+
+    private func wireMemoryGuard() {
+        memoryGuard.isEnabled = { [weak self] in self?.prefs.value.autoRestartOnMemory ?? false }
+        memoryGuard.isBusy = { [weak self] in self?.isBusyForMemoryRestart ?? true }
+        memoryGuard.footprint = { AppModel.currentFootprint() }
+        memoryGuard.onStateChange = { [weak self] state in
+            guard let self, self.memoryGuardDisabled != state.disabled else { return }
+            self.memoryGuardDisabled = state.disabled
+        }
+        memoryGuard.onRelaunch = { [weak self] _ in self?.relaunchForMemoryRestart() }
+        memoryGuardDisabled = memoryGuard.isDisabled
+    }
+
+    /// "忙"的定义：有任何一件用户正在进行的事，就不能重启。
+    ///
+    /// 贴图**不算**（它本来就是常驻的，重启后会按历史恢复原位），
+    /// 设置窗口也不算。其余全都算：拉选区、标注浮层、编辑窗口、测距、滚动截图、
+    /// 录制工具条 / 录制中，以及**正弹着的模态框**（`presentError` 的 NSAlert 正在
+    /// `runModal`，这时候 terminate 会把那个错误框连同上下文一起吞掉）。
+    var isBusyForMemoryRestart: Bool {
+        isRecording
+            || NSApp.modalWindow != nil
+            || regionSelector != nil
+            || !overlayEditors.isEmpty
+            || !editorControllers.isEmpty
+            || measureOverlay != nil
+            || scrollController != nil
+            || recordToolbar != nil
+    }
+
+    /// 真·重开一次自己。
+    ///
+    /// 🔴 **绝不去 exec `.app/Contents/MacOS/BoxShot`**：绕过 LaunchServices 启动，
+    /// 这个 bundle id 的菜单栏登记会**永久**失效（1.0.28 那次踩过）。
+    /// 一律走 `/usr/bin/open`。
+    private func relaunchForMemoryRestart() {
+        // 把能落盘的先落盘：贴图索引重启后要按原位复活（落盘散在 onStateChanged 里，
+        // 万一哪处漏接就会回到旧位置 —— 刷一遍几乎不花时间）
+        pinManager.flushHistory()
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", Self.relaunchCommand()]
+        do {
+            try process.run()
+        } catch {
+            NSLog("[BoxShot][memguard] 拉起新进程失败：%@", error.localizedDescription)
+            return
+        }
+        NSApp.terminate(nil)
+    }
+
+    /// 延迟 1 秒再 open：给这个进程留时间走完 terminate（不然可能被判成"已经在跑"）。
+    static func relaunchCommand(bundlePath: String = Bundle.main.bundlePath,
+                                bundleID: String = Bundle.main.bundleIdentifier ?? "") -> String {
+        if bundlePath.hasSuffix(".app") {
+            return "sleep 1; /usr/bin/open \"\(bundlePath)\""
+        }
+        // 裸二进制（诊断 / 自检跑的 .build 产物）没有 bundle，只能按 id 找回安装好的那份
+        return bundleID.isEmpty
+            ? "sleep 1; /usr/bin/open -a BoxShot"
+            : "sleep 1; /usr/bin/open -b \(bundleID)"
+    }
+
+    /// 诊断用：内存回收现在的判断依据（--memguard 打印它）
+    func memoryGuardReport() -> String {
+        let used = Self.currentFootprint()
+        let state = memoryGuard.state
+        let now = Date().timeIntervalSince1970
+        return """
+        footprint: \(ByteCountFormatter.string(fromByteCount: used, countStyle: .memory))
+        阈值: \(ByteCountFormatter.string(fromByteCount: MemoryGuard.thresholdBytes, countStyle: .memory))
+        开关: \(prefs.value.autoRestartOnMemory ? "开" : "关")
+        忙: \(isBusyForMemoryRestart ? "是" : "否")
+        24 小时内重启: \(state.restartCount(now: now)) / \(MemoryGuard.maxRestarts)
+        lastRestart: \(state.lastRestart.map { "\(Int(now - $0)) 秒前" } ?? "无")
+        熔断: \(state.disabled ? "是" : "否")
+        重开命令: \(Self.relaunchCommand())
+        """
+    }
+
+    /// 诊断用：不管阈值，直接走一次"重开自己"（--memguard-restart）。
+    /// 这条是唯一能端到端验"真的会重启、重启后计数还在"的路 —— 光靠读代码看不出
+    /// `/usr/bin/open` 到底起没起来、`NSApp.terminate` 会不会卡在录制收尾上。
+    func forceMemoryRestartForDiagnostics() {
+        NSLog("[BoxShot][memguard] 诊断强制重启")
+        memoryGuard.forceRestart()
     }
 
     // ── 动作路由 ─────────────────────────────────────────────
@@ -129,6 +226,10 @@ final class AppModel: ObservableObject {
         // 取景框边距：录着的时候在设置里拧，取景框要当场跟着挪
         if old.recordCameraInset != new.recordCameraInset {
             recordToolbar?.applyCameraInset(new.recordCameraInsetPoints)
+        }
+        // 内存回收开关：开了才持"防 App Nap"的活动票据，关了要立刻放掉
+        if old.autoRestartOnMemory != new.autoRestartOnMemory {
+            memoryGuard.refreshActivity()
         }
     }
 

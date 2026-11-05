@@ -243,6 +243,13 @@ final class PinManager {
         }
     }
 
+    /// 内存自愈重启前叫一声：把索引立刻再写一遍。
+    /// 落盘散在 `onStateChanged` / `onClose` 里（每处都写一遍，没有节流），
+    /// 但只要有一处漏接，重启后那张贴图就会回到旧位置 —— 刷一下的成本可以忽略。
+    func flushHistory() {
+        persistIndex()
+    }
+
     private func persistIndex() {
         let fm = FileManager.default
         try? fm.createDirectory(at: Self.pinsDirectory, withIntermediateDirectories: true)

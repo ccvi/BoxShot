@@ -76,6 +76,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 NSLog("[BoxShot][memreport]\n%@", self.model.memReport())
             }
         }
+        // 诊断入口：--memguard 打印内存回收的判断依据（footprint / 开关 / 忙闲 / 次数 /
+        // 熔断 / 真会用哪条命令拉新进程）。--memguard-restart 则**真**重开一次自己。
+        let memGuardTrigger = "/tmp/boxshot-memguard.trigger"
+        let memGuardRestart = CommandLine.arguments.contains("--memguard-restart")
+            || FileManager.default.fileExists(atPath: "/tmp/boxshot-memguard-restart.trigger")
+        if CommandLine.arguments.contains("--memguard") || memGuardRestart
+            || FileManager.default.fileExists(atPath: memGuardTrigger) {
+            try? FileManager.default.removeItem(atPath: memGuardTrigger)
+            try? FileManager.default.removeItem(atPath: "/tmp/boxshot-memguard-restart.trigger")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                guard let self else { return }
+                let report = self.model.memoryGuardReport()
+                NSLog("[BoxShot][memguard]\n%@", report)
+                try? report.write(to: URL(fileURLWithPath: "/tmp/boxshot-memguard.log"),
+                                  atomically: true, encoding: .utf8)
+                if memGuardRestart {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                        self.model.forceMemoryRestartForDiagnostics()
+                    }
+                }
+            }
+        }
         // 诊断入口：--scrolltest 直接开一次滚动截图（固定选区，不需要人拖），
         // 用来核对常驻缩略图面板的位置 / 尺寸 / 实时刷新。
         let scrollTrigger = "/tmp/boxshot-scrolltest.trigger"

@@ -909,6 +909,122 @@ enum SelfTest {
                   OverlayEditorController.shouldCloseAfterAction(enabled: true)
                       && !OverlayEditorController.shouldCloseAfterAction(enabled: false))
 
+            // ── 内存回收（用户 2026-11-05 口径）─────────────────────────
+            // 「300MB + 空闲 60 秒就自动触发；30 分钟内最多一次；
+            //   24 小时连续 3 次重启后仍超阈值 → 停用。关闭应用再重新打开就重置。」
+            // 规则全在 `MemoryGuard` 的纯函数里，时间线靠 `now` 注入推 —— 不真等 30 分钟、
+            // 也不真重启进程。真重启那条路由诊断 `--memguard-restart` 端到端验。
+            do {
+                let t0: TimeInterval = 1_000_000
+                check("阈值是 300MB", MemoryGuard.thresholdBytes == 300 * 1024 * 1024)
+                check("空闲 60 秒 / 冷却 30 分钟 / 24 小时 3 次 / 窗口 24 小时",
+                      MemoryGuard.idleSeconds == 60
+                        && MemoryGuard.cooldownSeconds == 30 * 60
+                        && MemoryGuard.maxRestarts == 3
+                        && MemoryGuard.windowSeconds == 24 * 60 * 60)
+                check("设置里默认是开的（用户点名要的常驻能力）",
+                      Preferences().autoRestartOnMemory == true)
+                check("开关读得回来",
+                      (try? JSONDecoder().decode(Preferences.self,
+                                                 from: Data(#"{"autoRestartOnMemory":false}"#.bytes)))?
+                        .autoRestartOnMemory == false)
+                check("老配置缺字段按默认（开）",
+                      (try? JSONDecoder().decode(Preferences.self, from: Data("{}".bytes)))?
+                        .autoRestartOnMemory == true)
+                check("设置文案写明 300MB 与空闲 60 秒",
+                      MemoryGuard.settingTitle.contains("300MB")
+                        && MemoryGuard.settingNote.contains("60 秒")
+                        && MemoryGuard.settingNote.contains("3 次"))
+
+                let over = MemoryGuard.thresholdBytes
+                let under = MemoryGuard.thresholdBytes - 1
+                func decide(_ footprint: Int64, since: TimeInterval?, at now: TimeInterval,
+                            state: MemoryGuard.State = .init(), enabled: Bool = true,
+                            busy: Bool = false) -> MemoryGuard.Decision {
+                    MemoryGuard.decide(enabled: enabled, busy: busy, footprint: footprint,
+                                       candidateSince: since, now: now, state: state)
+                }
+                check("差 1 字节不算到线", decide(under, since: t0, at: t0 + 600) == .idle)
+                check("刚好 300MB 就算到线", decide(over, since: t0, at: t0 + 60) == .restart)
+                check("到线但只空闲 59 秒 → 继续等", decide(over, since: t0, at: t0 + 59) == .idle)
+                check("到线且空闲满 60 秒 → 重启", decide(over, since: t0, at: t0 + 60) == .restart)
+                check("没有连续起算点（刚从忙/低内存出来）不重启",
+                      decide(over, since: nil, at: t0) == .idle)
+                check("忙着（拉选区 / 编辑 / 录屏）就不动",
+                      decide(over, since: t0, at: t0 + 600, busy: true) == .idle)
+                check("开关关了就不管",
+                      decide(over, since: t0, at: t0 + 600, enabled: false) == .idle)
+
+                // 冷却：30 分钟内最多一次
+                let now = t0 + 600
+                check("刚重启过 29 分钟 → 还在冷却",
+                      decide(over, since: t0, at: now,
+                             state: .init(restarts: [now - 1740], lastRestart: now - 1740)) == .idle)
+                check("满 30 分钟才允许再来一次",
+                      decide(over, since: t0, at: now,
+                             state: .init(restarts: [now - 1800], lastRestart: now - 1800)) == .restart)
+
+                // 熔断：24 小时内 3 次之后仍到线 → 停用
+                let three = MemoryGuard.State(restarts: [now - 5000, now - 3000, now - 2000],
+                                              lastRestart: now - 2000)
+                check("24 小时内已 3 次仍到线 → 停用", decide(over, since: t0, at: now,
+                                                       state: three) == .disabled)
+                // 熔断落成 `disabled = true` 之后，多久都不会再动（否则就成了无限重启）
+                var fused = three
+                fused.disabled = true
+                check("熔断落盘后即使冷却到了也不再重启",
+                      decide(over, since: t0, at: now + 100000, state: fused) == .disabled)
+                // 24 小时以外的老记录不算数（滚动窗口）
+                let stale = MemoryGuard.State(restarts: [now - 90_000, now - 8000],
+                                              lastRestart: now - 8000)
+                check("24 小时外的重启记录不算数", decide(over, since: t0, at: now,
+                                                state: stale) == .restart)
+
+                // 执行一次之后的状态
+                let after = MemoryGuard.stateAfterRestart(.init(), now: t0)
+                check("重启后记一笔、冷却从这一刻起算、并打上自重启标记",
+                      after.restarts == [t0] && after.lastRestart == t0 && after.pendingRelaunch)
+                // 起算点都取"60 秒前"，这样空闲那一条不会是拦下来的原因 ——
+                // 只留下冷却在起作用，验的才是冷却。（两次都写成同一个 now 会变成
+                // "空闲不够"造成的 idle，断言照样过，但什么都没验到。）
+                check("重启后 29 分 59 秒内不会再重启",
+                      decide(over, since: t0 + 1739, at: t0 + 1799, state: after) == .idle)
+                check("重启满 30 分钟才允许第二次",
+                      decide(over, since: t0 + 1740, at: t0 + 1800, state: after) == .restart)
+
+                // 落盘 / 读取：计数要活过"自己重开"，但要死于"手动退出后再开"
+                let tmp = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("boxshot-memguard-selftest.json")
+                MemoryGuard.save(.init(restarts: [t0, t0 + 10], lastRestart: t0 + 10,
+                                       pendingRelaunch: true), at: tmp)
+                let inherited = MemoryGuard.load(at: tmp, now: t0 + 20)
+                check("自重启后计数被继承（2 次）",
+                      inherited.restartCount(now: t0 + 20) == 2)
+                check("继承的同时把自重启标记清掉（否则下次手动退出还会带回来）",
+                      inherited.pendingRelaunch == false && inherited.lastRestart == t0 + 10)
+                MemoryGuard.save(.init(restarts: [t0, t0 + 10, t0 + 20], lastRestart: t0 + 20,
+                                       disabled: true, pendingRelaunch: false), at: tmp)
+                check("手动退出再打开 = 规则全部重置（次数、熔断都清零）",
+                      MemoryGuard.load(at: tmp, now: t0 + 30) == MemoryGuard.State())
+                try? FileManager.default.removeItem(at: tmp)
+                check("没有状态文件时是干净的一份",
+                      MemoryGuard.load(at: tmp, now: t0) == MemoryGuard.State())
+
+                // 重开命令：绝不能 exec .app 里的二进制（那样菜单栏登记会永久失效）
+                check("重开命令走 open、且带延迟",
+                      AppModel.relaunchCommand(bundlePath: "/Applications/BoxShot.app",
+                                               bundleID: "com.pcxx.boxshot")
+                        == "sleep 1; /usr/bin/open \"/Applications/BoxShot.app\"")
+                check("裸二进制（诊断 / 自检）按 bundle id 找回安装好的那份",
+                      AppModel.relaunchCommand(bundlePath: "/tmp/.build/release/BoxShot",
+                                               bundleID: "com.pcxx.boxshot")
+                        == "sleep 1; /usr/bin/open -b com.pcxx.boxshot")
+                check("重开命令里不出现 Contents/MacOS",
+                      !AppModel.relaunchCommand(bundlePath: "/Applications/BoxShot.app",
+                                                bundleID: "com.pcxx.boxshot")
+                        .contains("Contents/MacOS"))
+            }
+
             // 固定录制框：16:9、居中、不出界、放得下 680 的取景框
             if let screen = NSScreen.main {
                 let visible = screen.visibleFrame

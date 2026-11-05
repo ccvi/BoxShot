@@ -111,8 +111,57 @@ private struct GeneralPane: View {
                 Text("").frame(width: 90)
                 Toggle("选区时显示取色十字线", isOn: prefs.binding(\.showCrosshair))
             }
+
+            Divider().padding(.top, 4)
+
+            // ── 内存回收（用户 2026-11-05 样张口径：分区标题 + 卡片一行开关）──
+            Text("内存回收")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.secondary)
+            memoryCard
         }
         .font(.body)
+    }
+
+    /// 样张就是「标题 + 一行说明 + 右边开关」的卡片。
+    /// 说明必须 `.fixedSize(horizontal: false, vertical: true)` 才折行 ——
+    /// 不然在 640pt 宽、左边还缩进 90pt 的容器里，它会被压成一行然后省略号。
+    private var memoryCard: some View {
+        HStack(alignment: .center, spacing: 14) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Text(MemoryGuard.settingTitle)
+                        .font(.system(size: 13, weight: .medium))
+                    if model.memoryGuardDisabled {
+                        Text("本次运行已停用")
+                            .font(.system(size: 10, weight: .semibold))
+                            .padding(.horizontal, 5).padding(.vertical, 1)
+                            .background(Capsule().fill(Color.secondary.opacity(0.15)))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Text(MemoryGuard.settingNote)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 12)
+            Toggle("", isOn: prefs.binding(\.autoRestartOnMemory))
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.small)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color(nsColor: .textBackgroundColor))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1)
+        )
     }
 }
 
