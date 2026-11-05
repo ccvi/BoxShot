@@ -20,6 +20,12 @@ final class PinManager {
     private var pins: [PinWindow] = []
     private var allHidden = false
 
+    /// 贴图请求进编辑器时转给上层（AppModel 装）。贴图本身不知道编辑器在哪。
+    var onRequestEdit: ((PinWindow) -> Void)?
+
+    /// 自检用：拿当前贴图列表（新建 / 从历史恢复两条路的接线都得能验到）
+    var pinsForDiagnostics: [PinWindow] { pins }
+
     // ── 贴图入口 ──
 
     @discardableResult
@@ -108,6 +114,14 @@ final class PinManager {
         pin.place(at: offset)
         pin.showPin()
         pins.append(pin)
+        wire(pin)
+        persistIndex()
+    }
+
+    /// 把回调接上。新建和「从历史恢复」两条路都必须走这里 ——
+    /// 以前恢复那条只接了 onClose，于是恢复出来的贴图右键「编辑贴图」会静默不响应
+    /// （`onRequestEdit` 是 nil，`requestEdit()` 什么也不做）。
+    private func wire(_ pin: PinWindow) {
         pin.onClose = { [weak self, weak pin] in
             self?.pins.removeAll { $0 === pin }
             self?.persistIndex()
@@ -115,7 +129,9 @@ final class PinManager {
         pin.onStateChanged = { [weak self] in
             self?.persistIndex()
         }
-        persistIndex()
+        pin.onRequestEdit = { [weak self] pin in
+            self?.onRequestEdit?(pin)
+        }
     }
 
     // ── 剪贴板读取 ──
@@ -218,15 +234,12 @@ final class PinManager {
             let url = Self.pinsDirectory.appendingPathComponent(record.file)
             guard let image = NSImage(contentsOf: url)?.cgImage(forProposedRect: nil, context: nil, hints: nil),
                   let pin = PinWindow(image: image, opacity: 1.0, shadow: true, text: record.text) else { continue }
-            pin.onClose = { [weak self, weak pin] in
-                self?.pins.removeAll { $0 === pin }
-                self?.persistIndex()
-            }
             // 旧记录（无 v）按 1:1 恢复：它们的 scale 是 0.5 起算的旧口径，
             // 套用会小一半。绝大多数用户从没缩放过，1:1 就是他们看到的样子。
             let scale = record.v == nil ? 1.0 : record.scale
             pin.restore(frameOrigin: CGPoint(x: record.x, y: record.y), scale: scale)
             pins.append(pin)
+            wire(pin)
         }
     }
 
@@ -252,8 +265,10 @@ final class PinWindow: NSPanel {
 
     var onClose: (() -> Void)?
     var onStateChanged: (() -> Void)?
+    /// 右键「编辑贴图」→ 交给 AppModel 开编辑器（贴图自己不知道编辑器在哪）
+    var onRequestEdit: ((PinWindow) -> Void)?
 
-    private let image: CGImage
+    private var image: CGImage
     /// 内容视图要拿原图（复制图片 / 计算尺寸），开个只读口子
     var pinnedImage: CGImage { image }
     /// 文本贴图的原文。非 nil 时内容视图换成可选中的 NSTextView（用户要求"贴图上的文字可以选择"）
@@ -338,6 +353,31 @@ final class PinWindow: NSPanel {
     func hidePin() { super.orderOut(nil) }
 
     // ── 内容操作（内容视图转发过来） ──
+
+    // ── 编辑贴图（右键菜单 → 编辑器 → 关窗写回） ──
+
+    /// 右键「编辑贴图」：把请求交给上层（PinManager → AppModel → 编辑窗口）
+    func requestEdit() { onRequestEdit?(self) }
+
+    /// 编辑器关窗时把新图写回来。
+    ///
+    /// 换的是内容视图而不是往原视图里塞图：`PinContentView` 的尺寸是 init 里按图算的，
+    /// 图一变窗口也得跟着变（`applyScale` 会保持左上角不动，符合贴图习惯）。
+    /// 🔴 只支持图片贴图：文本贴图靠 `text != nil` 走可选中的 NSTextView，
+    /// 换成位图就等于把"贴图上的文字可以选择"这条用户明确要的能力弄丢了。
+    func replaceImage(_ newImage: CGImage) {
+        guard text == nil, newImage.width > 0, newImage.height > 0 else { return }
+        image = newImage
+        // 归档 PNG 是按旧图写的，换图必须作废 —— 否则重启恢复出来的是编辑前的画面
+        if let old = archivedFile {
+            try? FileManager.default.removeItem(at: PinManager.pinsDirectory
+                .appendingPathComponent(old))
+            archivedFile = nil
+        }
+        contentView = PinContentView(image: newImage, window: self)
+        applyScale()
+        onStateChanged?()
+    }
 
     func zoom(by factor: CGFloat) {
         let newScale = min(8.0, max(0.1, scale * factor))
@@ -569,8 +609,19 @@ class PinSurfaceView: NSView {
     }
 
     // 右键菜单：置顶 / 翻转 / 复制 / 关闭
-    override func menu(for event: NSEvent) -> NSMenu? {
+    override func menu(for event: NSEvent) -> NSMenu? { buildContextMenu() }
+
+    /// 右键菜单内容。抽出来是为了自检能直接验「图片贴图第一项是编辑贴图、
+    /// 文本贴图没有这一项」—— `menu(for:)` 需要一个真鼠标事件，测试里造不出来。
+    func buildContextMenu() -> NSMenu {
         let menu = NSMenu()
+        // 编辑贴图（1.0.33）：进编辑器加标注，关窗时把结果写回这张贴图。
+        // 文本贴图的画面是"文字渲染成的位图"，编辑它意义不大且会把可选中文字换掉，
+        // 所以只给图片贴图这一项。
+        if window_.text == nil {
+            menu.addItem(withTitle: "编辑贴图", action: #selector(editPin), keyEquivalent: "").target = self
+            menu.addItem(.separator())
+        }
         menu.addItem(withTitle: window_.isOnTop ? "取消置顶" : "置顶显示",
                      action: #selector(menuToggleOnTop), keyEquivalent: "").target = self
         menu.addItem(.separator())
@@ -586,6 +637,7 @@ class PinSurfaceView: NSView {
     }
 
     @objc private func menuToggleOnTop() { window_.toggleOnTop() }
+    @objc private func editPin() { window_.requestEdit() }
     @objc private func flipH() { window_.toggleMirrorH() }
     @objc private func flipV() { window_.toggleMirrorV() }
     @objc private func copyImage() { Support.copyImageToClipboard(window_.pinnedImage) }

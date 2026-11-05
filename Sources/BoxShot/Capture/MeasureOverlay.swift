@@ -11,6 +11,10 @@ import AppKit
 final class MeasureOverlay: NSObject {
 
     var onFinish: ((CGFloat, String) -> Void)?
+    /// 遮罩收掉时回调（量完 / Esc / 右键取消都算）。
+    /// 🔴 AppModel 靠它把 `measureOverlay` 置空，否则第二次点「屏幕测量」会被
+    /// `guard measureOverlay == nil` 挡掉 —— 表现为"每次启动只能量一次"。
+    var onClose: (() -> Void)?
     /// 是否显示操作提示（设置 measureShowTips；距离读数始终显示）
     var showTips = true
 
@@ -52,6 +56,8 @@ final class MeasureOverlay: NSObject {
         if let distance {
             onFinish?(distance, hex ?? "")
         }
+        // 无条件通知（取消也要）—— 收口只有一个出口，AppModel 在这里清引用
+        onClose?()
     }
 
     final class MeasureView: NSView {

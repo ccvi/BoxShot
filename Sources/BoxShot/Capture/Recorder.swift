@@ -134,7 +134,7 @@ final class RecorderController: NSObject {
     func startRecording(displayID: CGDirectDisplayID, region: CGRect?, audio: RecordAudioSource,
                         camera: Bool, fps: Int, showCursor: Bool,
                         format: RecordFileFormat = .mov, quality: RecordQuality = .high,
-                        showsHUD: Bool = true) throws {
+                        showsHUD: Bool = true, saveDirectory: URL? = nil) throws {
         // 🔴 这里以前是 `guard … else { return }`：真正的"点了录制没反应"。
         // 上一路录制还没收完尾就再点一次，函数静默返回，调用方以为已经在录，
         // 按钮变成停止、计时器开始走，可一帧都不会有。宁可抛错让用户看见原因。
@@ -145,7 +145,10 @@ final class RecorderController: NSObject {
         }
         self.showsHUD = showsHUD
 
-        let url = Support.uniqueFileURL(in: Support.defaultSaveDirectory,
+        // 落盘目录跟设置走（以前固定桌面，设置里改了目录录制还往桌面写）。
+        // 默认参数保留 nil = 桌面，诊断脚本那条路（--recordtest）不用改。
+        let directory = saveDirectory ?? Support.defaultSaveDirectory
+        let url = Support.uniqueFileURL(in: directory,
                                         name: Support.shotFileName(prefix: "boxshot-rec",
                                                                    ext: format.fileExtension))
         outputURL = url

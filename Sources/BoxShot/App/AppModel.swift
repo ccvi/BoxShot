@@ -50,6 +50,10 @@ final class AppModel: ObservableObject {
         resolved.didChange = { [weak self] old, new in
             self?.applyPreferenceChanges(old: old, new: new)
         }
+        // 贴图右键「编辑贴图」：贴图只负责喊一声，编辑器由这里开
+        pinManager.onRequestEdit = { [weak self] pin in
+            self?.editPin(pin)
+        }
     }
 
     func bootstrap() {
@@ -353,6 +357,19 @@ final class AppModel: ObservableObject {
         controller.show(image: image, shapes: shapes)
     }
 
+    /// 贴图右键「编辑贴图」（1.0.33）：拿这张贴图的位图开编辑窗口，
+    /// **关窗时把渲染结果写回原贴图**。
+    ///
+    /// 不新建一张：用户的诉求是"改这张"，改完原地更新才符合预期 ——
+    /// 新建一张的结果是屏幕上有两张、旧的那张还是错的。
+    func editPin(_ pin: PinWindow) {
+        let controller = EditorWindowController(model: self)
+        editorControllers.append(controller)
+        controller.show(image: pin.pinnedImage) { [weak pin] image in
+            pin?.replaceImage(image)
+        }
+    }
+
     func editorDidClose(_ controller: EditorWindowController) {
         editorControllers.removeAll { $0 === controller }
     }
@@ -566,6 +583,11 @@ final class AppModel: ObservableObject {
         let overlay = MeasureOverlay()
         overlay.showTips = prefs.value.measureShowTips
         overlay.onFinish = { [weak self] _, _ in }
+        // 🔴 以前这里不置 nil，而 `startMeasure` 开头 `guard measureOverlay == nil`
+        // 直接 return → **每次启动只能量一次**，第二次点菜单毫无反应
+        // （README「已知问题」里挂了两版）。退出路径（量完 / Esc / 右键）都会走
+        // MeasureOverlay.finish，所以挂在 onClose 上是最稳的收口。
+        overlay.onClose = { [weak self] in self?.measureOverlay = nil }
         measureOverlay = overlay
         overlay.begin()
     }

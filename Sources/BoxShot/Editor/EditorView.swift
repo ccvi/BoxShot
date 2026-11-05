@@ -23,6 +23,9 @@ final class EditorDocument: ObservableObject {
     /// 沿用这个数，用户加完控件写出来的第一段字跟以前一模一样 —— 新增控件不该
     /// 顺手把既有观感改了。6 个档位里也正好包含 30，下拉不会显示成"未选中"。
     @Published var fontSize: CGFloat = 30
+    /// 放大倍数（只对放大镜生效）：用户 2026-11-05 口径「放大倍数 2 倍和 3 倍」。
+    /// 跟线宽 / 字号一样存 UserDefaults —— 下一张图打开还是这一档。
+    @Published var loupeZoom: CGFloat = EditorDocument.rememberedLoupeZoom()
     /// 当前选中的标注（"选择"工具点选；⌫ 删除；拖动移动）
     @Published var selectedID: UUID?
     /// 截图美化（Xnapper 式套壳）；nil = 关闭。底图不动，渲染时往外套
@@ -66,6 +69,24 @@ final class EditorDocument: ObservableObject {
     /// 不一致」：其中一条就是编辑窗口**没有字号控件**，落字时还写死 `(22, 30)`。
     /// 档位必须同源，`--selftest` 里有断言盯着两边是不是同一个数组。
     static let fontSizeOptions: [CGFloat] = OverlayEditorController.fontSizeOptions
+
+    /// 放大镜两档（**倍数**，不是像素）。档位只有两档，用户点名要的就是 2 和 3。
+    static let loupeZoomOptions: [CGFloat] = AnnotationShape.loupeZoomOptions
+    static let lastLoupeZoomKey = "boxshot.lastLoupeZoom"
+
+    /// 上次选的倍数；没选过 → 默认 2×；存的数不在档位表里 → 取最近的一档。
+    /// 跟字号 / 粗细下拉同一个口径（不做精确相等，浮点存回来会差一丁点）。
+    static func rememberedLoupeZoom(_ defaults: UserDefaults = .standard) -> CGFloat {
+        let raw = defaults.object(forKey: lastLoupeZoomKey) != nil
+            ? CGFloat(defaults.double(forKey: lastLoupeZoomKey))
+            : AnnotationShape.loupeDefaultZoom
+        return loupeZoomOptions.min { abs($0 - raw) < abs($1 - raw) }
+            ?? AnnotationShape.loupeDefaultZoom
+    }
+
+    static func rememberLoupeZoom(_ zoom: CGFloat, _ defaults: UserDefaults = .standard) {
+        defaults.set(Double(zoom), forKey: lastLoupeZoomKey)
+    }
 
     /// 字号换算：下拉给的是**视图点**，形状里存的是**图像像素**。
     ///
@@ -166,14 +187,19 @@ final class EditorDocument: ObservableObject {
     /// 字号只对文字生效：选中一个矩形时改字号，既不该动它、也不该白压一个撤销点。
     /// 所以这里先算出"改完长什么样"，跟原来一模一样就直接返回。
     func applyToSelected(color: RGBColor? = nil, lineWidth: CGFloat? = nil,
-                         fontSize: CGFloat? = nil) {
+                         fontSize: CGFloat? = nil, zoom: CGFloat? = nil) {
         if color != nil { self.color = color! }
         if let lineWidth { self.lineWidth = lineWidth }
+        if let zoom {
+            self.loupeZoom = zoom
+            Self.rememberLoupeZoom(zoom)
+        }
         guard let selectedID, let idx = shapes.firstIndex(where: { $0.id == selectedID }) else { return }
         var updated = shapes[idx]
         if let color { updated.color = color }
         if let lineWidth { updated.lineWidth = lineWidth }
         if let fontSize, updated.tool == .text { updated.fontSize = fontSize }
+        if let zoom, updated.tool == .loupe { updated.zoom = zoom }
         guard updated != shapes[idx] else { return }
         pushUndo(shapes)
         shapes[idx] = updated
@@ -603,6 +629,8 @@ struct EditorView: View {
                     draftStart = p
                     draft = AnnotationShape(tool: doc.tool, points: [p],
                                             color: doc.color, lineWidth: doc.lineWidth)
+                    // 放大镜：落笔时就定下当前倍数（之后还能在工具条上改）
+                    if doc.tool == .loupe { draft?.zoom = doc.loupeZoom }
                 }
             }
             .onEnded { _ in
@@ -626,7 +654,7 @@ struct EditorView: View {
                 draft = nil
                 draftStart = nil
                 if shape.points.count >= 2 {
-                    if shape.tool == .mosaic || shape.tool == .blur {
+                    if shape.tool == .mosaic || shape.tool == .blur || shape.tool == .loupe {
                         // 矩形语义：把点列收缩成 [起点, 终点] 方框
                         let first = shape.points.first!
                         let last = shape.points.last!
@@ -856,6 +884,23 @@ struct EditorView: View {
                 layer.draw(Image(decorative: effect.image, scale: 1), in: effect.rect)
             }
 
+        case .loupe:
+            // 与 CG 渲染器同一套几何（`loupeSourceRect` / `loupeOutputRect`）：
+            // 源区域裁出来，放大画进"放大后的框"，再描一圈圆角边框。
+            guard let out = shape.loupeOutputRect,
+                  let source = shape.loupeSourceRect else { return }
+            let bounds = CGRect(origin: .zero, size: doc.imageSize)
+            let sample = source.intersection(bounds).integral
+            guard sample.width >= 1, sample.height >= 1,
+                  let cropped = doc.baseImage.cropping(to: sample) else { return }
+            let radius = min(12, min(out.width, out.height) / 6)
+            let lens = Path(roundedRect: out, cornerRadius: radius)
+            context.drawLayer { layer in
+                layer.clip(to: lens)
+                layer.draw(Image(decorative: cropped, scale: 1), in: out)
+            }
+            context.stroke(lens, with: .color(color), lineWidth: max(2, width))
+
         case .measure:
             guard let a = shape.points.first, let b = shape.points.last else { return }
             var path = Path()
@@ -958,6 +1003,11 @@ struct EditorView: View {
             // 文字上下文给字号（只在文字工具 / 选中文字时出现，不占常驻宽度）
             if doc.tool == .text || doc.selectedShape?.tool == .text {
                 fontSizeMenu
+            }
+
+            // 放大镜上下文给倍数（只在放大镜工具 / 选中放大镜时出现）
+            if doc.tool == .loupe || doc.selectedShape?.tool == .loupe {
+                loupeZoomMenu
             }
 
             Divider().frame(height: 22)
@@ -1122,6 +1172,39 @@ struct EditorView: View {
         } else {
             doc.applyToSelected(fontSize: pixels)
         }
+    }
+
+    // ── 放大倍数（2× / 3×）───────────────────────────────
+
+    /// 倍数下拉。跟字号同一个思路：**只在用得上时出现**，不占常驻宽度
+    /// （工具条早就超过 1000pt，常驻一个只在放大镜时才有意义的控件不值）。
+    private var loupeZoomMenu: some View {
+        Menu {
+            ForEach(Array(EditorDocument.loupeZoomOptions.enumerated()), id: \.offset) { _, zoom in
+                Button { setLoupeZoom(zoom) } label: { Text("\(Int(zoom))×") }
+            }
+        } label: {
+            Text("\(Int(currentLoupeZoom))×")
+                .font(.system(size: 11, weight: .medium))
+                .monospacedDigit()
+                .frame(width: 30, alignment: .leading)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("放大倍数（只作用于放大镜）：2× / 3×")
+    }
+
+    /// 下拉显示哪一档：选中放大镜就看**那条标注**，否则看默认值。
+    /// 不这么做的话，选中一个 3× 的旧放大镜再想改，下拉还显示 2×，一改又回到 2×。
+    private var currentLoupeZoom: CGFloat {
+        if let shape = doc.selectedShape, shape.tool == .loupe { return shape.loupeZoom }
+        return doc.loupeZoom
+    }
+
+    /// 改倍数：有选中的放大镜就改它并记成默认档，否则只改默认档
+    /// （`applyToSelected` 里两件事一起做，包括写 UserDefaults）。
+    private func setLoupeZoom(_ zoom: CGFloat) {
+        doc.applyToSelected(zoom: zoom)
     }
 }
 

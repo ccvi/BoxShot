@@ -198,6 +198,16 @@ struct Preferences: Codable, Equatable {
     var windowHighlight: Bool = true
     /// 保存目录（nil = 每次问）；空字符串 = 桌面
     var saveDirectory: String? = nil
+
+    /// 实际落盘目录：没选过 / 选了空 → 桌面。
+    ///
+    /// 截图、录屏、编辑窗口三处都要"设置里的目录"，以前各写一段
+    /// `saveDirectory.flatMap { URL(...) }`，录制那条干脆漏了、固定落桌面
+    /// （README「已知问题」：录制输出不跟保存目录）。收成一个口子，漏不掉。
+    var resolvedSaveDirectory: URL {
+        guard let path = saveDirectory, !path.isEmpty else { return Support.defaultSaveDirectory }
+        return URL(fileURLWithPath: path, isDirectory: true)
+    }
     /// 自动保存到目录（不再每次询问）
     var autoSave: Bool = false
     /// Retina 截图缩小到 1x

@@ -388,7 +388,8 @@ final class RecordToolbarController: NSObject {
                                           showCursor: prefs.recordShowCursor,
                                           format: prefs.recordFormat,
                                           quality: prefs.recordQuality,
-                                          showsHUD: false)
+                                          showsHUD: false,
+                                          saveDirectory: prefs.resolvedSaveDirectory)
             recorder = controller
             isRecording = true
             startingUp = true

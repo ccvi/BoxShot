@@ -1224,6 +1224,71 @@ enum SelfTest {
                       nodeDoc.shapes.first?.points[1] == CGPoint(x: 90, y: 70))
             }
 
+            // ── 放大镜（1.0.33 用户口径「编辑器加：放大镜，放大倍数 2 倍和 3 倍」）──
+            // 语义：points 是取样的**源区域**，画出来的是以它为中心放大 zoom 倍的框；
+            // 命中 / 节点 / 选中框全按放大后的框算。几何都是纯函数，能脱离界面验。
+            do {
+                // 源区域 (100,50)-(200,150)：100×100，中心 (150,100)
+                var lens = AnnotationShape(tool: .loupe,
+                                           points: [CGPoint(x: 100, y: 50), CGPoint(x: 200, y: 150)],
+                                           color: .red, lineWidth: 3)
+                check("放大镜默认 2 倍", lens.loupeZoom == 2)
+                check("2 倍：输出框 = 源区域 2 倍、与源同心",
+                      lens.loupeOutputRect == CGRect(x: 50, y: 0, width: 200, height: 200))
+                lens.zoom = 3
+                check("3 倍：输出框 = 源区域 3 倍",
+                      lens.loupeOutputRect == CGRect(x: 0, y: -50, width: 300, height: 300))
+                lens.zoom = 2
+                check("放大镜给 8 个节点，且落在放大后的框上",
+                      lens.handlePoints.count == 8
+                        && lens.handlePoints[0] == CGPoint(x: 50, y: 0))
+                // 命中按放大后的框算：源区域之外、输出框之内也算命中
+                check("命中按放大后的框算（源区域外但框里也命中）",
+                      lens.hitTest(CGPoint(x: 60, y: 10)) && !lens.hitTest(CGPoint(x: 900, y: 900)))
+                // 拖右下角到 (450,400)：新框 50,0 → 450,400 共 400×400，源区域 = ÷2
+                let stretched = lens.adjusting(handle: 4, to: CGPoint(x: 450, y: 400))
+                check("拖节点：源区域按倍数反推（400×400 ÷ 2 = 200×200）",
+                      stretched.loupeSourceRect == CGRect(x: 150, y: 100, width: 200, height: 200))
+                check("拖节点：放大镜中心不动（250, 200）",
+                      stretched.loupeSourceRect?.midX == 250 && stretched.loupeSourceRect?.midY == 200)
+                // 倍数要进签名：不然"改倍数"在撤销栈里会被当成没改动
+                var zoomed = lens
+                zoomed.zoom = 3
+                check("倍数进签名（撤销栈去重不会误判）", zoomed.signature != lens.signature)
+
+                // 记忆档位（跟线宽 / 字号同一套口径）
+                let zoomSuite = "com.pcxx.boxshot.selftest.loupe"
+                let zoomDefaults = UserDefaults(suiteName: zoomSuite)!
+                zoomDefaults.removePersistentDomain(forName: zoomSuite)
+                check("没选过时是 2×", EditorDocument.rememberedLoupeZoom(zoomDefaults) == 2)
+                EditorDocument.rememberLoupeZoom(3, zoomDefaults)
+                check("记住的 3× 读得回来", EditorDocument.rememberedLoupeZoom(zoomDefaults) == 3)
+                zoomDefaults.removePersistentDomain(forName: zoomSuite)
+
+                // 只验几何等于没验"画没画出来"：底图是全黑 + 左边缘 3px 白竖条（x 2..5），
+                // 源区域取 (0,0)-(10,10) 放大 2 倍 → 输出框 (-5,-5)-(15,15)。
+                // 输出里 (0,0) 取到的是源区域的 (2.5,2.5)（白条上），而原图 (0,0) 是黑的；
+                // (7,7) 对应源区域 (6,6)（黑）。两条一起才能证明"真的放大且没乱铺"。
+                if let base = Self.loupeBaseImage() {
+                    let lensDoc = EditorDocument(image: base)
+                    var painted = AnnotationShape(tool: .loupe,
+                                                  points: [CGPoint(x: 0, y: 0), CGPoint(x: 10, y: 10)],
+                                                  color: .red, lineWidth: 0)
+                    painted.zoom = 2
+                    lensDoc.shapes = [painted]
+                    if let rendered = lensDoc.rendered(), let bytes = Self.pixelBytes(rendered) {
+                        check("放大镜真的把源区域放大了（(0,0) 取到白条）",
+                              Self.brightness(bytes, x: 0, y: 0, width: rendered.width) > 200)
+                        check("放大镜不是整块铺白（(7,7) 仍是黑）",
+                              Self.brightness(bytes, x: 7, y: 7, width: rendered.width) < 60)
+                    } else {
+                        check("放大镜能渲染出图", false)
+                    }
+                } else {
+                    check("放大镜验像素用的底图能建出来", false)
+                }
+            }
+
             // ── 文字原地编辑（所见即所得）的撤销语义 ──
             // 用户口径「输入时就直接看到最终效果，输完确认，之后还能点回来改」。
             // 这套动作全压在三条文档方法上，所以这里只测文档语义，不跑 UI：
@@ -1517,6 +1582,102 @@ enum SelfTest {
             } else {
                 check("图片贴图窗口能建出来", false)
             }
+        }
+
+        // ── 贴图编辑（1.0.33 用户口径「给贴图的右键加：编辑贴图」）──
+        // 链路：右键菜单 → PinWindow.requestEdit → PinManager → AppModel 开编辑器
+        // → 关窗写回 PinWindow.replaceImage。菜单本身要 GUI 才验得到，这里钉住
+        // "请求转得出去" + "新图真的换上了（尺寸也跟着变）"。
+        do {
+            let before = solidImage(width: 40, height: 30,
+                                    color: CGColor(srgbRed: 1, green: 0, blue: 0, alpha: 1))
+            let after = solidImage(width: 80, height: 60,
+                                   color: CGColor(srgbRed: 0, green: 1, blue: 0, alpha: 1))
+            if let pin = PinWindow(image: before, opacity: 1, shadow: false) {
+                var requested: PinWindow?
+                pin.onRequestEdit = { requested = $0 }
+                pin.requestEdit()
+                check("右键「编辑贴图」能把请求转出去", requested === pin)
+
+                if let surface = pin.contentView as? PinSurfaceView {
+                    let menu = surface.buildContextMenu()
+                    check("图片贴图的右键菜单第一项是「编辑贴图」",
+                          menu.items.first?.title == "编辑贴图")
+                    // 菜单项必须真的接到 editPin 上（title 对了、action 没接 = 点了没反应）
+                    // 用字符串 Selector：`editPin` 是 private @objc，取 #selector 会编译不过。
+                    check("菜单项挂着 editPin 动作",
+                          menu.items.first?.action == Selector(("editPin")))
+                } else {
+                    check("贴图内容视图类型没变（右键菜单挂在它上面）", false)
+                }
+
+                pin.replaceImage(after)
+                check("写回后贴图拿的是新图",
+                      pin.pinnedImage.width == 80 && pin.pinnedImage.height == 60)
+                let backing = NSScreen.main?.backingScaleFactor ?? 2
+                check("写回后窗口按新图重排（不是还按旧尺寸）",
+                      abs(pin.frame.width - 80 / backing) < 1)
+                pin.close()
+            } else {
+                check("图片贴图窗口能建出来（编辑贴图用）", false)
+            }
+
+            // 文本贴图不给这一项：换成位图就把"文字可选择"弄丢了
+            if let text = PinManager.renderTextToImage("不可编辑"),
+               let textPin = PinWindow(image: text, opacity: 1, shadow: false, text: "不可编辑") {
+                textPin.replaceImage(after)
+                check("文本贴图拒绝写回（保住可选中的文字）",
+                      textPin.contentView is PinTextContentView)
+                if let surface = textPin.contentView as? PinTextContentView {
+                    let titles = surface.buildContextMenu().items.map(\.title)
+                    check("文本贴图没有「编辑贴图」这一项", !titles.contains("编辑贴图"))
+                }
+                textPin.close()
+            }
+        }
+
+        // ── 贴图接线：新建这条路也要能把「编辑贴图」转出去（1.0.33）──
+        // 根因记录：从历史恢复那条路以前只接了 onClose，`onRequestEdit` 是 nil →
+        // 右键点了什么都不发生。两条路现在都走 `wire(_:)`，这里验新建这条。
+        do {
+            let manager = PinManager()
+            var forwarded: PinWindow?
+            manager.onRequestEdit = { forwarded = $0 }
+            let image = solidImage(width: 40, height: 30,
+                                   color: CGColor(srgbRed: 0, green: 0, blue: 1, alpha: 1))
+            _ = manager.pinImage(image, opacity: 1, shadow: false)
+            if let pin = manager.pinsForDiagnostics.first {
+                pin.requestEdit()
+                check("新建的贴图也能把「编辑贴图」转出去", forwarded === pin)
+            } else {
+                check("管理器能建出贴图（接线用）", false)
+            }
+            manager.closeAll()
+        }
+
+        // ── 屏幕测量遮罩的收口（1.0.33 修「每次启动只能量一次」）──
+        // 根因是 AppModel 从不把 measureOverlay 置 nil，而 startMeasure 开头
+        // `guard measureOverlay == nil`。现在挂在 finish 的 onClose 上，取消也算。
+        do {
+            let overlay = MeasureOverlay()
+            var closed = 0
+            overlay.onClose = { closed += 1 }
+            overlay.finish(distance: nil, hex: nil)      // Esc / 取消这条路
+            overlay.finish(distance: 12, hex: "#FFFFFF") // 量完这条路
+            check("测量遮罩收掉时一定通知（取消也算）", closed == 2)
+        }
+
+        // ── 保存目录口径（1.0.33 修「录制输出固定桌面」）──
+        do {
+            var prefs = Preferences()
+            prefs.saveDirectory = nil
+            check("没设保存目录 → 桌面", prefs.resolvedSaveDirectory == Support.defaultSaveDirectory)
+            prefs.saveDirectory = ""
+            check("存了空串也当桌面（老配置里可能是空串）",
+                  prefs.resolvedSaveDirectory == Support.defaultSaveDirectory)
+            prefs.saveDirectory = "/tmp/boxshot-selftest-dir"
+            check("设了保存目录就跟着走",
+                  prefs.resolvedSaveDirectory.path == "/tmp/boxshot-selftest-dir")
         }
 
         // ── 文件名/去重 ──
@@ -1922,6 +2083,32 @@ enum SelfTest {
         ctx.setFillColor(color)
         ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
         return ctx.makeImage()!
+    }
+
+    /// 放大镜验像素质感的底图：全黑 + 左边缘一条 3px 宽的白竖条（x 2..5）。
+    ///
+    /// 为什么不能拿纯色图验：纯色图放大前后一个像素都不变，"放大没放大"根本测不出来
+    /// （和"渐变图才能验 y 有没有翻错"是同一个道理）。
+    private static func loupeBaseImage() -> CGImage? {
+        let w = 100, h = 100
+        guard let ctx = CGContext(data: nil, width: w, height: h,
+                                  bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                                    | CGBitmapInfo.byteOrder32Little.rawValue) else { return nil }
+        ctx.setFillColor(CGColor(gray: 0, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+        ctx.setFillColor(CGColor(gray: 1, alpha: 1))
+        ctx.fill(CGRect(x: 2, y: 0, width: 3, height: h))
+        return ctx.makeImage()
+    }
+
+    /// 一个像素的亮度（0–255）。`pixelBytes` 是 BGRA（little-endian premultipliedFirst），
+    /// 每像素第 1/2/3 个字节是 B / G / R —— 取错位会全 0、断言变成永远通过。
+    private static func brightness(_ bytes: [UInt8], x: Int, y: Int, width: Int) -> Int {
+        let i = (y * width + x) * 4
+        guard i + 2 < bytes.count else { return -1 }
+        return (Int(bytes[i]) + Int(bytes[i + 1]) + Int(bytes[i + 2])) / 3
     }
 }
 

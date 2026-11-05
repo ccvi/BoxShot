@@ -136,6 +136,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.showDiagnosticEditorWindowWithHandles()
             }
         }
+        // 诊断入口：--editorbar-loupe 打开编辑窗口，预置 2× / 3× 两个放大镜 ——
+        // 验「拖出来那块真的被放大了、倍数换了框跟着换」。底图是棋盘格：
+        // 放大之后格子必须**看起来变大一倍**，纯色底图看不出这件事。
+        let editorLoupeTrigger = "/tmp/boxshot-editorbar-loupe.trigger"
+        if CommandLine.arguments.contains("--editorbar-loupe")
+            || FileManager.default.fileExists(atPath: editorLoupeTrigger) {
+            try? FileManager.default.removeItem(atPath: editorLoupeTrigger)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                self?.showDiagnosticEditorWindowWithLoupe()
+            }
+        }
         // 诊断入口：--esctest 打开区域截图遮罩 → 自己投一个 Esc 进去 → 看遮罩有没有收掉。
         // 「Esc 没生效」这种问题，光读代码看不出是"判断写错"还是"按键根本没进来"。
         let escTrigger = "/tmp/boxshot-esctest.trigger"
@@ -1643,8 +1654,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.openEditorForDiagnostics(image: image, shapes: shapes, select: shapes[0].id)
     }
 
-    private func showDiagnosticOverlay(tall: Bool = false, colors: Bool = false) {
-        let w = 800, h = 500
+    /// 放大镜诊断：底图是**棋盘格**（8px 一个格）。
+    /// 放大镜覆盖的区域里格子必须明显变大 —— 纯色底图在放大前后一模一样，
+    /// 用肉眼看不出"到底放没放大"。
+    private func showDiagnosticEditorWindowWithLoupe() {
+        let w = 900, h = 600
+        let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                            space: CGColorSpaceCreateDeviceRGB(),
+                            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)!
+        ctx.setFillColor(CGColor(srgbRed: 0.97, green: 0.97, blue: 0.98, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+        // 棋盘格：左上角 24×24 个 8px 格子。
+        // 🔴 CG 是左下原点、标注几何是左上原点：`y = 540 - row*8` 才能把它摆在
+        // 左上 (60,60)-(252,252) —— 写成 `320 - row*8` 会落到画面中部，
+        // 于是放大镜取样取到的是空白背景，看着像"放大镜没画出来"。
+        for row in 0..<24 {
+            for col in 0..<24 {
+                ctx.setFillColor(col % 2 == row % 2
+                                 ? CGColor(srgbRed: 0.20, green: 0.45, blue: 0.85, alpha: 1)
+                                 : CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
+                ctx.fill(CGRect(x: 60 + col * 8, y: 540 - row * 8, width: 8, height: 8))
+            }
+        }
+        // 右下一块纯色 + 一条细线，用来看边框和圆角压在大色块上的观感
+        ctx.setFillColor(CGColor(srgbRed: 0.93, green: 0.55, blue: 0.20, alpha: 1))
+        ctx.fill(CGRect(x: 420, y: 120, width: 320, height: 200))
+        ctx.setFillColor(CGColor(srgbRed: 0.15, green: 0.15, blue: 0.18, alpha: 1))
+        ctx.fill(CGRect(x: 440, y: 160, width: 280, height: 4))
+        guard let image = ctx.makeImage() else { return }
+
+        // 两个放大镜都盖在棋盘格上：格子在 2× 里变大两倍、3× 里变大三倍，
+        // 与棋盘格本体同框对比，倍数对不对一眼就能看出来。
+        var two = AnnotationShape(tool: .loupe,
+                                  points: [CGPoint(x: 80, y: 80), CGPoint(x: 140, y: 130)],
+                                  color: .red, lineWidth: 4)
+        two.zoom = 2
+        var three = AnnotationShape(tool: .loupe,
+                                    points: [CGPoint(x: 200, y: 190), CGPoint(x: 225, y: 215)],
+                                    color: .blue, lineWidth: 4)
+        three.zoom = 3
+        model.openEditorForDiagnostics(image: image, shapes: [two, three],
+                                       select: two.id, tool: .loupe)
+    }
+
+    private func showDiagnosticOverlay(tall: Bool = false, colors: Bool = false) {        let w = 800, h = 500
         let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
                             space: CGColorSpaceCreateDeviceRGB(),
                             bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)!

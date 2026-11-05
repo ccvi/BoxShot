@@ -14,6 +14,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
     private var doc: EditorDocument?
     private weak var appModel: AppModel?
     private var escMonitor: Any?
+    /// 关窗写回（贴图编辑用）。nil = 普通编辑窗口，关掉就完事。
+    private var finishHandler: ((CGImage) -> Void)?
 
     /// 内容区最小尺寸。工具条本身 ~1100pt 宽，低于 640 横向滚起来太难受；
     /// 高度给画布留 ~350（工具条 62 + 画布 358），再小就只剩一条缝。
@@ -41,8 +43,10 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
     var isVisible: Bool { window?.isVisible ?? false }
 
     func show(image: CGImage, shapes: [AnnotationShape] = [],
-              diagnostics: (select: UUID, tool: EditorTool)? = nil) {
+              diagnostics: (select: UUID, tool: EditorTool)? = nil,
+              onFinish: ((CGImage) -> Void)? = nil) {
         guard let window else { return }
+        finishHandler = onFinish
         let document = EditorDocument(image: image, shapes: shapes)
         // 诊断入口（--editorbar-handles）用：指定初始工具和选中的形状。
         // 正路上没有这个需求（工具和选中都是用户点出来的），所以只在诊断时传。
@@ -75,7 +79,9 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
                               onClose: { [weak self] in self?.window?.performClose(nil) },
                               // 裁剪后按新尺寸重开文档：坐标、手柄、窗口大小全按新图来
                               onCrop: { [weak self] image, shapes in
-                                  self?.show(image: image, shapes: shapes)
+                                  // 写回回调要跟着带过去：不然"裁剪完直接关窗"贴图就不更新
+                                  self?.show(image: image, shapes: shapes,
+                                             onFinish: self?.finishHandler)
                               })
         window.contentView = NSHostingView(rootView: view)
         // 🔴 装在 contentView 之后**再设一次**：换 contentView 会让 SwiftUI 重算容器
@@ -199,6 +205,13 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         removeEscMonitor()
+        // 贴图编辑：关窗就把当前渲染结果写回去。
+        // 「完成」/ Esc / 点红点 三条路都会走到这里 —— 对用户来说它们的语义
+        // 都是"我看完了"，不该只有点「完成」才写回（那会让 Esc 变成静默丢弃）。
+        if let handler = finishHandler, let image = doc?.rendered() {
+            handler(image)
+        }
+        finishHandler = nil
         doc = nil
         appModel?.editorDidClose(self)
     }

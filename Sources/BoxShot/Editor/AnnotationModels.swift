@@ -27,6 +27,7 @@ enum EditorTool: String, CaseIterable, Identifiable {
     case text
     case mosaic
     case blur
+    case loupe      // 放大镜：拖出源区域，按倍数放大显示（1.0.33）
     case measure    // 像素测距
     case colorPick  // 取色标注
     case crop       // 裁剪：拖出保留范围，⏎ 应用（不是标注，不进形状表）
@@ -47,6 +48,7 @@ enum EditorTool: String, CaseIterable, Identifiable {
         case .text:      return "textformat"
         case .mosaic:    return "squareshape.split.2x2"
         case .blur:      return "drop"
+        case .loupe:     return "plus.magnifyingglass"
         case .measure:   return "ruler"
         case .colorPick: return "eyedropper"
         case .crop:      return "crop"
@@ -67,6 +69,7 @@ enum EditorTool: String, CaseIterable, Identifiable {
         case .text:      return "文字"
         case .mosaic:    return "马赛克"
         case .blur:      return "模糊"
+        case .loupe:     return "放大镜（拖出区域，2× / 3× 放大）"
         case .measure:   return "测距"
         case .colorPick: return "取色"
         case .crop:      return "裁剪（拖出保留范围，⏎ 应用）"
@@ -103,16 +106,52 @@ struct AnnotationShape: Equatable {
     var lineWidth: CGFloat
     var text: String = ""
     var fontSize: CGFloat = 0   // 0 = 用默认字号
+    /// 放大镜倍数（只对 `.loupe` 有意义）。0 = 用默认值（2×）。
+    ///
+    /// 为什么不复用 `lineWidth` / `fontSize`：这两个字段的语义是"笔画多粗 / 字多大"，
+    /// 借来存倍数以后，任何按字段遍历的地方都会读出一个莫名其妙的数。
+    var zoom: CGFloat = 0
 
     /// 归一化的可比较标识（撤销栈去重用）
     var signature: String {
-        "\(tool.rawValue)|\(points.map { "\($0.x),\($0.y)" }.joined(separator: ";"))|\(color)|\(lineWidth)|\(text)"
+        "\(tool.rawValue)|\(points.map { "\($0.x),\($0.y)" }.joined(separator: ";"))|\(color)|\(lineWidth)|\(text)|\(zoom)"
     }
 
     // ── 命中测试 / 移动（"点选编辑"用，坐标都是图像像素） ──
 
     /// 命中容差：笔画线宽再放宽一点，方便点选细线
     private var hitPadding: CGFloat { max(8, lineWidth) }
+
+    // ── 放大镜几何（纯函数；CG 渲染、SwiftUI 预览、自检三处共用） ──
+    //
+    // 语义（用户 2026-11-05 口径「编辑器加：放大镜，放大倍数 2 倍和 3 倍」）：
+    //   · `points` 是**取样的源区域**（拖出来的那个框，图像像素、左上原点）；
+    //   · 画出来的却是**放大后的框** `loupeOutputRect` —— 以源区域中心为中心
+    //     放大 zoom 倍，所以框会往外长，中心内容留在原位。
+    //   · 命中 / 选中框 / 8 个节点全部按**放大后的框**算：用户看得见的是它，
+    //     拖的也是它；拖节点时再把新框除以倍数反推回源区域。
+
+    /// 默认倍数。0 值走这里，所以 `AnnotationShape.zoom` 可以不填。
+    static let loupeDefaultZoom: CGFloat = 2
+    static let loupeZoomOptions: [CGFloat] = [2, 3]
+
+    var loupeZoom: CGFloat { zoom > 0 ? zoom : Self.loupeDefaultZoom }
+
+    /// 取样源区域（图像像素，左上原点）
+    var loupeSourceRect: CGRect? {
+        guard tool == .loupe, points.count >= 2 else { return nil }
+        return rect(from: points[0], to: points[points.count - 1])
+    }
+
+    /// 放大后的可见范围（也是选中框与节点的依据）
+    var loupeOutputRect: CGRect? {
+        guard let source = loupeSourceRect else { return nil }
+        let z = loupeZoom
+        let width = source.width * z
+        let height = source.height * z
+        return CGRect(x: source.midX - width / 2, y: source.midY - height / 2,
+                      width: width, height: height)
+    }
 
     /// 是否命中该标注（自上而下点选用）
     func hitTest(_ p: CGPoint) -> Bool {
@@ -121,6 +160,10 @@ struct AnnotationShape: Equatable {
             return false
         case .crop:
             return false
+        case .loupe:
+            // 命中按**放大后的框**算（用户看得见的是它，源区域永远在它里面）
+            guard let out = loupeOutputRect else { return false }
+            return out.insetBy(dx: -hitPadding, dy: -hitPadding).contains(p)
         case .rect, .highlight, .ellipse, .mosaic, .blur, .measure:
             guard let a = points.first, let b = points.last else { return false }
             return rect(from: a, to: b).insetBy(dx: -hitPadding, dy: -hitPadding).contains(p)
@@ -156,6 +199,9 @@ struct AnnotationShape: Equatable {
             return nil
         case .crop:
             return nil
+        case .loupe:
+            guard let out = loupeOutputRect else { return nil }
+            return out.insetBy(dx: -hitPadding / 2, dy: -hitPadding / 2)
         case .rect, .highlight, .ellipse, .mosaic, .blur, .measure:
             guard let a = points.first, let b = points.last else { return nil }
             return rect(from: a, to: b).insetBy(dx: -hitPadding / 2, dy: -hitPadding / 2)
@@ -208,22 +254,50 @@ struct AnnotationShape: Equatable {
         guard points.count >= 2 else { return [] }
         switch tool {
         case .rect, .ellipse:
-            let r = rect(from: points[0], to: points[points.count - 1])
-            return [
-                CGPoint(x: r.minX, y: r.minY),   // 0 左上
-                CGPoint(x: r.midX, y: r.minY),   // 1 上
-                CGPoint(x: r.maxX, y: r.minY),   // 2 右上
-                CGPoint(x: r.maxX, y: r.midY),   // 3 右
-                CGPoint(x: r.maxX, y: r.maxY),   // 4 右下
-                CGPoint(x: r.midX, y: r.maxY),   // 5 下
-                CGPoint(x: r.minX, y: r.maxY),   // 6 左下
-                CGPoint(x: r.minX, y: r.midY),   // 7 左
-            ]
+            return Self.eightHandles(of: rect(from: points[0], to: points[points.count - 1]))
+        case .loupe:
+            guard let out = loupeOutputRect else { return [] }
+            return Self.eightHandles(of: out)
         case .line, .arrow:
             return [points[0], points[points.count - 1]]
         default:
             return []
         }
+    }
+
+    /// 矩形语义的 8 个节点（4 角 + 4 边中点），顺序固定：
+    /// 0 左上 / 1 上 / 2 右上 / 3 右 / 4 右下 / 5 下 / 6 左下 / 7 左。
+    /// 矩形、椭圆、放大镜共用这一份 —— 三处各写一遍迟早会有一处下标写反。
+    static func eightHandles(of r: CGRect) -> [CGPoint] {
+        [
+            CGPoint(x: r.minX, y: r.minY),   // 0 左上
+            CGPoint(x: r.midX, y: r.minY),   // 1 上
+            CGPoint(x: r.maxX, y: r.minY),   // 2 右上
+            CGPoint(x: r.maxX, y: r.midY),   // 3 右
+            CGPoint(x: r.maxX, y: r.maxY),   // 4 右下
+            CGPoint(x: r.midX, y: r.maxY),   // 5 下
+            CGPoint(x: r.minX, y: r.maxY),   // 6 左下
+            CGPoint(x: r.minX, y: r.midY),   // 7 左
+        ]
+    }
+
+    /// 把第 `index` 个节点拖到 `point` 之后的矩形（min/max 归一，不出现负宽高）。
+    /// `index` 越界返回 nil。矩形 / 椭圆 / 放大镜共用。
+    static func resizedRect(_ r: CGRect, handle index: Int, to point: CGPoint) -> CGRect? {
+        var minX = r.minX, minY = r.minY, maxX = r.maxX, maxY = r.maxY
+        switch index {
+        case 0: minX = point.x; minY = point.y     // 左上
+        case 1: minY = point.y                     // 上
+        case 2: maxX = point.x; minY = point.y     // 右上
+        case 3: maxX = point.x                     // 右
+        case 4: maxX = point.x; maxY = point.y     // 右下
+        case 5: maxY = point.y                     // 下
+        case 6: minX = point.x; maxY = point.y     // 左下
+        case 7: minX = point.x                     // 左
+        default: return nil
+        }
+        return CGRect(x: min(minX, maxX), y: min(minY, maxY),
+                      width: abs(maxX - minX), height: abs(maxY - minY))
     }
 
     /// 命中哪个节点；`tolerance` 是**图像像素**（调用方按自己的缩放换算成屏幕 9pt 左右）。
@@ -252,23 +326,23 @@ struct AnnotationShape: Equatable {
                 copy.points[points.count - 1] = point
             }
         case .rect, .ellipse:
-            let r = rect(from: points[0], to: points[points.count - 1])
-            var minX = r.minX, minY = r.minY, maxX = r.maxX, maxY = r.maxY
-            switch index {
-            case 0: minX = point.x; minY = point.y     // 左上
-            case 1: minY = point.y                     // 上
-            case 2: maxX = point.x; minY = point.y     // 右上
-            case 3: maxX = point.x                     // 右
-            case 4: maxX = point.x; maxY = point.y     // 右下
-            case 5: maxY = point.y                     // 下
-            case 6: minX = point.x; maxY = point.y     // 左下
-            case 7: minX = point.x                     // 左
-            default: return copy
-            }
+            guard let r = Self.resizedRect(rect(from: points[0], to: points[points.count - 1]),
+                                           handle: index, to: point) else { return copy }
             // 点序统一成 [左上, 右下]：拖过对角之后 min/max 会自动交换，
             // 形状不会消失、也不会变成负宽高（负宽高的 rect 渲染出来是空的）。
-            copy.points = [CGPoint(x: min(minX, maxX), y: min(minY, maxY)),
-                           CGPoint(x: max(minX, maxX), y: max(minY, maxY))]
+            copy.points = [CGPoint(x: r.minX, y: r.minY), CGPoint(x: r.maxX, y: r.maxY)]
+        case .loupe:
+            // 拖的是**放大后的框**：先按矩形那套算出新框，再除以倍数反推源区域
+            // （同一个中心）。这样放大镜"看着多大就是多大"，源区域跟着呼吸但不跳。
+            guard let out = loupeOutputRect,
+                  let resized = Self.resizedRect(out, handle: index, to: point) else { return copy }
+            let z = loupeZoom
+            let w = max(1, resized.width / z)
+            let h = max(1, resized.height / z)
+            let source = CGRect(x: resized.midX - w / 2, y: resized.midY - h / 2,
+                                width: w, height: h)
+            copy.points = [CGPoint(x: source.minX, y: source.minY),
+                           CGPoint(x: source.maxX, y: source.maxY)]
         default:
             break
         }
@@ -729,6 +803,43 @@ enum EditorRenderer {
                                               y: canvasHeight - effect.rect.maxY,
                                               width: effect.rect.width,
                                               height: effect.rect.height))
+            ctx.restoreGState()
+
+        case .loupe:
+            // 放大镜：把源区域的像素放大后画进「放大后的框」。
+            // 边框用标注自身的颜色，圆角跟贴图/浮层一个语言（10pt 级）。
+            guard let out = shape.loupeOutputRect,
+                  let source = shape.loupeSourceRect,
+                  source.width >= 1, source.height >= 1 else { return }
+            let imageBounds = CGRect(x: 0, y: 0,
+                                     width: CGFloat(effects.base.width),
+                                     height: CGFloat(effects.base.height))
+            // 源区域可能被拖到画布外面：裁之前先夹回图内，且必须取整 ——
+            // `CGImage.cropping(to:)` 吃小数会返回 nil，表现为"画了放大镜但什么都没有"
+            let sample = source.intersection(imageBounds).integral
+            guard sample.width >= 1, sample.height >= 1,
+                  let cropped = effects.base.cropping(to: sample) else { return }
+            let radius = min(12, min(out.width, out.height) / 6)
+            let lens = CGPath(roundedRect: out, cornerWidth: radius, cornerHeight: radius,
+                              transform: nil)
+
+            ctx.saveGState()
+            ctx.addPath(lens)
+            ctx.clip()
+            // 同马赛克 / 模糊：翻转空间里直接 draw 会上下颠倒，
+            // 先还原成左下原点的标准空间再画（clip 已经记在设备空间，不受影响）。
+            ctx.translateBy(x: 0, y: canvasHeight)
+            ctx.scaleBy(x: 1, y: -1)
+            ctx.interpolationQuality = .high
+            ctx.draw(cropped, in: CGRect(x: out.minX, y: canvasHeight - out.maxY,
+                                         width: out.width, height: out.height))
+            ctx.restoreGState()
+
+            ctx.saveGState()
+            ctx.addPath(lens)
+            ctx.setStrokeColor(color.cgColor)
+            ctx.setLineWidth(max(2, width))
+            ctx.strokePath()
             ctx.restoreGState()
 
         case .measure:
