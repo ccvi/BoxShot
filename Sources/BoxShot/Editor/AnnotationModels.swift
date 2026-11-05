@@ -69,7 +69,7 @@ enum EditorTool: String, CaseIterable, Identifiable {
         case .text:      return "文字"
         case .mosaic:    return "马赛克"
         case .blur:      return "模糊"
-        case .loupe:     return "放大镜（拖出区域，2× / 3× 放大）"
+        case .loupe:     return "放大镜（拖出区域放大，矩形 / 圆形 × 2× / 3×）"
         case .measure:   return "测距"
         case .colorPick: return "取色"
         case .crop:      return "裁剪（拖出保留范围，⏎ 应用）"
@@ -97,6 +97,33 @@ enum EditorTool: String, CaseIterable, Identifiable {
     }
 }
 
+/// 放大镜镜面形状（用户 2026-11-05 追加口径：
+/// 「矩形 2X，矩形 3X，圆形 2X，圆形 3X」）。
+///
+/// 倍数不塞进这个枚举：形状和倍数是**正交**的两个维度，各自存一个字段，
+/// 界面把 4 种组合摊成一个下拉（`LoupeStyle.allCases × loupeZoomOptions`）。
+/// 塞进枚举会变成 4 个 case，以后想加一档倍数就得改 4 个地方。
+enum LoupeStyle: String, Equatable, CaseIterable, Identifiable {
+    case rect
+    case circle
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .rect:   return "矩形"
+        case .circle: return "圆形"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .rect:   return "rectangle"
+        case .circle: return "circle"
+        }
+    }
+}
+
 struct AnnotationShape: Equatable {
     var id = UUID()
     var tool: EditorTool
@@ -111,10 +138,12 @@ struct AnnotationShape: Equatable {
     /// 为什么不复用 `lineWidth` / `fontSize`：这两个字段的语义是"笔画多粗 / 字多大"，
     /// 借来存倍数以后，任何按字段遍历的地方都会读出一个莫名其妙的数。
     var zoom: CGFloat = 0
+    /// 放大镜镜面形状（只对 `.loupe` 有意义）：矩形 / 圆形。
+    var loupeStyle: LoupeStyle = .rect
 
     /// 归一化的可比较标识（撤销栈去重用）
     var signature: String {
-        "\(tool.rawValue)|\(points.map { "\($0.x),\($0.y)" }.joined(separator: ";"))|\(color)|\(lineWidth)|\(text)|\(zoom)"
+        "\(tool.rawValue)|\(points.map { "\($0.x),\($0.y)" }.joined(separator: ";"))|\(color)|\(lineWidth)|\(text)|\(zoom)|\(loupeStyle.rawValue)"
     }
 
     // ── 命中测试 / 移动（"点选编辑"用，坐标都是图像像素） ──
@@ -124,8 +153,10 @@ struct AnnotationShape: Equatable {
 
     // ── 放大镜几何（纯函数；CG 渲染、SwiftUI 预览、自检三处共用） ──
     //
-    // 语义（用户 2026-11-05 口径「编辑器加：放大镜，放大倍数 2 倍和 3 倍」）：
+    // 语义（用户 2026-11-05 口径「编辑器加：放大镜，放大倍数 2 倍和 3 倍」，
+    // 当天追加「矩形 2X，矩形 3X，圆形 2X，圆形 3X」）：
     //   · `points` 是**取样的源区域**（拖出来的那个框，图像像素、左上原点）；
+    //   · 实际取样走 `loupeSampleRect`（圆形取短边内切正方形，避免拉伸）；
     //   · 画出来的却是**放大后的框** `loupeOutputRect` —— 以源区域中心为中心
     //     放大 zoom 倍，所以框会往外长，中心内容留在原位。
     //   · 命中 / 选中框 / 8 个节点全部按**放大后的框**算：用户看得见的是它，
@@ -137,19 +168,33 @@ struct AnnotationShape: Equatable {
 
     var loupeZoom: CGFloat { zoom > 0 ? zoom : Self.loupeDefaultZoom }
 
-    /// 取样源区域（图像像素，左上原点）
+    /// 取样源区域（图像像素，左上原点）—— 用户拖出来的那个框
     var loupeSourceRect: CGRect? {
         guard tool == .loupe, points.count >= 2 else { return nil }
         return rect(from: points[0], to: points[points.count - 1])
     }
 
+    /// **实际取样**的区域。
+    ///
+    /// 矩形镜面就是源区域本身；圆形镜面取源区域的**短边内切正方形**。
+    /// 🔴 为什么不能拿矩形源区域直接塞进圆里：缩放是等比放大的，一个 100×40 的框
+    /// 塞进圆里只有两条路 —— 要么拉伸（图像被压扁，字变形），要么裁掉一边（用户框的
+    /// 内容少了）。用短边做内切正方形，既不拉伸、也不会多取到用户没框的地方。
+    var loupeSampleRect: CGRect? {
+        guard let source = loupeSourceRect else { return nil }
+        guard loupeStyle == .circle else { return source }
+        let side = min(source.width, source.height)
+        return CGRect(x: source.midX - side / 2, y: source.midY - side / 2,
+                      width: side, height: side)
+    }
+
     /// 放大后的可见范围（也是选中框与节点的依据）
     var loupeOutputRect: CGRect? {
-        guard let source = loupeSourceRect else { return nil }
+        guard let sample = loupeSampleRect else { return nil }
         let z = loupeZoom
-        let width = source.width * z
-        let height = source.height * z
-        return CGRect(x: source.midX - width / 2, y: source.midY - height / 2,
+        let width = sample.width * z
+        let height = sample.height * z
+        return CGRect(x: sample.midX - width / 2, y: sample.midY - height / 2,
                       width: width, height: height)
     }
 
@@ -300,6 +345,48 @@ struct AnnotationShape: Equatable {
                       width: abs(maxX - minX), height: abs(maxY - minY))
     }
 
+    /// 把第 `index` 个节点拖到 `point` 之后**仍然是正方形**的框（圆形放大镜专用）。
+    ///
+    /// 用户口径**「圆形放大镜是正圆」**：只靠"取样取短边内切"能保证**画出来**是圆，
+    /// 但拖节点时会漏 —— 拖右边缘只会改宽，源区域变成 300×200，再被短边内切回 200×200，
+    /// 表现就是"手指往右拉了 100px，圆一点没动"。所以圆形在**改大小这一步**就得是方的。
+    ///
+    /// 锚点：
+    /// - 4 个角节点：**对角固定**（跟矩形那套一致），边长取两个方向位移的较大者 ——
+    ///   取较大者是为了"手往哪儿都长"，取较小者会出现斜着拖却不变大的死区；
+    /// - 4 个边中点：**对边固定**，边长由被拖的那条边决定，另一轴以原中心对称长大。
+    static func squareRect(_ r: CGRect, handle index: Int, to point: CGPoint) -> CGRect? {
+        let minimum: CGFloat = 8
+        switch index {
+        case 0, 2, 4, 6:
+            let anchor: CGPoint
+            switch index {
+            case 0:  anchor = CGPoint(x: r.maxX, y: r.maxY)   // 拖左上 → 右下固定
+            case 2:  anchor = CGPoint(x: r.minX, y: r.maxY)   // 拖右上 → 左下固定
+            case 4:  anchor = CGPoint(x: r.minX, y: r.minY)   // 拖右下 → 左上固定
+            default: anchor = CGPoint(x: r.maxX, y: r.minY)   // 拖左下 → 右上固定
+            }
+            let side = max(minimum, max(abs(point.x - anchor.x), abs(point.y - anchor.y)))
+            return CGRect(x: point.x >= anchor.x ? anchor.x : anchor.x - side,
+                          y: point.y >= anchor.y ? anchor.y : anchor.y - side,
+                          width: side, height: side)
+        case 1:   // 上：下边固定
+            let side = max(minimum, r.maxY - point.y)
+            return CGRect(x: r.midX - side / 2, y: r.maxY - side, width: side, height: side)
+        case 5:   // 下：上边固定
+            let side = max(minimum, point.y - r.minY)
+            return CGRect(x: r.midX - side / 2, y: r.minY, width: side, height: side)
+        case 7:   // 左：右边固定
+            let side = max(minimum, r.maxX - point.x)
+            return CGRect(x: r.maxX - side, y: r.midY - side / 2, width: side, height: side)
+        case 3:   // 右：左边固定
+            let side = max(minimum, point.x - r.minX)
+            return CGRect(x: r.minX, y: r.midY - side / 2, width: side, height: side)
+        default:
+            return nil
+        }
+    }
+
     /// 命中哪个节点；`tolerance` 是**图像像素**（调用方按自己的缩放换算成屏幕 9pt 左右）。
     /// 手柄压在形状边缘上，稍微点偏一点也得能抓住，所以容差比手柄本身大一圈。
     func handleIndex(near point: CGPoint, tolerance: CGFloat) -> Int? {
@@ -334,8 +421,16 @@ struct AnnotationShape: Equatable {
         case .loupe:
             // 拖的是**放大后的框**：先按矩形那套算出新框，再除以倍数反推源区域
             // （同一个中心）。这样放大镜"看着多大就是多大"，源区域跟着呼吸但不跳。
-            guard let out = loupeOutputRect,
-                  let resized = Self.resizedRect(out, handle: index, to: point) else { return copy }
+            // 圆形走 `squareRect` —— 用户口径「圆形放大镜是正圆」，拖节点也不能拖成椭圆。
+            guard let out = loupeOutputRect else { return copy }
+            let resized: CGRect
+            if loupeStyle == .circle {
+                guard let square = Self.squareRect(out, handle: index, to: point) else { return copy }
+                resized = square
+            } else {
+                guard let rect = Self.resizedRect(out, handle: index, to: point) else { return copy }
+                resized = rect
+            }
             let z = loupeZoom
             let w = max(1, resized.width / z)
             let h = max(1, resized.height / z)
@@ -806,22 +901,25 @@ enum EditorRenderer {
             ctx.restoreGState()
 
         case .loupe:
-            // 放大镜：把源区域的像素放大后画进「放大后的框」。
-            // 边框用标注自身的颜色，圆角跟贴图/浮层一个语言（10pt 级）。
+            // 放大镜：把取样区域的像素放大后画进「放大后的框」。
+            // 镜面按 `loupeStyle` 裁：矩形是圆角矩形、圆形是椭圆（取样已取内切正方形，
+            // 所以塞进圆里不会拉伸）。边框用标注自身的颜色。
             guard let out = shape.loupeOutputRect,
-                  let source = shape.loupeSourceRect,
-                  source.width >= 1, source.height >= 1 else { return }
+                  let sampleRect = shape.loupeSampleRect,
+                  sampleRect.width >= 1, sampleRect.height >= 1 else { return }
             let imageBounds = CGRect(x: 0, y: 0,
                                      width: CGFloat(effects.base.width),
                                      height: CGFloat(effects.base.height))
-            // 源区域可能被拖到画布外面：裁之前先夹回图内，且必须取整 ——
+            // 取样区域可能被拖到画布外面：裁之前先夹回图内，且必须取整 ——
             // `CGImage.cropping(to:)` 吃小数会返回 nil，表现为"画了放大镜但什么都没有"
-            let sample = source.intersection(imageBounds).integral
+            let sample = sampleRect.intersection(imageBounds).integral
             guard sample.width >= 1, sample.height >= 1,
                   let cropped = effects.base.cropping(to: sample) else { return }
             let radius = min(12, min(out.width, out.height) / 6)
-            let lens = CGPath(roundedRect: out, cornerWidth: radius, cornerHeight: radius,
-                              transform: nil)
+            let lens: CGPath = shape.loupeStyle == .circle
+                ? CGPath(ellipseIn: out, transform: nil)
+                : CGPath(roundedRect: out, cornerWidth: radius, cornerHeight: radius,
+                         transform: nil)
 
             ctx.saveGState()
             ctx.addPath(lens)

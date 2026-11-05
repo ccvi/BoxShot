@@ -26,6 +26,8 @@ final class EditorDocument: ObservableObject {
     /// 放大倍数（只对放大镜生效）：用户 2026-11-05 口径「放大倍数 2 倍和 3 倍」。
     /// 跟线宽 / 字号一样存 UserDefaults —— 下一张图打开还是这一档。
     @Published var loupeZoom: CGFloat = EditorDocument.rememberedLoupeZoom()
+    /// 放大镜镜面形状（矩形 / 圆形）。用户当天追加：「矩形 2X，矩形 3X，圆形 2X，圆形 3X」。
+    @Published var loupeStyle: LoupeStyle = EditorDocument.rememberedLoupeStyle()
     /// 当前选中的标注（"选择"工具点选；⌫ 删除；拖动移动）
     @Published var selectedID: UUID?
     /// 截图美化（Xnapper 式套壳）；nil = 关闭。底图不动，渲染时往外套
@@ -86,6 +88,20 @@ final class EditorDocument: ObservableObject {
 
     static func rememberLoupeZoom(_ zoom: CGFloat, _ defaults: UserDefaults = .standard) {
         defaults.set(Double(zoom), forKey: lastLoupeZoomKey)
+    }
+
+    /// 镜面形状的粘性状态（矩形 / 圆形）。存字符串原始值，别存枚举序号 ——
+    /// 以后枚举里插一项，序号就全错位了。
+    static let lastLoupeStyleKey = "boxshot.lastLoupeStyle"
+
+    static func rememberedLoupeStyle(_ defaults: UserDefaults = .standard) -> LoupeStyle {
+        guard let raw = defaults.string(forKey: lastLoupeStyleKey),
+              let style = LoupeStyle(rawValue: raw) else { return .rect }
+        return style
+    }
+
+    static func rememberLoupeStyle(_ style: LoupeStyle, _ defaults: UserDefaults = .standard) {
+        defaults.set(style.rawValue, forKey: lastLoupeStyleKey)
     }
 
     /// 字号换算：下拉给的是**视图点**，形状里存的是**图像像素**。
@@ -187,12 +203,17 @@ final class EditorDocument: ObservableObject {
     /// 字号只对文字生效：选中一个矩形时改字号，既不该动它、也不该白压一个撤销点。
     /// 所以这里先算出"改完长什么样"，跟原来一模一样就直接返回。
     func applyToSelected(color: RGBColor? = nil, lineWidth: CGFloat? = nil,
-                         fontSize: CGFloat? = nil, zoom: CGFloat? = nil) {
+                         fontSize: CGFloat? = nil, zoom: CGFloat? = nil,
+                         loupeStyle: LoupeStyle? = nil) {
         if color != nil { self.color = color! }
         if let lineWidth { self.lineWidth = lineWidth }
         if let zoom {
             self.loupeZoom = zoom
             Self.rememberLoupeZoom(zoom)
+        }
+        if let loupeStyle {
+            self.loupeStyle = loupeStyle
+            Self.rememberLoupeStyle(loupeStyle)
         }
         guard let selectedID, let idx = shapes.firstIndex(where: { $0.id == selectedID }) else { return }
         var updated = shapes[idx]
@@ -200,6 +221,7 @@ final class EditorDocument: ObservableObject {
         if let lineWidth { updated.lineWidth = lineWidth }
         if let fontSize, updated.tool == .text { updated.fontSize = fontSize }
         if let zoom, updated.tool == .loupe { updated.zoom = zoom }
+        if let loupeStyle, updated.tool == .loupe { updated.loupeStyle = loupeStyle }
         guard updated != shapes[idx] else { return }
         pushUndo(shapes)
         shapes[idx] = updated
@@ -629,8 +651,11 @@ struct EditorView: View {
                     draftStart = p
                     draft = AnnotationShape(tool: doc.tool, points: [p],
                                             color: doc.color, lineWidth: doc.lineWidth)
-                    // 放大镜：落笔时就定下当前倍数（之后还能在工具条上改）
-                    if doc.tool == .loupe { draft?.zoom = doc.loupeZoom }
+                    // 放大镜：落笔时就定下当前镜面与倍数（之后还能在工具条上改）
+                    if doc.tool == .loupe {
+                        draft?.zoom = doc.loupeZoom
+                        draft?.loupeStyle = doc.loupeStyle
+                    }
                 }
             }
             .onEnded { _ in
@@ -885,16 +910,20 @@ struct EditorView: View {
             }
 
         case .loupe:
-            // 与 CG 渲染器同一套几何（`loupeSourceRect` / `loupeOutputRect`）：
-            // 源区域裁出来，放大画进"放大后的框"，再描一圈圆角边框。
+            // 与 CG 渲染器同一套几何（`loupeSampleRect` / `loupeOutputRect` / `loupeStyle`）：
+            // 取样区域裁出来，放大画进"放大后的框"，再描一圈边框（矩形圆角 / 圆形椭圆）。
             guard let out = shape.loupeOutputRect,
-                  let source = shape.loupeSourceRect else { return }
+                  let sampleRect = shape.loupeSampleRect else { return }
             let bounds = CGRect(origin: .zero, size: doc.imageSize)
-            let sample = source.intersection(bounds).integral
+            let sample = sampleRect.intersection(bounds).integral
             guard sample.width >= 1, sample.height >= 1,
                   let cropped = doc.baseImage.cropping(to: sample) else { return }
-            let radius = min(12, min(out.width, out.height) / 6)
-            let lens = Path(roundedRect: out, cornerRadius: radius)
+            let lens: Path
+            if shape.loupeStyle == .circle {
+                lens = Path(ellipseIn: out)
+            } else {
+                lens = Path(roundedRect: out, cornerRadius: min(12, min(out.width, out.height) / 6))
+            }
             context.drawLayer { layer in
                 layer.clip(to: lens)
                 layer.draw(Image(decorative: cropped, scale: 1), in: out)
@@ -1178,20 +1207,33 @@ struct EditorView: View {
 
     /// 倍数下拉。跟字号同一个思路：**只在用得上时出现**，不占常驻宽度
     /// （工具条早就超过 1000pt，常驻一个只在放大镜时才有意义的控件不值）。
+    /// 一档一项、四个组合（矩形 2× / 矩形 3× / 圆形 2× / 圆形 3×）——
+    /// 用户 2026-11-05 追加口径，别拆成两个下拉（形状一个、倍数一个），
+    /// 那样每次换镜面要点两下。
     private var loupeZoomMenu: some View {
         Menu {
-            ForEach(Array(EditorDocument.loupeZoomOptions.enumerated()), id: \.offset) { _, zoom in
-                Button { setLoupeZoom(zoom) } label: { Text("\(Int(zoom))×") }
+            ForEach(LoupeStyle.allCases) { style in
+                ForEach(Array(EditorDocument.loupeZoomOptions.enumerated()), id: \.offset) { _, zoom in
+                    Button {
+                        setLoupe(style: style, zoom: zoom)
+                    } label: {
+                        Text("\(style.title) \(Int(zoom))×")
+                    }
+                }
             }
         } label: {
-            Text("\(Int(currentLoupeZoom))×")
-                .font(.system(size: 11, weight: .medium))
-                .monospacedDigit()
-                .frame(width: 30, alignment: .leading)
+            HStack(spacing: 4) {
+                Image(systemName: currentLoupeStyle.symbol)
+                    .font(.system(size: 11))
+                Text("\(Int(currentLoupeZoom))×")
+                    .font(.system(size: 11, weight: .medium))
+                    .monospacedDigit()
+            }
+            .frame(width: 48, alignment: .leading)
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
-        .help("放大倍数（只作用于放大镜）：2× / 3×")
+        .help("放大镜：矩形 2× / 矩形 3× / 圆形 2× / 圆形 3×")
     }
 
     /// 下拉显示哪一档：选中放大镜就看**那条标注**，否则看默认值。
@@ -1201,10 +1243,16 @@ struct EditorView: View {
         return doc.loupeZoom
     }
 
-    /// 改倍数：有选中的放大镜就改它并记成默认档，否则只改默认档
+    /// 镜面形状跟倍数同一个口径：选中放大镜看它自己的，否则看默认值
+    private var currentLoupeStyle: LoupeStyle {
+        if let shape = doc.selectedShape, shape.tool == .loupe { return shape.loupeStyle }
+        return doc.loupeStyle
+    }
+
+    /// 换镜面 / 倍数：有选中的放大镜就改它并记成默认档，否则只改默认档
     /// （`applyToSelected` 里两件事一起做，包括写 UserDefaults）。
-    private func setLoupeZoom(_ zoom: CGFloat) {
-        doc.applyToSelected(zoom: zoom)
+    private func setLoupe(style: LoupeStyle, zoom: CGFloat) {
+        doc.applyToSelected(zoom: zoom, loupeStyle: style)
     }
 }
 

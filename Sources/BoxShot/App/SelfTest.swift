@@ -1282,6 +1282,69 @@ enum SelfTest {
                 zoomed.zoom = 3
                 check("倍数进签名（撤销栈去重不会误判）", zoomed.signature != lens.signature)
 
+                // ── 镜面（用户 2026-11-05 追加「矩形 2X，矩形 3X，圆形 2X，圆形 3X」）──
+                // 形状与倍数是**正交**的两个字段，界面摊成 4 个组合的下拉。
+                check("镜面给两种：矩形 / 圆形",
+                      LoupeStyle.allCases == [.rect, .circle])
+                check("镜面文案与图标齐全",
+                      LoupeStyle.rect.title == "矩形" && LoupeStyle.rect.symbol == "rectangle"
+                        && LoupeStyle.circle.title == "圆形" && LoupeStyle.circle.symbol == "circle")
+                check("放大镜默认是矩形", lens.loupeStyle == .rect)
+                // 矩形：取样就是源区域本身，一点都不裁
+                check("矩形取样 = 源区域",
+                      lens.loupeSampleRect == CGRect(x: 100, y: 50, width: 100, height: 100))
+
+                // 非正方形源区域 (0,0)-(100,40)：圆形直接塞进圆里只能拉伸或裁边，
+                // 所以取短边内切正方形 40×40，中心不动。
+                var round = AnnotationShape(tool: .loupe,
+                                            points: [CGPoint(x: 0, y: 0), CGPoint(x: 100, y: 40)],
+                                            color: .red, lineWidth: 3)
+                round.loupeStyle = .circle
+                round.zoom = 2
+                check("圆形取样 = 短边内切正方形（100×40 → 40×40）",
+                      round.loupeSampleRect == CGRect(x: 30, y: 0, width: 40, height: 40))
+                check("圆形取样中心不动（50, 20）",
+                      round.loupeSampleRect?.midX == 50 && round.loupeSampleRect?.midY == 20)
+                check("圆形输出框是正方形（40×40 放大 2 倍 = 80×80）",
+                      round.loupeOutputRect == CGRect(x: 10, y: -20, width: 80, height: 80))
+                // 方形源区域上，圆形与矩形的取样结果完全一致（不该多裁）
+                var squareRound = lens
+                squareRound.loupeStyle = .circle
+                check("方形源区域上圆形取样不改尺寸",
+                      squareRound.loupeSampleRect == lens.loupeSampleRect)
+                // 形状要进签名：不然"换镜面"在撤销栈里会被当成没改动
+                var recast = lens
+                recast.loupeStyle = .circle
+                check("镜面进签名（撤销栈去重不会误判）", recast.signature != lens.signature)
+
+                // ── 正圆：拖节点也不能拖成椭圆（用户口径「圆形放大镜是正圆」）──
+                // 只靠"取样取短边"能保证画出来是圆，但拖一条边时圆会纹丝不动
+                // （源区域变 300×200 → 内切回 200×200），手感像坏掉。
+                // out 是 (50,0,200,200)：拖右下角到 (450,300) 时 x 差 400、y 差 300，
+                // 取较大者 400 → 正方形 (50,0,400,400)。
+                var roundLens = lens
+                roundLens.loupeStyle = .circle
+                let roundCorner = roundLens.adjusting(handle: 4, to: CGPoint(x: 450, y: 300))
+                check("圆形拖角：框仍是正方形（取两个方向里大的那个）",
+                      roundCorner.loupeOutputRect == CGRect(x: 50, y: 0, width: 400, height: 400))
+                check("圆形拖角：对角固定（左上还是 50,0）",
+                      roundCorner.loupeOutputRect?.minX == 50 && roundCorner.loupeOutputRect?.minY == 0)
+                // 拖右边缘（节点 3）到 x=400：右边 400、左边固定 50 → 边长 350，
+                // 上下以原中心 y=100 对称 → (50, -75, 350, 350)
+                let roundEdge = roundLens.adjusting(handle: 3, to: CGPoint(x: 400, y: 999))
+                check("圆形拖边：边长跟手（右边缘到 400 → 350）",
+                      roundEdge.loupeOutputRect == CGRect(x: 50, y: -75, width: 350, height: 350))
+                check("圆形拖边：源区域同步是正方形（175×175）",
+                      roundEdge.loupeSourceRect?.width == 175 && roundEdge.loupeSourceRect?.height == 175)
+                // 对照组：同样两下拖在矩形镜面上就该是非正方形 —— 否则上面几条证明不了"是圆在起作用"
+                let rectEdge = lens.adjusting(handle: 3, to: CGPoint(x: 400, y: 999))
+                check("矩形拖边：框跟着变形（对照，不是正方）",
+                      rectEdge.loupeOutputRect == CGRect(x: 50, y: 0, width: 350, height: 200))
+                // 再拖也回不到"非正方"：任意两点各拖一次都要保持相等
+                let roundTwice = roundCorner.adjusting(handle: 1, to: CGPoint(x: 999, y: -40))
+                check("圆形连着拖两下仍是正圆",
+                      roundTwice.loupeOutputRect.map { $0.width == $0.height } == true)
+
                 // 记忆档位（跟线宽 / 字号同一套口径）
                 let zoomSuite = "com.pcxx.boxshot.selftest.loupe"
                 let zoomDefaults = UserDefaults(suiteName: zoomSuite)!
@@ -1289,6 +1352,9 @@ enum SelfTest {
                 check("没选过时是 2×", EditorDocument.rememberedLoupeZoom(zoomDefaults) == 2)
                 EditorDocument.rememberLoupeZoom(3, zoomDefaults)
                 check("记住的 3× 读得回来", EditorDocument.rememberedLoupeZoom(zoomDefaults) == 3)
+                check("没选过镜面时是矩形", EditorDocument.rememberedLoupeStyle(zoomDefaults) == .rect)
+                EditorDocument.rememberLoupeStyle(.circle, zoomDefaults)
+                check("记住的圆形读得回来", EditorDocument.rememberedLoupeStyle(zoomDefaults) == .circle)
                 zoomDefaults.removePersistentDomain(forName: zoomSuite)
 
                 // 只验几何等于没验"画没画出来"：底图是全黑 + 左边缘 3px 白竖条（x 2..5），
@@ -1312,6 +1378,46 @@ enum SelfTest {
                     }
                 } else {
                     check("放大镜验像素用的底图能建出来", false)
+                }
+
+                // 「圆形」不能只验几何：椭圆裁切写错（比如仍然走 roundedRect）几何照样对，
+                // 但画面会是个矩形。底图 200×200 黑底 + 两块白方块，源区域取左上
+                // (0,0)-(100,100)、2 倍放大后输出框 (-50,-50)-(150,150)；椭圆内接于输出框，
+                // 所以圆心 (50,50)、半径是 **100**（不是取样半径 50 —— 这里最容易算错）：
+                //   · (50,50) 取到源区域正中那块白 (40..60) → 镜内必须有内容
+                //   · (140,140) 离圆心 127.3 > 100，在椭圆外、但仍在输出框内（圆角 12，
+                //     它的圆角圆心是 (138,138)，(140,140) 距它 2.8 → 算框内）；
+                //     它对应的源点是 (95,95)（第二块白 88..100）。
+                //     圆形不画 → 留底图黑；(140,140) 本身是黑的，所以圆形下必须是黑。
+                // 同一组参数换成矩形就该是白 —— 两条一起才能证明"是形状在起作用"。
+                if let styleBase = Self.loupeStyleBaseImage() {
+                    for style in LoupeStyle.allCases {
+                        let styleDoc = EditorDocument(image: styleBase)
+                        var lensShape = AnnotationShape(tool: .loupe,
+                                                        points: [CGPoint(x: 0, y: 0),
+                                                                 CGPoint(x: 100, y: 100)],
+                                                        color: .red, lineWidth: 0)
+                        lensShape.zoom = 2
+                        lensShape.loupeStyle = style
+                        styleDoc.shapes = [lensShape]
+                        guard let renderedStyle = styleDoc.rendered(),
+                              let styleBytes = Self.pixelBytes(renderedStyle) else {
+                            check("放大镜（\(style.title)）能渲染出图", false)
+                            continue
+                        }
+                        check("放大镜（\(style.title)）镜内透出取样内容",
+                              Self.brightness(styleBytes, x: 50, y: 50,
+                                              width: renderedStyle.width) > 200)
+                        let cornerBright = Self.brightness(styleBytes, x: 140, y: 140,
+                                                           width: renderedStyle.width)
+                        if style == .circle {
+                            check("圆形镜面：框角不铺（保持底图黑）", cornerBright < 60)
+                        } else {
+                            check("矩形镜面：框角同样铺内容（对照组）", cornerBright > 200)
+                        }
+                    }
+                } else {
+                    check("放大镜验镜面用的底图能建出来", false)
                 }
             }
 
@@ -2126,6 +2232,25 @@ enum SelfTest {
         ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
         ctx.setFillColor(CGColor(gray: 1, alpha: 1))
         ctx.fill(CGRect(x: 2, y: 0, width: 3, height: h))
+        return ctx.makeImage()
+    }
+
+    /// 200×200 黑底 + 两块白方块（40..60 与 88..100）：用来验放大镜的**镜面形状**。
+    /// 为什么需要两张：`loupeBaseImage` 是 100×100、白条贴着左边缘，只够验"有没有放大"；
+    /// 要分辨"圆 vs 矩形"得让输出框的角上**有东西可铺**，且底图那儿是黑的。
+    private static func loupeStyleBaseImage() -> CGImage? {
+        let w = 200, h = 200
+        guard let ctx = CGContext(data: nil, width: w, height: h,
+                                  bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                                    | CGBitmapInfo.byteOrder32Little.rawValue) else { return nil }
+        ctx.setFillColor(CGColor(gray: 0, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+        ctx.setFillColor(CGColor(gray: 1, alpha: 1))
+        // CG 是左下原点，矩形按"顶部 y"写就得换成 h - (top + height)
+        ctx.fill(CGRect(x: 40, y: h - 60, width: 20, height: 20))
+        ctx.fill(CGRect(x: 88, y: h - 100, width: 12, height: 12))
         return ctx.makeImage()
     }
 

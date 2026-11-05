@@ -1664,37 +1664,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)!
         ctx.setFillColor(CGColor(srgbRed: 0.97, green: 0.97, blue: 0.98, alpha: 1))
         ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
-        // 棋盘格：左上角 24×24 个 8px 格子。
+        // 棋盘格：左上 (40,40)-(420,440) 的 8px 格子（800 宽 × 900 高不够，这里铺 46×46 格）。
         // 🔴 CG 是左下原点、标注几何是左上原点：`y = 540 - row*8` 才能把它摆在
-        // 左上 (60,60)-(252,252) —— 写成 `320 - row*8` 会落到画面中部，
+        // 左上方 —— 写成 `320 - row*8` 会落到画面中部，
         // 于是放大镜取样取到的是空白背景，看着像"放大镜没画出来"。
-        for row in 0..<24 {
-            for col in 0..<24 {
+        for row in 0..<46 {
+            for col in 0..<46 {
                 ctx.setFillColor(col % 2 == row % 2
                                  ? CGColor(srgbRed: 0.20, green: 0.45, blue: 0.85, alpha: 1)
                                  : CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
-                ctx.fill(CGRect(x: 60 + col * 8, y: 540 - row * 8, width: 8, height: 8))
+                ctx.fill(CGRect(x: 40 + col * 8, y: 540 - row * 8, width: 8, height: 8))
             }
         }
         // 右下一块纯色 + 一条细线，用来看边框和圆角压在大色块上的观感
         ctx.setFillColor(CGColor(srgbRed: 0.93, green: 0.55, blue: 0.20, alpha: 1))
-        ctx.fill(CGRect(x: 420, y: 120, width: 320, height: 200))
+        ctx.fill(CGRect(x: 520, y: 120, width: 320, height: 200))
         ctx.setFillColor(CGColor(srgbRed: 0.15, green: 0.15, blue: 0.18, alpha: 1))
-        ctx.fill(CGRect(x: 440, y: 160, width: 280, height: 4))
+        ctx.fill(CGRect(x: 540, y: 160, width: 280, height: 4))
         guard let image = ctx.makeImage() else { return }
 
-        // 两个放大镜都盖在棋盘格上：格子在 2× 里变大两倍、3× 里变大三倍，
-        // 与棋盘格本体同框对比，倍数对不对一眼就能看出来。
-        var two = AnnotationShape(tool: .loupe,
-                                  points: [CGPoint(x: 80, y: 80), CGPoint(x: 140, y: 130)],
-                                  color: .red, lineWidth: 4)
-        two.zoom = 2
-        var three = AnnotationShape(tool: .loupe,
-                                    points: [CGPoint(x: 200, y: 190), CGPoint(x: 225, y: 215)],
+        // 四种组合各来一个（用户 2026-11-05：「矩形 2X，矩形 3X，圆形 2X，圆形 3X」）：
+        // 镜框都压在棋盘格上，格子在 2× 里大一倍、3× 里大两倍，同框对比一眼能看出来；
+        // 圆形的边界必须干净（不能出现把矩形硬塞进圆的拉伸感）。
+        var rect2 = AnnotationShape(tool: .loupe,
+                                    points: [CGPoint(x: 60, y: 80), CGPoint(x: 120, y: 120)],
+                                    color: .red, lineWidth: 4)
+        rect2.zoom = 2
+        var rect3 = AnnotationShape(tool: .loupe,
+                                    points: [CGPoint(x: 190, y: 80), CGPoint(x: 210, y: 100)],
                                     color: .blue, lineWidth: 4)
-        three.zoom = 3
-        model.openEditorForDiagnostics(image: image, shapes: [two, three],
-                                       select: two.id, tool: .loupe)
+        rect3.zoom = 3
+        var circle2 = AnnotationShape(tool: .loupe,
+                                      points: [CGPoint(x: 60, y: 200), CGPoint(x: 100, y: 240)],
+                                      color: .green, lineWidth: 4)
+        circle2.zoom = 2
+        circle2.loupeStyle = .circle
+        var circle3 = AnnotationShape(tool: .loupe,
+                                      points: [CGPoint(x: 180, y: 220), CGPoint(x: 200, y: 240)],
+                                      color: .orange, lineWidth: 4)
+        circle3.zoom = 3
+        circle3.loupeStyle = .circle
+        model.openEditorForDiagnostics(image: image, shapes: [rect2, rect3, circle2, circle3],
+                                       select: rect2.id, tool: .loupe)
     }
 
     private func showDiagnosticOverlay(tall: Bool = false, colors: Bool = false) {        let w = 800, h = 500
