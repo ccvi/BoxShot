@@ -731,13 +731,30 @@ final class RegionSelector: NSObject {
                 .foregroundColor: NSColor.white.withAlphaComponent(0.92),
             ]
             let size = (text as NSString).size(withAttributes: attributes)
-            var origin = CGPoint(x: rect.minX, y: rect.maxY + 10)
-            if origin.y + size.height + 10 > bounds.height { origin.y = rect.minY - size.height - 18 }
-            let box = CGRect(x: origin.x, y: origin.y, width: size.width + 16, height: size.height + 8)
+            let boxHeight = size.height + 8
+            let origin = CGPoint(x: rect.minX,
+                                 y: Self.hintOriginY(selection: rect, boxHeight: boxHeight))
+            let box = CGRect(x: origin.x, y: origin.y, width: size.width + 16, height: boxHeight)
             ctx.setFillColor(NSColor.black.withAlphaComponent(0.7).cgColor)
             ctx.addPath(CGPath(roundedRect: box, cornerWidth: 5, cornerHeight: 5, transform: nil))
             ctx.fillPath()
             (text as NSString).draw(at: CGPoint(x: box.minX + 8, y: box.minY + 4), withAttributes: attributes)
+        }
+
+        /// 尺寸 / 操作提示框的 y 坐标（视图坐标是翻转的：y 往下长）。
+        ///
+        /// 用户口径（2026-11-06）：**默认在选区上面**，上面没位置了才到框下面。
+        /// 以前是反的（先贴 maxY 往下走，撞到底边才翻到上面），于是框一拉出来提示就压在
+        /// 选区下方的画面上 —— 而那通常是用户更想看清楚的那块内容。
+        ///
+        /// `topMargin` 留 8：框贴着 y=0 会被屏幕边 / 刘海吃掉一半，看着像没画。
+        /// 抽成纯函数是为了自检能直接验"上下两档 + 临界点"，不用真起遮罩。
+        static func hintOriginY(selection: CGRect, boxHeight: CGFloat,
+                                topMargin: CGFloat = 8, gap: CGFloat = 10) -> CGFloat {
+            let above = selection.minY - gap - boxHeight
+            if above >= topMargin { return above }
+            // 上面放不下（选区贴着屏幕顶）：落到框下面
+            return selection.maxY + gap
         }
 
         /// 底部居中提示条（没有选区时显示，告诉用户还能怎么退出）
@@ -774,8 +791,11 @@ final class RegionSelector: NSObject {
                 .foregroundColor: NSColor.white,
             ]
             let size = (text as NSString).size(withAttributes: attributes)
-            let labelRect = CGRect(x: rect.minX, y: rect.minY - size.height - 10,
-                                   width: size.width + 16, height: size.height + 8)
+            let boxHeight = size.height + 8
+            // 和 drawHint 同一套落位：默认在选区上面，上面放不下才到下面
+            let labelRect = CGRect(x: rect.minX,
+                                   y: Self.hintOriginY(selection: rect, boxHeight: boxHeight),
+                                   width: size.width + 16, height: boxHeight)
             ctx.setFillColor(NSColor.black.withAlphaComponent(0.7).cgColor)
             let path = CGPath(roundedRect: labelRect, cornerWidth: 5, cornerHeight: 5, transform: nil)
             ctx.addPath(path)

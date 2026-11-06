@@ -191,6 +191,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.runEscWaitDiagnostics()
             }
         }
+        // 诊断入口：--maskhint 拖出一个选区后**不松手**，让尺寸/操作提示留在屏上，
+        // 外部 `screencapture -x` 拍下来验「提示默认在框上面」。
+        // 触发文件里写一个数字 = 拖拽起点的 y（默认 300 走"框在中间"，写 20 走"贴着屏幕顶"）。
+        let hintTrigger = "/tmp/boxshot-maskhint.trigger"
+        if CommandLine.arguments.contains("--maskhint")
+            || FileManager.default.fileExists(atPath: hintTrigger) {
+            let startY = (try? String(contentsOfFile: hintTrigger, encoding: .utf8))
+                .flatMap { Double($0.trimmingCharacters(in: .whitespacesAndNewlines)) } ?? 300
+            try? FileManager.default.removeItem(atPath: hintTrigger)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                self?.runMaskHintDiagnostics(startY: CGFloat(startY))
+            }
+        }
         // 诊断入口：--dragtest 用合成鼠标拖一次框，验「松手即截图」这条路
         // （用户明确要求去掉"单击选区内 / 回车"那一步，这条流程必须端到端跑一遍）。
         let dragTrigger = "/tmp/boxshot-dragtest.trigger"
@@ -519,8 +532,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    // ── 诊断：合成鼠标拖框，验「松手即截图」 ─────────────────
+    // ── 诊断：拖出选区但**不松手**，验提示落位 ────────────────
 
+    /// 和 `--dragtest` 同一条合成事件的走法，区别只在**不发 mouseUp**：
+    /// 提示条只在 `phase == .dragging` 时画，一松手就没了，外部截图根本拍不到。
+    /// 所以这里拖完就停在那儿（`exitGraceSeconds` 秒后自己退出），留给
+    /// `screencapture -x` 去拍。
+    private func runMaskHintDiagnostics(startY: CGFloat) {
+        let logURL = URL(fileURLWithPath: "/tmp/boxshot-maskhint.log")
+        try? "".write(to: logURL, atomically: true, encoding: .utf8)
+        func log(_ text: String) {
+            NSLog("[BoxShot][maskhint] %@", text)
+            guard let handle = try? FileHandle(forWritingTo: logURL) else { return }
+            handle.seekToEndOfFile()
+            handle.write("\(text)\n".data(using: .utf8)!)
+            try? handle.close()
+        }
+
+        let src = CGEventSource(stateID: .hidSystemState)
+        func post(_ type: CGEventType, _ p: CGPoint) {
+            CGEvent(mouseEventSource: src, mouseType: type,
+                    mouseCursorPosition: p, mouseButton: .left)?.post(tap: .cghidEventTap)
+        }
+
+        model.perform(.regionShot)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            let start = CGPoint(x: 420, y: startY)
+            let end   = CGPoint(x: 900, y: startY + 320)
+            post(.mouseMoved, start)
+            post(.leftMouseDown, start)
+            var step = 0
+            let total = 10
+            let timer = Timer(timeInterval: 0.05, repeats: true) { t in
+                step += 1
+                let f = CGFloat(step) / CGFloat(total)
+                post(.leftMouseDragged,
+                     CGPoint(x: start.x + (end.x - start.x) * f,
+                             y: start.y + (end.y - start.y) * f))
+                guard step >= total else { return }
+                t.invalidate()
+                log("已拖到 \(Int(end.x - start.x))×\(Int(end.y - start.y))，起点 y=\(Int(start.y))，"
+                    + "**故意不松手**：提示条留在屏上，去截图")
+                // 12 秒后自己退出：没人来截图也不会一直挂着遮罩
+                DispatchQueue.main.asyncAfter(deadline: .now() + 12) {
+                    log("超时退出（遮罩还开着是正常的，这个入口只看提示落位）")
+                    exit(0)
+                }
+            }
+            RunLoop.main.add(timer, forMode: .common)
+        }
+    }
+
+    // ── 诊断：合成鼠标拖框，验「松手即截图」 ─────────────────
     /// 打开遮罩 → 用 CGEvent 合成一次左键拖动 → 松手。
     /// 判定标准：遮罩自己收掉，且浮层编辑器带着一个非空框冒出来。
     /// 之所以要合成而不是读代码：这条路径上有三件事接力（mouseUp → confirm →

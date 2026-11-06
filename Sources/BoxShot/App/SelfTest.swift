@@ -283,6 +283,32 @@ enum SelfTest {
         check("选区内拖动不算确认（>2pt）",
               !RegionSelector.OverlayView.isTap(from: .zero, to: CGPoint(x: 40, y: 0)))
 
+        // ── 尺寸 / 操作提示的落位（用户 2026-11-06：「默认在框上面显示，上面没位置了
+        //    才到框下面」）。视图坐标是翻转的（y 往下长），所以"上面"是比 minY 更小的 y。
+        do {
+            let box: CGFloat = 22      // 11pt 字号 + 上下各 4pt 内边距
+            let gap: CGFloat = 10
+            // 选区在屏幕中间：提示整块落在选区上方，且不压到选区
+            let middle = CGRect(x: 100, y: 400, width: 300, height: 200)
+            let aboveY = RegionSelector.OverlayView.hintOriginY(selection: middle, boxHeight: box)
+            check("提示默认在选区**上面**", aboveY + box <= middle.minY)
+            check("提示与选区之间留 10pt 间隙", abs(middle.minY - (aboveY + box) - gap) < 0.01)
+            // 选区贴着屏幕顶（minY=12 放不下 22+10）：落到框下面
+            let huggingTop = CGRect(x: 100, y: 12, width: 300, height: 200)
+            let belowY = RegionSelector.OverlayView.hintOriginY(selection: huggingTop, boxHeight: box)
+            check("上面放不下才落到选区下面",
+                  belowY == huggingTop.maxY + gap && belowY > huggingTop.maxY)
+            // 临界点：minY 刚好 8(topMargin)+10(gap)+22(box) = 40 时仍在上面；
+            // 少 1pt 就翻到下面 —— 边界写错会让提示半截被屏幕顶切掉
+            let exact = CGRect(x: 0, y: 40, width: 100, height: 100)
+            check("顶边刚好够放时仍然在上面",
+                  RegionSelector.OverlayView.hintOriginY(selection: exact, boxHeight: box) == 8)
+            let oneLess = CGRect(x: 0, y: 39, width: 100, height: 100)
+            check("差 1pt 放不下就翻到下面",
+                  RegionSelector.OverlayView.hintOriginY(selection: oneLess, boxHeight: box)
+                    == oneLess.maxY + gap)
+        }
+
         // ── OCR 行聚类 ──
         do {
             let observations = [
