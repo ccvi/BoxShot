@@ -22,6 +22,9 @@ struct ScreenWindowInfo: Equatable {
     var frame: CGRect        // 全局坐标
     var ownerName: String
     var title: String?
+    /// 属主进程号。智能元素截取要用它做"只在这个应用里查元素"的 AX 命中 ——
+    /// 整屏遮罩盖在最上面，全系统级命中查到的永远是我们自己那块遮罩。
+    var ownerPID: pid_t?
 }
 
 enum ScreenCapture {
@@ -82,8 +85,10 @@ enum ScreenCapture {
             guard frame.width >= 60, frame.height >= 40 else { continue } // 跳过小浮窗
             let owner = info[kCGWindowOwnerName as String] as? String ?? ""
             let title = info[kCGWindowName as String] as? String
+            let pid = info[kCGWindowOwnerPID as String] as? Int32
             result.append(ScreenWindowInfo(windowID: windowID, frame: frame,
-                                           ownerName: owner, title: title))
+                                           ownerName: owner, title: title,
+                                           ownerPID: pid))
         }
         return result
     }

@@ -62,25 +62,61 @@ private struct ResultTextView: View {
     var showCopy: Bool = true
     var markdown: String? = nil
 
+    /// 译文（nil = 显示原文）。原文**永远留着**，所以"切回原文"不会丢东西。
+    @State private var translated: String?
+    /// 目标语言：记住过就用记住的，没记住过**按这段文字本身猜**
+    /// （英文内容默认译成中文，中文内容默认译成英文 —— 否则会撞上"同语种翻译"失败）
+    @State private var target: TranslateTarget
+
+    private var shown: String { translated ?? text }
+
+    init(text: String, showCopy: Bool = true, markdown: String? = nil) {
+        self.text = text
+        self.showCopy = showCopy
+        self.markdown = markdown
+        // 目标语言在这里定：`@State` 的初值只能靠 `_target` 传进去
+        _target = State(initialValue: TranslateTarget.initial(for: text))
+    }
+
     var body: some View {
         VStack(spacing: 0) {
+            if translated != nil {
+                HStack(spacing: 6) {
+                    Image(systemName: "character.bubble")
+                    Text("译文（\(target.title)）").font(.system(size: 11, weight: .medium))
+                    Text("原文 \(text.count) 字").font(.system(size: 11)).opacity(0.7)
+                    Spacer()
+                }
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 16)
+                .padding(.top, 10)
+            }
             ScrollView {
-                Text(text)
+                Text(shown)
                     .font(.system(size: 14))
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(16)
             }
             Divider()
-            HStack {
-                Spacer()
+            HStack(spacing: 8) {
+                // 翻译（macOS 15 起才有系统离线翻译框架；14 上干脆不显示，
+                // 而不是摆一个点了报错的按钮）
+                #if canImport(Translation)
+                if #available(macOS 15.0, *) {
+                    TranslateBar(sourceText: text, translated: $translated, target: $target)
+                }
+                #endif
+                Spacer(minLength: 12)
                 if showCopy {
-                    Button("复制") { Support.copyTextToClipboard(text) }
+                    // 复制"当前看到的那份"：显示译文就复制译文，不会偷偷复制原文
+                    Button("复制") { Support.copyTextToClipboard(shown) }
                         .keyboardShortcut("c", modifiers: .command)
                 }
                 // 图里是表格时 OCR 会顺带重排一份 Markdown（粘贴到备忘录 /
-                // Typora 直接成表）；不是表格就没有这个按钮
-                if let markdown {
+                // Typora 直接成表）；不是表格就没有这个按钮。
+                // 译文没有 Markdown 版本（表格结构是原文重排出来的），只给原文。
+                if let markdown, translated == nil {
                     Button("复制为 Markdown") { Support.copyTextToClipboard(markdown) }
                         .help("按表格结构重排并复制（可粘贴进支持 Markdown 的编辑器）")
                 }

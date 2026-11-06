@@ -173,6 +173,8 @@ final class AppModel: ObservableObject {
             shotFullscreen(copyDirectly: false)
         case .windowShot:
             startRegionShot(copyDirectly: false, windowPickMode: true)
+        case .smartElement:
+            startSmartElementShot()
         case .captureLastRegion:
             repeatLastRegionShot()
         case .scrollShot:
@@ -306,6 +308,13 @@ final class AppModel: ObservableObject {
     /// 诊断用：选区遮罩是不是还开着（--esctest 拿它判断 Esc 到底生效没有）
     var isRegionSelectorActive: Bool { regionSelector?.isActive ?? false }
 
+    /// 诊断用：元素模式下当前高亮的是什么（--elementtest 打这一行）
+    var elementPickReport: String { regionSelector?.elementPickReport ?? "无选区对象" }
+    /// 诊断用：绕过事件层直接探测一次元素
+    func probeElementForDiagnostics(atGlobal p: CGPoint) {
+        regionSelector?.probeElementForDiagnostics(atGlobal: p)
+    }
+
     /// 诊断用：开一次区域遮罩（`--memprobe` 量它是多少显存 —— 整屏窗口 = 一块
     /// 3420×2214 的 CA drawable ≈ 57.8MB，必须确认它取消后真的还回去）
     func beginRegionSelectorForDiagnostics() {
@@ -335,6 +344,41 @@ final class AppModel: ObservableObject {
         guard let selector = regionSelector else { return }
         regionSelector = nil
         if selector.isActive { selector.cancel() }
+    }
+
+    // ── 智能元素截取 ────────────────────────────────────────
+
+    /// 「智能元素截取」：光标移到哪，就把哪那个 UI 元素的框高亮出来，点一下就截它。
+    ///
+    /// 元素级命中只能靠辅助功能（AX），所以有两条路：
+    /// · 已授权 → 开元素模式，AX 查不到时（桌面空白）不画高亮，但**拖框照样能用**；
+    /// · 未授权 → 弹一次系统授权提示，同时**退化成窗口级**（复用窗口截图那套 SCK 高亮）。
+    ///   退化而不是直接拒绝：用户此刻就是想截点东西，先给他能用的，再告诉他怎么升级。
+    private func startSmartElementShot() {
+        guard ScreenCapture.ensurePermission() else { return }
+        guard editorController == nil || !editorController!.isVisible else { return }
+        discardActiveSelector()
+        pendingCopyDirectly = false
+        pendingPipeline = .editor
+        regionMode = .capture
+
+        let trusted = ElementProbe.isTrusted
+        var note: String?
+        if !trusted {
+            // 系统对话框只弹一次；用户点过"以后再说"之后这里只会返回 false
+            ElementProbe.requestAccess()
+            note = "未授权「辅助功能」，先按窗口截取"
+            NSLog("[BoxShot] 智能元素截取：AX 未授权，退化为窗口级")
+        }
+
+        let selector = RegionSelector()
+        selector.delegate = self
+        regionSelector = selector
+        selector.begin(highlightWindows: !trusted,
+                       crosshair: false,
+                       loupe: nil,
+                       elementPick: true,
+                       elementNote: note)
     }
 
     private func shotFullscreen(copyDirectly: Bool) {
@@ -542,8 +586,14 @@ final class AppModel: ObservableObject {
         return controller
     }
 
-    private func appendOCRResult(_ text: String, markdown: String? = nil) {
+    /// 诊断用：直接弹一个识别结果窗（**不碰剪贴板、不落库**）。
+    /// `--resulttest` 用它验「翻译」按钮 / 中英下拉的排布。
+    func showOCRResultForDiagnostics(_ text: String) {
         // 结果窗口始终复用同一个（新结果替换旧内容），连续识别不丢上一段
+        reuseResultWindow().show(kind: .text(text, markdown: nil), copied: true)
+    }
+
+    private func appendOCRResult(_ text: String, markdown: String? = nil) {
         let controller = reuseResultWindow()
         guard !text.isEmpty else {
             controller.show(kind: .text("（没有识别到文字）", markdown: nil), copied: false)

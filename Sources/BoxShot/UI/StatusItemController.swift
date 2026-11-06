@@ -110,6 +110,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         menu.addItem(repeatItem)
         menu.addItem(item("全屏截图", .fullscreenShot, symbol: "rectangle.inset.filled"))
         menu.addItem(item("窗口截图", .windowShot, symbol: "macwindow"))
+        // 用户 2026-11-06 的参考图里它紧挨着识别类动作；这里紧跟窗口截图更顺手 ——
+        // 它和"窗口截图"是同一件事的两个粒度（元素 / 整个窗口）
+        menu.addItem(item("智能元素截取", .smartElement, symbol: "viewfinder.circle"))
         menu.addItem(item("滚动截图", .scrollShot, symbol: "arrow.down.to.line.compact"))
         menu.addItem(item("截图历史…", nil, selector: #selector(showHistory), symbol: "clock.arrow.circlepath"))
         menu.addItem(.separator())

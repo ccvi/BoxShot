@@ -309,6 +309,155 @@ enum SelfTest {
                     == oneLess.maxY + gap)
         }
 
+        // ── 智能元素截取（用户 2026-11-06：「增加：智能元素截取的功能」）──
+        do {
+            check("动作表里有「智能元素截取」",
+                  ShotAction.smartElement.title == "智能元素截取"
+                    && ShotAction.allCases.contains(.smartElement))
+            check("新动作的 rawValue 稳定（热键 / 菜单都靠它）",
+                  ShotAction.smartElement.rawValue == "smartElement")
+
+            let display = CGRect(x: 0, y: 0, width: 1710, height: 1107)
+            // 正常元素：原样返回，且取整（AX 会给小数，截图 API 吃小数会截错像素）
+            check("正常元素矩形原样返回并取整",
+                  ElementProbe.sanitized(CGRect(x: 10.4, y: 20.6, width: 100.2, height: 40.9),
+                                         displayBounds: display)
+                    == CGRect(x: 10, y: 20, width: 101, height: 42))
+            // 元素被窗口拖到屏幕外：夹回屏内再截，不能返回一个负坐标
+            check("超过屏幕右边的元素被夹回屏内",
+                  ElementProbe.sanitized(CGRect(x: 1600, y: 100, width: 400, height: 100),
+                                         displayBounds: display)?
+                    .maxX == display.maxX)
+            // 完全在屏幕外 / 小到 1×1（焦点框、分隔线）：都不截，交给窗口级兜底
+            check("完全在屏幕外的元素不截",
+                  ElementProbe.sanitized(CGRect(x: 2000, y: 0, width: 100, height: 40),
+                                         displayBounds: display) == nil)
+            check("1×1 的装饰元素不截",
+                  ElementProbe.sanitized(CGRect(x: 100, y: 100, width: 1, height: 1),
+                                         displayBounds: display) == nil)
+            check("宽度为 0 的元素不截",
+                  ElementProbe.sanitized(CGRect(x: 100, y: 100, width: 0, height: 40),
+                                         displayBounds: display) == nil)
+
+            // 角色 → 人话（提示文案里要看得懂）
+            check("AX 角色翻成人话",
+                  ElementProbe.roleTitle(kAXWindowRole as String) == "窗口"
+                    && ElementProbe.roleTitle(kAXButtonRole as String) == "按钮"
+                    && ElementProbe.roleTitle(kAXTextFieldRole as String) == "输入框")
+            check("没翻译过的角色原样显示（不吞信息）",
+                  ElementProbe.roleTitle("AXSomethingNew") == "AXSomethingNew")
+            check("空角色给个兜底词", ElementProbe.roleTitle("") == "元素")
+
+            // 浏览器只肯给"和窗口一样大的 Group"时，名字要换成窗口名
+            let win = CGRect(x: 0, y: 34, width: 988, height: 1015)
+            check("命中和窗口一样大 → 当成整窗",
+                  ElementProbe.coversWindow(win, windowFrame: win))
+            check("AX 的 ±1pt 取整误差仍算整窗",
+                  ElementProbe.coversWindow(CGRect(x: 0, y: 34, width: 987, height: 1014),
+                                            windowFrame: win))
+            check("比窗口小的元素不算整窗",
+                  !ElementProbe.coversWindow(CGRect(x: 0, y: 34, width: 600, height: 1015),
+                                             windowFrame: win))
+            check("窗口尺寸为 0 时不当整窗（避免除零式误判）",
+                  !ElementProbe.coversWindow(.zero, windowFrame: .zero))
+
+            // 网页辅助功能开关：第一次要设，15 秒内不重复，过期要能自愈
+            // （Chromium 闲置会把树收回去，永久"已设过"就会一直只剩整窗）
+            check("从未设过 → 要设",
+                  ElementProbe.shouldSetDeepAccess(last: nil, now: 1000))
+            check("刚设过 → 不重复设",
+                  !ElementProbe.shouldSetDeepAccess(last: 1000, now: 1005))
+            check("过了 15 秒 → 允许再设一次",
+                  ElementProbe.shouldSetDeepAccess(last: 1000, now: 1015))
+            check("网页 / 标题角色也翻成人话",
+                  ElementProbe.roleTitle("AXWebArea") == "网页"
+                    && ElementProbe.roleTitle("AXHeading") == "标题")
+
+            // 命中必须盖住探测点，否则宁可退窗口级也别截错
+            check("框盖住探测点 → 接受",
+                  ElementProbe.containsPoint(CGRect(x: 66, y: 74, width: 113, height: 64),
+                                             CGPoint(x: 95, y: 90)))
+            check("框边界上也算盖住",
+                  ElementProbe.containsPoint(CGRect(x: 66, y: 74, width: 113, height: 64),
+                                             CGPoint(x: 66, y: 74)))
+            check("AX 的 ±1pt 取整误差仍算盖住",
+                  ElementProbe.containsPoint(CGRect(x: 66, y: 74, width: 113, height: 64),
+                                             CGPoint(x: 64, y: 72)))
+            check("菜单栏那种跟探测点无关的命中被拒",
+                  !ElementProbe.containsPoint(CGRect(x: 0, y: 0, width: 1710, height: 34),
+                                              CGPoint(x: 95, y: 90)))
+
+            // 网页的 AX 树是异步长出来的：先给整页 WebArea，再慢慢铺 DOM。
+            // 这种"粗命中"必须能被认出来，才谈得上"再等一等重查"。
+            let webWin = CGRect(x: 0, y: 34, width: 988, height: 1015)
+            check("整页 WebArea（网面比窗口内容还大）算粗命中",
+                  ElementProbe.isCoarse(CGRect(x: 42, y: 74, width: 942, height: 971),
+                                        windowFrame: webWin))
+            check("首页那种导航链接不算粗命中",
+                  !ElementProbe.isCoarse(CGRect(x: 66, y: 74, width: 113, height: 64),
+                                         windowFrame: webWin))
+            check("半屏的区块仍在阈值下（不误判成整页）",
+                  !ElementProbe.isCoarse(CGRect(x: 42, y: 74, width: 942, height: 550),
+                                         windowFrame: webWin))
+            check("矩形为 nil 时不算粗命中",
+                  !ElementProbe.isCoarse(nil, windowFrame: webWin))
+        }
+
+        // ── OCR 翻译（用户 2026-11-06：「可以选择翻译成中文或英文（下拉选择）」）──
+        do {
+            check("翻译目标两档：中文 / 英文",
+                  TranslateTarget.allCases.map(\.title) == ["中文", "英文"])
+            check("收起状态只显示一个字（样张是「英 ⌄」）",
+                  TranslateTarget.chinese.short == "中" && TranslateTarget.english.short == "英")
+            check("语言标识写规范（中文必须 zh-Hans）",
+                  TranslateTarget.chinese.languageIdentifier == "zh-Hans"
+                    && TranslateTarget.english.languageIdentifier == "en")
+            // 没记住过任何选择时，回落到中文（界面上"翻译"最常见的方向是英 → 中）
+            let emptySuite = "boxshot.selftest.translate.empty"
+            let emptyDefaults = UserDefaults(suiteName: emptySuite)!
+            emptyDefaults.removePersistentDomain(forName: emptySuite)
+            check("没记住过 → 回落到中文",
+                  TranslateTarget.remembered(emptyDefaults) == .chinese)
+
+            // 🔴 同语种翻译会被系统框架拒掉（实测 TranslationError/1 →
+            // 界面上一句「翻译失败：Unable to Translate」）。所以默认目标要按
+            // 文字本身猜：英文内容译成中文，中文内容译成英文。
+            check("英文内容默认译成中文",
+                  TranslateTarget.defaultFor("The Fed kept rates unchanged.") == .chinese)
+            check("中文内容默认译成英文",
+                  TranslateTarget.defaultFor("美联储维持利率不变。") == .english)
+            check("中英混排（汉字占比高）判成中文",
+                  TranslateTarget.looksChinese("我用 macOS 的 Screenshot 工具截了图"))
+            check("纯英文里的零星汉字不算中文",
+                  !TranslateTarget.looksChinese(
+                    "The app is called 截图 and it works well on macOS 26 devices"))
+            check("空文本不算中文", !TranslateTarget.looksChinese("   "))
+            check("中文标点也算中文（「」，。）",
+                  TranslateTarget.looksChinese("，。、「」"))
+            check("记住过就优先用记住的（不再按内容猜）",
+                  TranslateTarget.initial(for: "The Fed kept rates unchanged.", emptyDefaults) == .chinese
+                    && {
+                        let d = UserDefaults(suiteName: "com.pcxx.boxshot.selftest.translate2")!
+                        d.removePersistentDomain(forName: "com.pcxx.boxshot.selftest.translate2")
+                        TranslateTarget.remember(.english, d)
+                        return TranslateTarget.initial(for: "美联储维持利率不变。", d) == .english
+                    }())
+
+            let suite = "com.pcxx.boxshot.selftest.translate"
+            let defaults = UserDefaults(suiteName: suite)!
+            defaults.removePersistentDomain(forName: suite)
+            TranslateTarget.remember(.chinese, defaults)
+            check("记住的语言读得回来", TranslateTarget.remembered(defaults) == .chinese)
+            defaults.removePersistentDomain(forName: suite)
+
+            // 翻译能力跟着系统走：macOS 15 起才有 Translation 框架
+            let major = ProcessInfo.processInfo.operatingSystemVersion.majorVersion
+            check("系统翻译可用性与 macOS 版本一致（15 起步）",
+                  TranslationSupport.isAvailable == (major >= 15))
+            check("不可用时有明确说明，不是空白按钮",
+                  TranslationSupport.unavailableNote.contains("macOS 15"))
+        }
+
         // ── OCR 行聚类 ──
         do {
             let observations = [

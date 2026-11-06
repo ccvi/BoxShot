@@ -106,6 +106,7 @@ enum ShotAction: String, Codable, CaseIterable, Identifiable {
     case captureLastRegion  // 重复上次区域截图
     case fullscreenShot     // 全屏截图
     case windowShot         // 窗口截图（点选窗口）
+    case smartElement       // 智能元素截取（点一下，自动框住光标下那个 UI 元素）
     case scrollShot         // 滚动截图
     case ocrShot            // 截图 OCR
     case decodeQR           // 解码 QR / 条形码
@@ -126,6 +127,7 @@ enum ShotAction: String, Codable, CaseIterable, Identifiable {
         case .captureLastRegion: return "重复上次区域截图"
         case .fullscreenShot:    return "全屏截图"
         case .windowShot:        return "窗口截图"
+        case .smartElement:      return "智能元素截取"
         case .scrollShot:        return "滚动截图"
         case .ocrShot:           return "截图 OCR"
         case .decodeQR:          return "解码 QR/条形码"

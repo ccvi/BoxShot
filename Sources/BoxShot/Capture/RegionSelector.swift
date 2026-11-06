@@ -44,25 +44,42 @@ final class RegionSelector: NSObject {
     /// 默认**保住底图**：诊断走的是"窗口已关闭"兜底路径，底图被清了就裁不出东西。
     func finishForDiagnostics(keepBackdrop: Bool = true) { finish(keepBackdrop: keepBackdrop) }
 
+    /// 诊断用：元素模式下当前高亮的是什么
+    var elementPickReport: String { overlayView?.elementPickReport ?? "遮罩未开" }
+    /// 诊断用：绕过事件层直接查一次元素
+    func probeElementForDiagnostics(atGlobal p: CGPoint) {
+        overlayView?.probeElementForDiagnostics(atGlobal: p)
+    }
+
     /// 放大镜设置快照（nil / enabled=false 就不抓底图、也不画）
     private var loupeConfig: Loupe.Config?
     /// 整屏原图（**没有遮罩**的那一份），放大镜从它里面取像素
     private var sourceImage: CGImage?
     private var pixelScale: CGFloat = 2
+    /// 智能元素截取模式（抓底图的 Task 是异步的，参数得先存下来再传给视图）
+    private var pendingElementPick = false
+    /// 元素模式下要挂在空态提示里的一句话（例如"未授权辅助功能，已退化为窗口级"）
+    private var pendingElementNote: String?
 
     /// 🔴 顺序：**先抓底图，再上遮罩**。
     /// 反过来（先 show 再抓）抓到的是"已经被自己压暗 28%"的画面，放大镜里的
     /// 色值会整体偏暗、拿去做设计全是错的。代价是遮罩晚 ~100ms 出现。
     /// - Parameter needBackdrop: 即使不开放大镜也要抓底图（窗口点选模式要它兜底，
     ///   见 `cropBackdrop`）
+    /// - Parameter elementPick: 智能元素截取模式（光标一动就命中 AX 元素并高亮，
+    ///   单击即确认）。它和窗口点选互斥使用，但**拖动拉框仍然有效** ——
+    ///   用户在这个模式下想自己框一块时不该被挡住。
     func begin(highlightWindows: Bool, crosshair: Bool, loupe: Loupe.Config?,
-               needBackdrop: Bool = false) {
+               needBackdrop: Bool = false, elementPick: Bool = false,
+               elementNote: String? = nil) {
         guard !isActive else { return }
         guard window == nil else { return }
 
         let screen = ScreenCapture.activeScreen()
         displayID = ScreenCapture.display(for: screen)
         loupeConfig = loupe
+        self.pendingElementPick = elementPick
+        self.pendingElementNote = elementNote
         // 先占住 isActive：抓图期间再按一次热键不该叠出第二个遮罩
         isActive = true
 
@@ -81,14 +98,18 @@ final class RegionSelector: NSObject {
             self.present(screen: screen,
                          highlightWindows: highlightWindows,
                          crosshair: crosshair,
-                         image: image)
+                         image: image,
+                         elementPick: self.pendingElementPick,
+                         elementNote: self.pendingElementNote)
         }
     }
 
     private func present(screen: NSScreen,
                          highlightWindows: Bool,
                          crosshair: Bool,
-                         image: CGImage?) {
+                         image: CGImage?,
+                         elementPick: Bool = false,
+                         elementNote: String? = nil) {
         sourceImage = image
         pixelScale = image.map { CGFloat($0.width) / max(1, screen.frame.width) }
             ?? ScreenCapture.scaleFactor(for: displayID)
@@ -111,6 +132,8 @@ final class RegionSelector: NSObject {
         let view = OverlayView(frame: NSRect(origin: .zero, size: screen.frame.size))
         view.selector = self
         view.highlightWindows = highlightWindows
+        view.elementPick = elementPick
+        view.elementNote = elementNote
         view.showCrosshair = crosshair
         view.loupeConfig = loupeConfig
         view.sourceImage = sourceImage
@@ -225,6 +248,17 @@ final class RegionSelector: NSObject {
 
         var selector: RegionSelector?
         var highlightWindows = true
+        /// 智能元素截取模式：光标一动就查 AX 元素并高亮，单击即确认
+        var elementPick = false
+        /// 空态提示里追加的一句话（nil = 不加）
+        var elementNote: String?
+        private var hoveredElement: ElementProbe.Hit?
+        /// AX 查询有成本（跨进程），鼠标高频移动时按 40ms 节流 —— 不节流会在
+        /// 快速划过一屏时把主线程排满，遮罩跟着一顿一顿的
+        private var lastElementProbe: TimeInterval = 0
+        /// 当前这个 pid 是否已经排过一次"粗命中补查"（避免每帧都排）
+        private var coarseProbePID: pid_t = 0
+        private var coarseProbeScheduled = false
         var showCrosshair = true
         /// 放大镜设置（nil = 不画）
         var loupeConfig: Loupe.Config?
@@ -401,8 +435,16 @@ final class RegionSelector: NSObject {
                     needsDisplay = true // 太小视为误触，留在选区模式
                 }
             } else {
-                // 轻点：选中高亮窗口
-                if highlightWindows, let hit = topLevelWindow(at: toGlobal(p)) {
+                // 轻点：元素模式下截"光标下那个元素"；否则选中高亮窗口
+                if elementPick {
+                    // 按点击点重查一次：手快时高亮可能还停在上一帧的元素上
+                    probeElement(at: toGlobal(p), force: true)
+                }
+                if elementPick, let element = hoveredElement,
+                   let clamped = ElementProbe.sanitized(element.rect,
+                                                        displayBounds: displayGlobalBounds) {
+                    confirm(rect: clamped.offsetBy(dx: -globalOrigin.x, dy: -globalOrigin.y))
+                } else if highlightWindows, let hit = topLevelWindow(at: toGlobal(p)) {
                     let selectorRef = selector
                     let displayID = self.displayID
                     MainActor.assumeIsolated {
@@ -492,12 +534,111 @@ final class RegionSelector: NSObject {
             selector?.displayID ?? 0
         }
 
+        /// 这块屏幕的全局矩形（左上原点）。AX 给的矩形也是全局的，
+        /// 要先按它夹一次，再换成视图坐标。
+        private var displayGlobalBounds: CGRect {
+            CGRect(origin: globalOrigin, size: bounds.size)
+        }
+
+        /// 诊断用：当前高亮的是什么。合成鼠标事件能不能真的驱动 AX 探测，
+        /// 只有把这个字符串打出来才知道。
+        var elementPickReport: String {
+            guard elementPick else { return "非元素模式" }
+            guard let e = hoveredElement else { return "未命中" }
+            return "\(e.isWindow ? "窗口级" : "元素级")「\(e.label)」"
+                + String(format: " 框=%.0f,%.0f %.0f×%.0f",
+                         e.rect.minX, e.rect.minY, e.rect.width, e.rect.height)
+        }
+
+        /// 诊断用：绕过事件层直接查一次（用来区分"事件没送到"和"AX 查不到"）
+        func probeElementForDiagnostics(atGlobal p: CGPoint) {
+            lastElementProbe = 0
+            probeElement(at: p)
+        }
+
+        /// 查光标底下的元素。查不到（未授权 / 桌面空白）就清空 ——
+        /// 这时画面不画高亮，但拖动拉框照样能用。
+        /// - Parameter force: 跳过 40ms 节流（单击确认时用：手快的时候
+        ///   高亮框可能还停在上一帧的元素上，按点击点重查一次才不会截错）
+        private func probeElement(at global: CGPoint, force: Bool = false) {
+            let now = Date().timeIntervalSince1970
+            guard force || now - lastElementProbe >= 0.04 else { return }
+            lastElementProbe = now
+
+            // 先找"光标下最上层的普通窗口"（窗口列表里没有我们自己的遮罩：
+            // 它 layer=screenSaver，不是 0），再只在这个应用里查元素。
+            // 查不到元素就退到窗口级 —— 用户至少能截到那个窗口。
+            guard let window = topLevelWindow(at: global) else {
+                if hoveredElement != nil {
+                    hoveredElement = nil
+                    needsDisplay = true
+                }
+                return
+            }
+            let pid = window.ownerPID ?? 0
+            var hit = ElementProbe.element(atGlobal: global, in: pid)
+                ?? ElementProbe.hit(forWindow: window)
+            // 浏览器这类应用（不把网页内容暴露给 AX 时）只肯给到"和窗口一样大的 Group"，
+            // 打出来是「区域」，用户根本不知道截的是什么。框既然就是整个窗口，
+            // 就把名字换成窗口名 —— 框不变，只是把话说清楚。
+            let frame = ElementProbe.sanitized(hit.rect, displayBounds: displayGlobalBounds)
+            let coversAll = frame.map { ElementProbe.coversWindow($0, windowFrame: window.frame) } ?? true
+            if !hit.isWindow, coversAll {
+                hit = ElementProbe.hit(forWindow: window)
+            }
+            // 🔴 **网页的 AX 树是"长"出来的**：Chromium 收到"打开辅助功能"后先给一个
+            // 整页 WebArea，过一两秒才把 DOM 铺满。所以"粗命中"要再补查两次，
+            // 不能只认第一帧 —— 用户看到的会一直是"整个网页 / 整个窗口"，
+            // 而智能元素截取主要就是给网页用的。
+            let coarse = coversAll || ElementProbe.isCoarse(frame, windowFrame: window.frame)
+            if coarse {
+                if coarseProbePID != pid {
+                    coarseProbePID = pid
+                    coarseProbeScheduled = false
+                }
+                if !coarseProbeScheduled {
+                    coarseProbeScheduled = true
+                    // 顺带把网页辅助功能打开（幂等 + 自带 15 秒节流）
+                    ElementProbe.enableDeepAccess(pid)
+                    scheduleDeepAccessReprobe(at: global, pid: pid)
+                }
+            } else {
+                // 拿到真正的元素了 → 这个窗口下次再粗起来可以重新排补查
+                coarseProbePID = 0
+                coarseProbeScheduled = false
+            }
+            guard hit != hoveredElement else { return }
+            hoveredElement = hit
+            needsDisplay = true
+        }
+
+        /// 刚给目标应用打开"网页辅助功能"后，它会**异步**把 DOM 铺成 AX 元素树
+        /// （Chromium 大页面实测 0.3~1 秒）。这期间光标可能一动不动，
+        /// 光靠 mouseMoved 触发是等不到的 → 自己按两档延时补查。
+        private func scheduleDeepAccessReprobe(at global: CGPoint, pid: pid_t) {
+            for delay in [0.35, 0.9, 1.8] {
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                    guard let self, self.elementPick, self.selection == nil, !self.isDragging else { return }
+                    guard let window = self.topLevelWindow(at: global),
+                          (window.ownerPID ?? 0) == pid else { return }
+                    self.lastElementProbe = 0
+                    self.probeElement(at: global)
+                    // 仍只有整窗就先续着画整窗，用户继续动鼠标还会再查
+                    if let hovered = self.hoveredElement, !hovered.isWindow {
+                        self.needsDisplay = true
+                    }
+                }
+            }
+        }
+
         override func mouseMoved(with event: NSEvent) {
             let p = convert(event.locationInWindow, from: nil)
             cursorPoint = p
             hasCursor = true
             // 有选区/正在拖拽时不抢高亮（避免视觉干扰）
-            if highlightWindows, selection == nil, !isDragging {
+            if elementPick, selection == nil, !isDragging {
+                probeElement(at: toGlobal(p))
+            } else if highlightWindows, selection == nil, !isDragging {
                 let hit = topLevelWindow(at: toGlobal(p))
                 if hit?.windowID != highlightedWindow?.windowID {
                     highlightedWindow = hit
@@ -605,6 +746,9 @@ final class RegionSelector: NSObject {
                 selectionRect = constrainedRect(start, current)
             } else if let sel = selection {
                 selectionRect = sel
+            } else if elementPick, let element = hoveredElement {
+                // 智能元素：AX 给的也是全局左上原点，换成视图坐标
+                selectionRect = element.rect.offsetBy(dx: -globalOrigin.x, dy: -globalOrigin.y)
             } else if highlightWindows, let win = highlightedWindow {
                 // 高亮窗口：全局 → 视图坐标
                 selectionRect = win.frame.offsetBy(dx: -globalOrigin.x, dy: -globalOrigin.y)
@@ -614,8 +758,12 @@ final class RegionSelector: NSObject {
 
             guard let rect = selectionRect else {
                 drawCrosshair(ctx)
-                // 冷启动时屏幕上只有一个暗幕，没有任何提示会让人以为卡住了
-                drawCenteredHint("拖动框选区域 · 松手即截图 · Esc 或右键取消", ctx: ctx)
+                // 冷启动时屏幕上只有一个暗幕，没有任何提示会让人以为卡住了。
+                // 元素模式的光标常常正停在桌面空白上，一句"拖动框选"会让人以为模式不对。
+                let base = elementPick
+                    ? "移到要截的元素上 · 单击截取 · 也能拖框 · Esc 或右键取消"
+                    : "拖动框选区域 · 松手即截图 · Esc 或右键取消"
+                drawCenteredHint(elementNote.map { "\($0) · \(base)" } ?? base, ctx: ctx)
                 return
             }
 
@@ -633,6 +781,10 @@ final class RegionSelector: NSObject {
             let label = "\(Int(rect.width)) × \(Int(rect.height))"
             if phase == .dragging {
                 drawHint("\(label)   ·   松手即截图   ·   Esc / 右键取消", above: rect, ctx: ctx)
+            } else if elementPick, let element = hoveredElement {
+                // 元素名要跟着走：用户得先确认"框住的是我要的那个按钮"
+                drawHint("\(label)   ·   单击截取「\(element.label)」   ·   Esc / 右键取消",
+                         above: rect, ctx: ctx)
             } else {
                 drawLabel(label, above: rect, ctx: ctx)
             }

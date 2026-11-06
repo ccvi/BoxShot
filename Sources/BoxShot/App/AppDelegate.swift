@@ -1,4 +1,8 @@
 import AppKit
+import SwiftUI
+#if canImport(Translation)
+import Translation
+#endif
 import AVFoundation
 import CoreImage
 import Foundation
@@ -202,6 +206,115 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             try? FileManager.default.removeItem(atPath: hintTrigger)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
                 self?.runMaskHintDiagnostics(startY: CGFloat(startY))
+            }
+        }
+        // 诊断入口：--translateprobe2 逐配置试翻一次，打印每一步成败
+        if CommandLine.arguments.contains("--translateprobe2") {
+            DispatchQueue.main.asyncAfter(deadline: DispatchTime.now() + 0.5) {
+                #if canImport(Translation)
+                if #available(macOS 15.0, *) {
+                    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 10, height: 10),
+                                          styleMask: [.borderless], backing: .buffered, defer: false)
+                    window.isReleasedWhenClosed = false
+                    window.contentView = NSHostingView(rootView: TranslationProbeView())
+                    window.orderFront(nil)
+                }
+                #endif
+            }
+        }
+        // 诊断入口：--translateprobe 打印系统翻译的语言包状态
+        // （"Unable to Translate" 到底是没装、不支持还是别的原因，只有这个说得清）
+        if CommandLine.arguments.contains("--translateprobe") {
+            DispatchQueue.main.asyncAfter(deadline: DispatchTime.now() + 0.8) {
+                Task {
+                    var out = ""
+                    #if canImport(Translation)
+                    if #available(macOS 15.0, *) {
+                        let availability = LanguageAvailability()
+                        let pairs: [(String, String)] = [("en", "zh-Hans"), ("zh-Hans", "en")]
+                        for (from, to) in pairs {
+                            let status = await availability.status(
+                                from: Locale.Language(identifier: from),
+                                to: Locale.Language(identifier: to))
+                            let text: String
+                            switch status {
+                            case .installed:   text = "已安装"
+                            case .supported:   text = "支持但未安装（需下载）"
+                            case .unsupported: text = "不支持"
+                            @unknown default:  text = "未知"
+                            }
+                            out += "\(from) → \(to)：\(text)\n"
+                        }
+                    } else {
+                        out = "macOS < 15，没有 Translation 框架\n"
+                    }
+                    #else
+                    out = "本机没有 Translation 框架\n"
+                    #endif
+                    NSLog("[BoxShot][translateprobe]\n%@", out)
+                    try? out.write(to: URL(fileURLWithPath: "/tmp/boxshot-translateprobe.log"),
+                                   atomically: true, encoding: .utf8)
+                    exit(0)
+                }
+            }
+        }
+        // 诊断入口：--resulttest 直接弹识别结果窗，验「翻译」按钮与中英下拉的排布
+        let resultTrigger = "/tmp/boxshot-resulttest.trigger"
+        if CommandLine.arguments.contains("--resulttest")
+            || FileManager.default.fileExists(atPath: resultTrigger) {
+            DispatchQueue.main.asyncAfter(deadline: DispatchTime.now() + 0.8) { [weak self] in
+                guard let self else { return }
+                self.model.showOCRResultForDiagnostics(
+                    """
+                    The Federal Reserve said on Wednesday that it would keep its \
+                    benchmark interest rate unchanged at a range of 4.25% to 4.5%, \
+                    while signalling that two cuts may still be appropriate this year \
+                    if inflation continues to cool. Policymakers noted that the labour \
+                    market had remained resilient despite higher borrowing costs.
+                    """)
+            }
+        }
+        // 诊断入口：--axdump 打印某点上的 AX 元素链条（role / frame / 名字）
+        if CommandLine.arguments.contains("--axdump")
+            || CommandLine.arguments.contains("--axdump-deep") {
+            DispatchQueue.main.asyncAfter(deadline: DispatchTime.now() + 0.6) {
+                var out = "AX 已授权=\(ElementProbe.isTrusted)\n"
+                let screen = ScreenCapture.activeScreen().frame
+                let rawPoint = (try? String(contentsOfFile: "/tmp/boxshot-axdump.trigger",
+                                            encoding: .utf8)) ?? ""
+                let nums = rawPoint.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .split(separator: ",").compactMap { Double($0) }
+                let point: CGPoint = nums.count == 2
+                    ? CGPoint(x: nums[0], y: nums[1])
+                    : CGPoint(x: screen.midX, y: screen.midY)
+                // --axdump-deep：先打开目标应用的"网页辅助功能"，等它把树建起来再查
+                let deep = CommandLine.arguments.contains("--axdump-deep")
+                if let win = ScreenCapture.topLevelWindow(at: point), let pid = win.ownerPID, pid > 0 {
+                    out += "pid=\(pid) 窗口=\(win.ownerName) \(win.frame)\n"
+                    if deep {
+                        let opened = ElementProbe.enableDeepAccess(pid)
+                        out += "深度辅助功能 本次新开=\(opened)\n"
+                        // Chromium 是异步建树的，得让它跑一会儿
+                        Thread.sleep(forTimeInterval: 1.2)
+                    }
+                    out += ElementProbe.chain(atGlobal: point, in: pid).joined(separator: "\n")
+                } else {
+                    out += "该点没有窗口"
+                }
+                out += "\n--- 全系统级 ---\n"
+                out += ElementProbe.chainForSystem(atGlobal: point).joined(separator: "\n")
+                NSLog("[BoxShot][axdump] %@", out)
+                try? out.write(to: URL(fileURLWithPath: "/tmp/boxshot-axdump.log"),
+                               atomically: true, encoding: .utf8)
+                exit(0)
+            }
+        }
+        // 诊断入口：--elementtest 验智能元素截取（事件驱动 vs 直接探测 + 单击确认）
+        let elementTrigger = "/tmp/boxshot-elementtest.trigger"
+        if CommandLine.arguments.contains("--elementtest")
+            || FileManager.default.fileExists(atPath: elementTrigger) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                self?.runElementTestDiagnostics()
             }
         }
         // 诊断入口：--dragtest 用合成鼠标拖一次框，验「松手即截图」这条路
@@ -724,6 +837,86 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
+    }
+
+    // ── 诊断：智能元素截取 ────────────────────────────────────
+
+    /// `--elementtest`：起元素模式遮罩 → 把合成光标移到触发文件里写的坐标 →
+    /// 分别打一次"事件层驱动的探测结果"和"绕过事件层直接探测的结果" →
+    /// 停留 3 秒（留给外部 `screencapture -x` 拍高亮框与提示）→ 单击确认 →
+    /// 打浮层 frame。触发文件格式：`x,y`（全局左上原点），缺省 `800,400`。
+    private func runElementTestDiagnostics() {
+        let logURL = URL(fileURLWithPath: "/tmp/boxshot-elementtest.log")
+        try? "".write(to: logURL, atomically: true, encoding: .utf8)
+        func log(_ text: String) {
+            NSLog("[BoxShot][elementtest] %@", text)
+            guard let handle = try? FileHandle(forWritingTo: logURL) else { return }
+            handle.seekToEndOfFile()
+            handle.write("\(text)\n".data(using: .utf8)!)
+            try? handle.close()
+        }
+
+        log("辅助功能已授权=\(ElementProbe.isTrusted)（未授权时应退化为窗口级）")
+        let raw = (try? String(contentsOfFile: "/tmp/boxshot-elementtest.trigger",
+                               encoding: .utf8)) ?? ""
+        let parts = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(separator: ",").compactMap { Double($0) }
+        let target: CGPoint = parts.count == 2
+            ? CGPoint(x: parts[0], y: parts[1]) : CGPoint(x: 800, y: 400)
+        log("目标点 \(Int(target.x)),\(Int(target.y))")
+
+        model.perform(.smartElement)
+        let src = CGEventSource(stateID: .hidSystemState)
+        func post(_ type: CGEventType, _ p: CGPoint) {
+            CGEvent(mouseEventSource: src, mouseType: type,
+                    mouseCursorPosition: p, mouseButton: .left)?.post(tap: .cghidEventTap)
+        }
+        // 元素模式下探到的是什么
+        func report(_ tag: String) {
+            let text = self.model.elementPickReport
+            log(tag + "：" + text)
+        }
+
+        // 用一条 0.5 秒节拍的定时器推进步骤，别套五层闭包
+        // （层层嵌套会让 Swift 类型检查器直接超时）。
+        var step = 0
+        let timer = Timer(timeInterval: 0.25, repeats: true) { t in
+            step += 1
+            switch step {
+            case 5:
+                log("遮罩 isActive=\(self.model.isRegionSelectorActive)")
+                post(.mouseMoved, target)
+                post(.mouseMoved, CGPoint(x: target.x + 1, y: target.y))
+            case 6:
+                // 紧跟着的这一次多半还是"整窗"——网页辅助功能刚打开，树还没建好
+                report("① 事件驱动（树可能还没建好）")
+            case 9:
+                // 不做任何强制查询，单纯看一眼"补查机制自己有没有把它变细"
+                report("② 1 秒后（不强制查询）")
+            case 12:
+                self.model.probeElementForDiagnostics(atGlobal: target)
+                report("③ 强制重查一次")
+                log("停留 3 秒，外部可截图")
+            case 28:
+                log("发送单击")
+                post(.leftMouseDown, target)
+                post(.leftMouseUp, target)
+            case 36:
+                t.invalidate()
+                log("点击后：遮罩 isActive=\(self.model.isRegionSelectorActive)（应为 false）")
+                if let editor = self.model.overlayEditor {
+                    log("浮层 frame=\(editor.selectionFrame)")
+                    log("✅ 单击拿到了一个具体元素的框")
+                } else {
+                    log("❌ 没有浮层编辑器（单击没走通）")
+                }
+                // 不真存盘：验完就走，免得往用户图库里塞图
+                exit(0)
+            default:
+                break
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     // ── 诊断：带摄像头取景框的真录制 ──────────────────────────
