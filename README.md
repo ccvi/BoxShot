@@ -1486,7 +1486,7 @@ Resources/
 | `--axdump-deep` | 同上，但先给目标应用打开「网页辅助功能」并等 1.2 秒 —— 这是验"浏览器到底能不能给到真元素"的唯一办法（Edge：开之前只有 `AXGroup`，开之后是 `AXLink「首页」`）。另外会连跑 20 次命中取平均耗时（悬停探测挂在 25Hz 上，下钻走几百次 IPC 到底多久只有量出来才知道；实测粗命中 5.3ms、细命中 0.4ms） |
 | `--resulttest` | 延迟 0.8s 直接弹一个识别结果窗（英文样张，**不碰剪贴板、不落库**），用来验「翻译 + 中/英 ⌄」的排布。标记文件 `/tmp/boxshot-resulttest.trigger` |
 | `--translateprobe` | 打印系统翻译的语言包状态（`LanguageAvailability.status` 对 en→zh-Hans / zh-Hans→en），写 `/tmp/boxshot-translateprobe.log`。用来分清"没装"和"别的原因" |
-| `--translateprobe2` | 逐配置各试翻一次（自动识别 / 显式 en→zh / 显式 zh→en），把 `prepareTranslation` 与 `translations` 的**每一步**成败打到 NSLog。`prepare` 失败但 `translations` 成功这件事就是这么查出来的 |
+| `--translateprobe2` | 逐配置各试翻一次（显式 zh→en / 显式 en→zh / 自动识别 ×2，**显式排前面**：自动识别在混排文本上会卡住不返回，排前面会把后面全挡住），把 `prepareTranslation` 与 `translations` 的**每一步**成败写进 `/tmp/boxshot-transmix.log`。文本优先读 `/tmp/boxshot-transmix.txt`（喂真实样张）。「prepare 失败但 translate 成功」「自动识别→英文整条失败」这两个结论都是它查出来的 |
 | `--maskhint` | 合成拖一个 480×320 的选区后**故意不松手**（提示条只在拖拽中画，松手就没了，外部截图根本拍不到），留给 `screencapture -x` 验提示落位。触发文件里写个数字 = 拖拽起点 y：`300` 走"框在中间 → 提示在框上"，`16` 走"贴着屏幕顶 → 提示翻到框下"。12 秒后自己退出 |
 | `--editorbar-loupe` | 同 `--editorbar`，但预置**矩形 2×（红）/ 矩形 3×（蓝）/ 圆形 2×（绿）/ 圆形 3×（橙）四个放大镜**并选中矩形 2×。底图是 8px 棋盘格：镜里的格子必须明显变大（2× 一倍、3× 两倍），拿纯色底图验不出「到底放没放大」；圆形的**两个框角要能看见棋盘格**（说明是正圆、没被铺成方块） |
 | `--ocrfile <图片路径>` | 直接对一张图跑 OCR 并打印真实输出（行聚类后的文本 + 表格 Markdown），不弹窗口、不进事件循环、跑完就退出。用户反馈"识别得不对"时先看这条：隔着界面分不清是识别错还是展示错 |
