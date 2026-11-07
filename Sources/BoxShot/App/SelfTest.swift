@@ -497,6 +497,62 @@ enum SelfTest {
                   TranslationSupport.isAvailable == (major >= 15))
             check("不可用时有明确说明，不是空白按钮",
                   TranslationSupport.unavailableNote.contains("macOS 15"))
+
+            // ── 中英混排：源语种必须显式给，不能交给框架自动识别 ──
+            // 用户 2026-11-07：「OCR 中英文混合时，翻译成中文或英文都失败」。
+            // 实测：`source: nil` 时框架认不出混排、直接拒绝（TranslationError/1），
+            // 还会弹「The language could not be automatically detected」要求手选源语言。
+            check("汉字占比：纯中文是 1", TranslateTarget.cjkRatio("中文") == 1)
+            check("汉字占比：纯英文是 0", TranslateTarget.cjkRatio("hello world") == 0)
+            check("汉字占比：空文本是 0（不除零）", TranslateTarget.cjkRatio("   ") == 0)
+            check("源语种显式判：中文为主 → 中文",
+                  TranslateTarget.sourceLanguage(for: "整屏遮罩窗口指定色彩空间") == .chinese)
+            check("源语种显式判：混排但中文为主 → 中文",
+                  TranslateTarget.sourceLanguage(
+                    for: "窗口不指定 colorSpace 时系统按广色域给") == .chinese)
+            check("源语种显式判：纯英文 → 英文",
+                  TranslateTarget.sourceLanguage(for: "IOSurface 57.8M Drawable") == .english)
+
+            // 每行该不该翻
+            check("译中文：纯英文行要翻",
+                  TranslateTarget.needsTranslation("IOSurface 57.8M Drawable", into: .chinese))
+            check("译中文：中文行不用翻",
+                  !TranslateTarget.needsTranslation("整屏遮罩窗口指定色彩空间", into: .chinese))
+            check("译英文：中文行要翻",
+                  TranslateTarget.needsTranslation("整屏遮罩窗口指定色彩空间", into: .english))
+            check("译英文：纯英文行不用翻",
+                  !TranslateTarget.needsTranslation("IOSurface 57.8M Drawable", into: .english))
+            check("空行两边都不翻",
+                  !TranslateTarget.needsTranslation("   ", into: .chinese)
+                    && !TranslateTarget.needsTranslation("", into: .english))
+
+            // 分段方案：相邻同类合并、顺序拼得回原文、整篇同语种则不派活
+            let mixed = """
+            改了什么
+            IOSurface 57.8M 3420x2214 (RGhA)
+            RGhA = 16 bits per pixel
+            整屏遮罩窗口指定色彩空间
+            """
+            let toEnglish = TranslateTarget.plan(for: mixed, into: .english)
+            // 注意：相邻同类行会合并成一块，所以 pieces 比原文行数少
+            check("混排译英文：第一行和最后一行要翻，中间两行英文不翻",
+                  toEnglish.needsTranslation == [true, false, true])
+            check("混排译英文：源语种判成中文", toEnglish.source == .chinese)
+            check("混排译英文：要翻的块就是那两行中文",
+                  toEnglish.pendingTexts == ["改了什么", "整屏遮罩窗口指定色彩空间"])
+            let toChinese = TranslateTarget.plan(for: mixed, into: .chinese)
+            check("混排译中文：源语种判成英文", toChinese.source == .english)
+            check("混排译中文：连续两行英文并成一块（不把句子拆碎着送）",
+                  toChinese.pendingTexts == ["IOSurface 57.8M 3420x2214 (RGhA)\nRGhA = 16 bits per pixel"])
+            check("切块不丢字：拼回去和原文一致",
+                  toEnglish.pieces.joined(separator: "\n") == mixed
+                    && toChinese.pieces.joined(separator: "\n") == mixed)
+            check("整篇已经是英文 → 不给框架派活",
+                  !TranslateTarget.plan(for: "hello world\ngood bye", into: .english).hasWork)
+            check("整篇已经是中文 → 不给框架派活",
+                  !TranslateTarget.plan(for: "你好世界\n再见", into: .chinese).hasWork)
+            check("混排两个方向都给得出活（这就是用户那个场景）",
+                  toEnglish.hasWork && toChinese.hasWork)
         }
 
         // ── OCR 行聚类 ──

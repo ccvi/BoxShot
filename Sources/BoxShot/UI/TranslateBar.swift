@@ -88,42 +88,63 @@ struct TranslateBar: View {
 
     private func startTranslation() {
         errorText = nil
-        // 目标语言和原文同语种时**别去问框架**：它会抛 TranslationError，
-        // 界面上就是一句看不懂的「翻译失败：Unable to Translate」。
-        // 这里直说人话，用户一看就知道该换方向。
-        if (target == .chinese) == TranslateTarget.looksChinese(sourceText) {
+        let plan = TranslateTarget.plan(for: sourceText, into: target)
+        // 整篇已经是目标语言（一个字都不用翻）时**别去问框架**：同语种它只会抛
+        // TranslationError，界面上就是一句看不懂的「翻译失败：无法翻译」。
+        guard plan.hasWork, let source = plan.source else {
             errorText = "这段文字已经是\(target.title)了，换个目标语言"
             return
         }
+        // 🔴 源语种**显式给**，不能让框架自己认：中英混排时它认不出来，会弹
+        // 「The language could not be automatically detected」并要求用户选源语言，
+        // 我们这边只收到 Unable to Translate —— 用户看到的就是「两个方向都失败」。
         if var existing = configuration {
-            // 同一份配置要"再来一次"，必须 invalidate —— 直接赋等值对象不会重新触发
+            // 同一对语言要"再来一次"，必须 invalidate —— 直接赋等值对象不会重新触发；
+            // 换了方向则要把 source / target 一起改掉。
             existing.invalidate()
+            existing.source = source.language
+            existing.target = target.language
             configuration = existing
         } else {
-            configuration = .init(source: nil, target: target.language)   // source nil = 自动识别原语种
+            configuration = .init(source: source.language, target: target.language)
         }
     }
 
     private func run(_ session: TranslationSession) async {
         await MainActor.run { isWorking = true; errorText = nil }
+        let plan = TranslateTarget.plan(for: sourceText, into: target)
+        guard plan.hasWork else {
+            await MainActor.run {
+                isWorking = false
+                errorText = "这段文字已经是\(target.title)了，换个目标语言"
+            }
+            return
+        }
         do {
             // 语言包没装时它会弹系统下载框。
-            // 🔴 **但它的失败不能当致命错误**：`source: nil`（自动识别语种）时
-            // 实测 macOS 26 上 `prepareTranslation()` 抛 TranslationError/1，
-            // 而紧接着的 `translations(from:)` **是成功的**。原来在这里 try 完就 catch，
-            // 用户看到的是「语言包明明装了却说翻译失败」。所以只记日志，继续往下译。
+            // 🔴 **但它的失败不能当致命错误**：`prepareTranslation()` 在自动识别/首次启动等
+            // 情形下会抛 TranslationError/1，而紧接着的 `translations(from:)` **是成功的**。
+            // 原来在这里 try 完就 catch，用户看到的是「语言包明明装了却说翻译失败」。
             try await session.prepareTranslation()
         } catch {
             let ns = error as NSError
             NSLog("[BoxShot][translate] prepare 未通过（继续翻）%@/%d", ns.domain, ns.code)
         }
         do {
-            let batch = [TranslationSession.Request(sourceText: sourceText)]
-            let responses = try await session.translations(from: batch)
-            let result = responses.first?.targetText ?? ""
+            // 只把"要翻的块"送进去，一次批量。每块语种单一，不会再把混排丢给框架去猜。
+            let requests = plan.pendingTexts.map { TranslationSession.Request(sourceText: $0) }
+            let responses = try await session.translations(from: requests)
+            // 按 sourceText 回填（不依赖返回顺序），再按原文顺序拼回去
+            var byOriginal: [String: String] = [:]
+            for response in responses { byOriginal[response.sourceText] = response.targetText }
+            var rebuilt: [String] = []
+            for (piece, need) in zip(plan.pieces, plan.needsTranslation) {
+                rebuilt.append(need ? (byOriginal[piece] ?? piece) : piece)
+            }
+            let result = rebuilt.joined(separator: "\n")
             await MainActor.run {
                 isWorking = false
-                if result.isEmpty {
+                if result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     errorText = "没有译出内容"
                 } else {
                     translated = result
@@ -155,38 +176,64 @@ struct TranslateBar: View {
 
 @available(macOS 15.0, *)
 struct TranslationProbeView: View {
-    static let sample = """
-    The Federal Reserve said on Wednesday that it would keep its benchmark interest \
-    rate unchanged at a range of 4.25% to 4.5%, while signalling that two cuts may \
-    still be appropriate this year if inflation continues to cool. Policymakers noted \
-    that the labour market had remained resilient despite higher borrowing costs.
-    """
+    /// 样本：优先读 `/tmp/boxshot-transmix.txt`（喂真实的中英混排文本），否则用内置英文段。
+    /// 用户 2026-11-07 报「中英文混合时，翻成中文或英文都失败」，要拿他那份文本复现。
+    static var sample: String {
+        if let text = try? String(contentsOfFile: "/tmp/boxshot-transmix.txt", encoding: .utf8),
+           !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return text
+        }
+        return """
+        The Federal Reserve said on Wednesday that it would keep its benchmark interest \
+        rate unchanged at a range of 4.25% to 4.5%, while signalling that two cuts may \
+        still be appropriate this year if inflation continues to cool. Policymakers noted \
+        that the labour market had remained resilient despite higher borrowing costs.
+        """
+    }
 
     @State private var config: TranslationSession.Configuration?
     @State private var index = 0
 
+    /// 🔴 显式语言对放最前面：`source: nil`（自动识别）在混排文本上会卡住不返回，
+    /// 排在前面会把后面几条永远挡住。
     private static let variants: [(String, Locale.Language?, Locale.Language)] = [
+        ("显式中 → 英", Locale.Language(identifier: "zh-Hans"), Locale.Language(identifier: "en")),
+        ("显式英 → 中", Locale.Language(identifier: "en"), Locale.Language(identifier: "zh-Hans")),
         ("自动识别 → 中文", nil, Locale.Language(identifier: "zh-Hans")),
-        ("英文 → 中文", Locale.Language(identifier: "en"), Locale.Language(identifier: "zh-Hans")),
-        ("中文 → 英文", Locale.Language(identifier: "zh-Hans"), Locale.Language(identifier: "en")),
+        ("自动识别 → 英文", nil, Locale.Language(identifier: "en")),
     ]
+
+    /// 结果同时写文件：`NSLog` 在 log show 里不一定捞得到，探针必须自己能交代清楚
+    static func logLine(_ text: String) {
+        NSLog("[BoxShot][transmix] %@", text)
+        let url = URL(fileURLWithPath: "/tmp/boxshot-transmix.log")
+        if let h = try? FileHandle(forWritingTo: url) {
+            h.seekToEndOfFile()
+            h.write("\(text)\n".data(using: .utf8)!)
+            try? h.close()
+        } else {
+            try? text.write(to: url, atomically: true, encoding: .utf8)
+        }
+    }
 
     var body: some View {
         Color.clear.frame(width: 1, height: 1)
             .translationTask(config) { session in
                 await run(session)
             }
-            .onAppear { next() }
+            .onAppear { Self.logLine("· onAppear"); next() }
     }
 
     private func next() {
+        Self.logLine("· next() 进入 index=\(index)")
         guard index < Self.variants.count else {
+            Self.logLine("· 四种全跑完，退出")
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { exit(0) }
             return
         }
         let (name, source, target) = Self.variants[index]
         index += 1
-        NSLog("[BoxShot][tprobe] ── %@ ──", name)
+        Self.logLine("── \(name) ── 文本 \(Self.sample.count) 字")
         config = TranslationSession.Configuration(source: source, target: target)
     }
 
@@ -195,17 +242,18 @@ struct TranslationProbeView: View {
         let text = Self.sample
         do {
             try await session.prepareTranslation()
-            NSLog("[BoxShot][tprobe] %@：prepare 成功", name)
+            Self.logLine("\(name)：prepare 成功")
         } catch {
             let ns = error as NSError
-            NSLog("[BoxShot][tprobe] %@：prepare 失败 %@/%d", name, ns.domain, ns.code)
+            Self.logLine("\(name)：prepare 失败 \(ns.domain)/\(ns.code) \(ns.localizedDescription)")
         }
         do {
             let out = try await session.translations(from: [.init(sourceText: text)])
-            NSLog("[BoxShot][tprobe] %@：翻译成功 → %@", name, out.first?.targetText ?? "（空）")
+            let got = out.first?.targetText ?? "（空）"
+            Self.logLine("\(name)：翻译成功 前 40 字 → \(got.prefix(40))")
         } catch {
             let ns = error as NSError
-            NSLog("[BoxShot][tprobe] %@：翻译失败 %@/%d", name, ns.domain, ns.code)
+            Self.logLine("\(name)：翻译失败 \(ns.domain)/\(ns.code) \(ns.localizedDescription) userInfo=\(ns.userInfo)")
         }
         await MainActor.run { next() }
     }

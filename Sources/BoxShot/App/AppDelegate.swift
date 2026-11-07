@@ -284,6 +284,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             try? FileManager.default.removeItem(atPath: resultTrigger)
             DispatchQueue.main.asyncAfter(deadline: DispatchTime.now() + 0.8) { [weak self] in
                 guard let self else { return }
+                // 有 /tmp/boxshot-transmix.txt 就用那份真实文本（验中英混排翻译）
+                if let custom = try? String(contentsOfFile: "/tmp/boxshot-transmix.txt",
+                                            encoding: .utf8),
+                   !custom.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    self.model.showOCRResultForDiagnostics(custom)
+                    return
+                }
                 self.model.showOCRResultForDiagnostics(
                     """
                     The Federal Reserve said on Wednesday that it would keep its \
