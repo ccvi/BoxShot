@@ -48,13 +48,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.bootstrap()
         model.registerGlobalHotKeys()
 
+        // ── 诊断 trigger 文件的存在性判断（**一律用它，别直接 fileExists**）──
+        //
+        // 🔴 事故（2026-11-07，用户："一启动应用就开始乱框截图，取消应用就闪退了"）：
+        // trigger 文件是"一次性开关"，但 `--axdump` / `--elementtest` / `--resulttest`
+        // 三个分支读完它**忘了删**，于是那两个文件一直躺在 /tmp 里 —— 之后用户每次正常
+        // 启动安装版，都会被它们劫持：进元素模式乱框、合成鼠标乱点，诊断跑完还 exit(0)。
+        // 两道防线：① 超过 2 分钟的 trigger 直接当没有（并删掉）；
+        //          ② 命中的分支必须自己 removeItem（用完即焚）。
+        func triggerExists(_ path: String, staleAfter: TimeInterval = 120) -> Bool {
+            let fm = FileManager.default
+            guard fm.fileExists(atPath: path) else { return false }
+            let mtime = (try? fm.attributesOfItem(atPath: path))?[.modificationDate] as? Date
+            if let mtime, Date().timeIntervalSince(mtime) > staleAfter {
+                try? fm.removeItem(atPath: path)
+                return false
+            }
+            return true
+        }
+
         // 诊断入口：--show-overlay 用合成渐变图呼出原位浮层（不走截图权限），
         // 配合 screencapture -R 核对浮层是否真的把图画出来了。
         let overlayTall = CommandLine.arguments.contains("--show-overlay-tall")
-            || FileManager.default.fileExists(atPath: "/tmp/boxshot-showoverlay-tall.trigger")
+            || triggerExists("/tmp/boxshot-showoverlay-tall.trigger")
         // --show-overlay-color：顺手把颜色面板也打开，用来核对它是不是贴在工具条下面
         let overlayColor = CommandLine.arguments.contains("--show-overlay-color")
-            || FileManager.default.fileExists(atPath: "/tmp/boxshot-showoverlay-color.trigger")
+            || triggerExists("/tmp/boxshot-showoverlay-color.trigger")
         if CommandLine.arguments.contains("--show-overlay") || overlayTall || overlayColor {
             try? FileManager.default.removeItem(atPath: "/tmp/boxshot-showoverlay-tall.trigger")
             try? FileManager.default.removeItem(atPath: "/tmp/boxshot-showoverlay-color.trigger")
@@ -73,7 +92,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 「不截图了内存怎么不降」先跑这个，再决定动哪里。
         let memTrigger = "/tmp/boxshot-memreport.trigger"
         if CommandLine.arguments.contains("--memreport")
-            || FileManager.default.fileExists(atPath: memTrigger) {
+            || triggerExists(memTrigger) {
             try? FileManager.default.removeItem(atPath: memTrigger)
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
                 guard let self else { return }
@@ -84,9 +103,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 熔断 / 真会用哪条命令拉新进程）。--memguard-restart 则**真**重开一次自己。
         let memGuardTrigger = "/tmp/boxshot-memguard.trigger"
         let memGuardRestart = CommandLine.arguments.contains("--memguard-restart")
-            || FileManager.default.fileExists(atPath: "/tmp/boxshot-memguard-restart.trigger")
+            || triggerExists("/tmp/boxshot-memguard-restart.trigger")
         if CommandLine.arguments.contains("--memguard") || memGuardRestart
-            || FileManager.default.fileExists(atPath: memGuardTrigger) {
+            || triggerExists(memGuardTrigger) {
             try? FileManager.default.removeItem(atPath: memGuardTrigger)
             try? FileManager.default.removeItem(atPath: "/tmp/boxshot-memguard-restart.trigger")
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
@@ -106,7 +125,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 用来核对常驻缩略图面板的位置 / 尺寸 / 实时刷新。
         let scrollTrigger = "/tmp/boxshot-scrolltest.trigger"
         if CommandLine.arguments.contains("--scrolltest")
-            || FileManager.default.fileExists(atPath: scrollTrigger) {
+            || triggerExists(scrollTrigger) {
             try? FileManager.default.removeItem(atPath: scrollTrigger)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
                 guard let self else { return }
@@ -121,7 +140,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 是取景框没上屏、还是被"排除自家窗口"排掉了、还是根本没权限。
         let cameraTrigger = "/tmp/boxshot-recordcamera.trigger"
         if CommandLine.arguments.contains("--recordcamera")
-            || FileManager.default.fileExists(atPath: cameraTrigger) {
+            || triggerExists(cameraTrigger) {
             try? FileManager.default.removeItem(atPath: cameraTrigger)
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
                 self?.runRecordCameraDiagnostics()
@@ -133,7 +152,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 全屏这条路按设计就是"先出工具条，点『记录』才开录"，正好拿来当纯展示入口。
         let recordBarTrigger = "/tmp/boxshot-recordbar.trigger"
         if CommandLine.arguments.contains("--recordbar")
-            || FileManager.default.fileExists(atPath: recordBarTrigger) {
+            || triggerExists(recordBarTrigger) {
             try? FileManager.default.removeItem(atPath: recordBarTrigger)
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
                 self?.model.perform(.recordFullscreen)
@@ -144,7 +163,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 截屏权限、还得点中那颗按钮（非 key 窗口第一下点击会被吞）。这条路直接给窗口。
         let editorBarTrigger = "/tmp/boxshot-editorbar.trigger"
         if CommandLine.arguments.contains("--editorbar")
-            || FileManager.default.fileExists(atPath: editorBarTrigger) {
+            || triggerExists(editorBarTrigger) {
             try? FileManager.default.removeItem(atPath: editorBarTrigger)
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
                 self?.showDiagnosticEditorWindow()
@@ -156,7 +175,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 合成鼠标点击在非 key 状态下不生效（画布上的拖动却生效），验一次全卡在第一步。
         let editorHandlesTrigger = "/tmp/boxshot-editorbar-handles.trigger"
         if CommandLine.arguments.contains("--editorbar-handles")
-            || FileManager.default.fileExists(atPath: editorHandlesTrigger) {
+            || triggerExists(editorHandlesTrigger) {
             try? FileManager.default.removeItem(atPath: editorHandlesTrigger)
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
                 self?.showDiagnosticEditorWindowWithHandles()
@@ -167,7 +186,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 放大之后格子必须**看起来变大一倍**，纯色底图看不出这件事。
         let editorLoupeTrigger = "/tmp/boxshot-editorbar-loupe.trigger"
         if CommandLine.arguments.contains("--editorbar-loupe")
-            || FileManager.default.fileExists(atPath: editorLoupeTrigger) {
+            || triggerExists(editorLoupeTrigger) {
             try? FileManager.default.removeItem(atPath: editorLoupeTrigger)
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
                 self?.showDiagnosticEditorWindowWithLoupe()
@@ -177,7 +196,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 「Esc 没生效」这种问题，光读代码看不出是"判断写错"还是"按键根本没进来"。
         let escTrigger = "/tmp/boxshot-esctest.trigger"
         if CommandLine.arguments.contains("--esctest")
-            || FileManager.default.fileExists(atPath: escTrigger) {
+            || triggerExists(escTrigger) {
             try? FileManager.default.removeItem(atPath: escTrigger)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
                 self?.runEscDiagnostics()
@@ -189,7 +208,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // CGEvent.post 是空操作，光靠自投事件证明不了真实按键这条路。
         let escWaitTrigger = "/tmp/boxshot-escwait.trigger"
         if CommandLine.arguments.contains("--escwait")
-            || FileManager.default.fileExists(atPath: escWaitTrigger) {
+            || triggerExists(escWaitTrigger) {
             try? FileManager.default.removeItem(atPath: escWaitTrigger)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
                 self?.runEscWaitDiagnostics()
@@ -200,7 +219,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 触发文件里写一个数字 = 拖拽起点的 y（默认 300 走"框在中间"，写 20 走"贴着屏幕顶"）。
         let hintTrigger = "/tmp/boxshot-maskhint.trigger"
         if CommandLine.arguments.contains("--maskhint")
-            || FileManager.default.fileExists(atPath: hintTrigger) {
+            || triggerExists(hintTrigger) {
             let startY = (try? String(contentsOfFile: hintTrigger, encoding: .utf8))
                 .flatMap { Double($0.trimmingCharacters(in: .whitespacesAndNewlines)) } ?? 300
             try? FileManager.default.removeItem(atPath: hintTrigger)
@@ -261,7 +280,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 诊断入口：--resulttest 直接弹识别结果窗，验「翻译」按钮与中英下拉的排布
         let resultTrigger = "/tmp/boxshot-resulttest.trigger"
         if CommandLine.arguments.contains("--resulttest")
-            || FileManager.default.fileExists(atPath: resultTrigger) {
+            || triggerExists(resultTrigger) {
+            try? FileManager.default.removeItem(atPath: resultTrigger)
             DispatchQueue.main.asyncAfter(deadline: DispatchTime.now() + 0.8) { [weak self] in
                 guard let self else { return }
                 self.model.showOCRResultForDiagnostics(
@@ -279,7 +299,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 先打一个词并用空格确认，再打一串长的 —— 用户在"输了一些文字之后"才出问题。
         // 每步都打 hasMarkedText / 光标屏幕矩形 / 编辑器所在窗口与层级。
         if CommandLine.arguments.contains("--texttest")
-            || FileManager.default.fileExists(atPath: "/tmp/boxshot-texttest.trigger") {
+            || triggerExists("/tmp/boxshot-texttest.trigger") {
             try? FileManager.default.removeItem(atPath: "/tmp/boxshot-texttest.trigger")
             DispatchQueue.main.asyncAfter(deadline: DispatchTime.now() + 0.6) { [weak self] in
                 self?.runTextInputDiagnostics()
@@ -293,6 +313,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let screen = ScreenCapture.activeScreen().frame
                 let rawPoint = (try? String(contentsOfFile: "/tmp/boxshot-axdump.trigger",
                                             encoding: .utf8)) ?? ""
+                try? FileManager.default.removeItem(atPath: "/tmp/boxshot-axdump.trigger")
                 let nums = rawPoint.trimmingCharacters(in: .whitespacesAndNewlines)
                     .split(separator: ",").compactMap { Double($0) }
                 let point: CGPoint = nums.count == 2
@@ -341,16 +362,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 诊断入口：--elementtest 验智能元素截取（事件驱动 vs 直接探测 + 单击确认）
         let elementTrigger = "/tmp/boxshot-elementtest.trigger"
         if CommandLine.arguments.contains("--elementtest")
-            || FileManager.default.fileExists(atPath: elementTrigger) {
+            || triggerExists(elementTrigger) {
+            // 🔴 必须删：这个分支会进元素模式、合成鼠标事件，结尾还 exit(0)。
+            // 文件留着 = 用户以后每次启动都被它劫持（乱框 → 闪退）。
+            // 🔴 顺序不能反：内容先读进内存，再删文件 —— 反了函数里读到的是空字符串，
+            // 诊断会静默跑默认点（800,400），看起来"跑通了"，其实测的不是你要的位置。
+            let rawPoint = (try? String(contentsOfFile: elementTrigger, encoding: .utf8)) ?? ""
+            try? FileManager.default.removeItem(atPath: elementTrigger)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-                self?.runElementTestDiagnostics()
+                self?.runElementTestDiagnostics(rawPoint: rawPoint)
             }
         }
         // 诊断入口：--dragtest 用合成鼠标拖一次框，验「松手即截图」这条路
         // （用户明确要求去掉"单击选区内 / 回车"那一步，这条流程必须端到端跑一遍）。
         let dragTrigger = "/tmp/boxshot-dragtest.trigger"
         if CommandLine.arguments.contains("--dragtest")
-            || FileManager.default.fileExists(atPath: dragTrigger) {
+            || triggerExists(dragTrigger) {
             try? FileManager.default.removeItem(atPath: dragTrigger)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
                 self?.runDragTestDiagnostics()
@@ -361,7 +388,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 而不是盖在上面的自家遮罩。
         let windowTrigger = "/tmp/boxshot-windowtest.trigger"
         if CommandLine.arguments.contains("--windowtest")
-            || FileManager.default.fileExists(atPath: windowTrigger) {
+            || triggerExists(windowTrigger) {
             try? FileManager.default.removeItem(atPath: windowTrigger)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
                 self?.runWindowTestDiagnostics()
@@ -371,7 +398,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 菜单项 target 写错只会"变灰"，不报错也不崩 —— 只有把它打出来才看得见。
         let menuTrigger = "/tmp/boxshot-menutest.trigger"
         if CommandLine.arguments.contains("--menutest")
-            || FileManager.default.fileExists(atPath: menuTrigger) {
+            || triggerExists(menuTrigger) {
             try? FileManager.default.removeItem(atPath: menuTrigger)
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
                 guard let self else { return }
@@ -387,7 +414,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 这两条都只有端到端跑一遍才看得清：一个在绘制坐标系，一个在事件层。
         let pinTrigger = "/tmp/boxshot-pintest.trigger"
         if CommandLine.arguments.contains("--pintest")
-            || FileManager.default.fileExists(atPath: pinTrigger) {
+            || triggerExists(pinTrigger) {
             try? FileManager.default.removeItem(atPath: pinTrigger)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
                 self?.runPinDiagnostics()
@@ -396,7 +423,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 诊断入口：--wintest 对比 CGWindowList 与 SCShareableContent 的窗口名单
         let winTestTrigger = "/tmp/boxshot-wintest.trigger"
         if CommandLine.arguments.contains("--wintest")
-            || FileManager.default.fileExists(atPath: winTestTrigger) {
+            || triggerExists(winTestTrigger) {
             try? FileManager.default.removeItem(atPath: winTestTrigger)
             runWindowDiagnostics()
             return
@@ -404,7 +431,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 诊断入口：--qrflow 完整走一遍扫码链路（生成码 → 浮层 → 解码 → 打窗口层级）
         let qrFlowTrigger = "/tmp/boxshot-qrflow.trigger"
         if CommandLine.arguments.contains("--qrflow")
-            || FileManager.default.fileExists(atPath: qrFlowTrigger) {
+            || triggerExists(qrFlowTrigger) {
             try? FileManager.default.removeItem(atPath: qrFlowTrigger)
             runQRFlowDiagnostics()
             return
@@ -412,7 +439,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 诊断入口：--captest 真抓一次整屏落 PNG + 采样色值
         let captureTrigger = "/tmp/boxshot-captest.trigger"
         if CommandLine.arguments.contains("--captest")
-            || FileManager.default.fileExists(atPath: captureTrigger) {
+            || triggerExists(captureTrigger) {
             try? FileManager.default.removeItem(atPath: captureTrigger)
             runCaptureDiagnostics()
             return
@@ -420,14 +447,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 诊断入口：--qrtest 用应用自己的解码器跑触发文件里那张图
         let qrTrigger = "/tmp/boxshot-qrtest.trigger"
         if CommandLine.arguments.contains("--qrtest")
-            || FileManager.default.fileExists(atPath: qrTrigger) {
+            || triggerExists(qrTrigger) {
             runQRDiagnostics()
             return
         }
         // 诊断入口：--loupetest 离屏渲染一张放大镜 PNG（不用截图权限）
         let loupeTrigger = "/tmp/boxshot-loupetest.trigger"
         if CommandLine.arguments.contains("--loupetest")
-            || FileManager.default.fileExists(atPath: loupeTrigger) {
+            || triggerExists(loupeTrigger) {
             try? FileManager.default.removeItem(atPath: loupeTrigger)
             runLoupeDiagnostics()
             return
@@ -435,7 +462,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 诊断入口：--arrowtest 离屏渲染三支箭头（用来验「够不够尖」）
         let arrowTrigger = "/tmp/boxshot-arrowtest.trigger"
         if CommandLine.arguments.contains("--arrowtest")
-            || FileManager.default.fileExists(atPath: arrowTrigger) {
+            || triggerExists(arrowTrigger) {
             try? FileManager.default.removeItem(atPath: arrowTrigger)
             runArrowDiagnostics()
             return
@@ -447,7 +474,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 那就是真有对象没放（整屏 3420×2214 的 CA drawable 一块就是 57.8MB）。
         let memProbeTrigger = "/tmp/boxshot-memprobe.trigger"
         if CommandLine.arguments.contains("--memprobe")
-            || FileManager.default.fileExists(atPath: memProbeTrigger) {
+            || triggerExists(memProbeTrigger) {
             try? FileManager.default.removeItem(atPath: memProbeTrigger)
             runMemProbe()
             return
@@ -456,7 +483,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // （截图逐像素比「打字中」与「回车确认后」两张图，见函数注释）
         let textEditTrigger = "/tmp/boxshot-textedit.trigger"
         if CommandLine.arguments.contains("--textedit")
-            || FileManager.default.fileExists(atPath: textEditTrigger) {
+            || triggerExists(textEditTrigger) {
             try? FileManager.default.removeItem(atPath: textEditTrigger)
             runTextEditDiagnostics()
             return
@@ -467,7 +494,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 5 快捷键 / 6 关于），方便直接落到要核对的页。
         let settingsTrigger = "/tmp/boxshot-showsettings.trigger"
         if CommandLine.arguments.contains("--show-settings")
-            || FileManager.default.fileExists(atPath: settingsTrigger) {
+            || triggerExists(settingsTrigger) {
             let tab = Int((try? String(contentsOfFile: settingsTrigger, encoding: .utf8))?
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 0
             try? FileManager.default.removeItem(atPath: settingsTrigger)
@@ -480,7 +507,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 直接渲染视图、不走窗口，绕开"shell 起的进程窗口 screencapture 拍不到"的限制。
         let recordOptionsTrigger = "/tmp/boxshot-recordoptions.trigger"
         if CommandLine.arguments.contains("--recordoptionstest")
-            || FileManager.default.fileExists(atPath: recordOptionsTrigger) {
+            || triggerExists(recordOptionsTrigger) {
             try? FileManager.default.removeItem(atPath: recordOptionsTrigger)
             NSLog("[BoxShot][recordoptionstest] 进入诊断，开始离屏渲染")
             let view = RecordOptionsView(model: self.model)
@@ -516,7 +543,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // （实测 LaunchServices 直接按原 argv 起进程），那就 touch 一个触发文件。
         let recordTestTrigger = "/tmp/boxshot-recordtest.trigger"
         if CommandLine.arguments.contains("--recordtest")
-            || FileManager.default.fileExists(atPath: recordTestTrigger) {
+            || triggerExists(recordTestTrigger) {
             try? FileManager.default.removeItem(atPath: recordTestTrigger)
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
                 self?.runRecordDiagnostics()
@@ -525,7 +552,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 诊断入口：--show-fixedframe 直接摆出「摄像头录制」的固定录制框（看布局用）
         let fixedFrameTrigger = "/tmp/boxshot-fixedframe.trigger"
         if CommandLine.arguments.contains("--show-fixedframe")
-            || FileManager.default.fileExists(atPath: fixedFrameTrigger) {
+            || triggerExists(fixedFrameTrigger) {
             try? FileManager.default.removeItem(atPath: fixedFrameTrigger)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak self] in
                 self?.model.perform(.recordCamera)
@@ -956,7 +983,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 分别打一次"事件层驱动的探测结果"和"绕过事件层直接探测的结果" →
     /// 停留 3 秒（留给外部 `screencapture -x` 拍高亮框与提示）→ 单击确认 →
     /// 打浮层 frame。触发文件格式：`x,y`（全局左上原点），缺省 `800,400`。
-    private func runElementTestDiagnostics() {
+    private func runElementTestDiagnostics(rawPoint: String = "") {
         let logURL = URL(fileURLWithPath: "/tmp/boxshot-elementtest.log")
         try? "".write(to: logURL, atomically: true, encoding: .utf8)
         func log(_ text: String) {
@@ -968,9 +995,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         log("辅助功能已授权=\(ElementProbe.isTrusted)（未授权时应退化为窗口级）")
-        let raw = (try? String(contentsOfFile: "/tmp/boxshot-elementtest.trigger",
-                               encoding: .utf8)) ?? ""
-        let parts = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        // 坐标由调用方在**删掉 trigger 文件之前**读好传进来（见启动处的注释）
+        let parts = rawPoint.trimmingCharacters(in: .whitespacesAndNewlines)
             .split(separator: ",").compactMap { Double($0) }
         let target: CGPoint = parts.count == 2
             ? CGPoint(x: parts[0], y: parts[1]) : CGPoint(x: 800, y: 400)
@@ -1338,6 +1364,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func runQRDiagnostics() {
         let path = (try? String(contentsOfFile: "/tmp/boxshot-qrtest.trigger", encoding: .utf8))?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        // 用完即焚：留一个 trigger 在 /tmp 里，以后每次启动都会重跑这条诊断
+        try? FileManager.default.removeItem(atPath: "/tmp/boxshot-qrtest.trigger")
         let logURL = URL(fileURLWithPath: "/tmp/boxshot-qrtest.log")
         try? "".write(to: logURL, atomically: true, encoding: .utf8)
         func log(_ text: String) {
