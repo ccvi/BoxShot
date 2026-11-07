@@ -1429,6 +1429,7 @@ Resources/
 | `/tmp/boxshot-esctest.trigger` | 同上，标记文件触发 |
 | `--escwait` | 开遮罩后**什么都不投**，纯等 15 秒外部真按键（人手按 / 带授权的 `osascript`），逐条记录收到的 `keyDown`。用来区分「代码没接住」和「按键根本没进来」 |
 | `/tmp/boxshot-escwait.trigger` | 同上，标记文件触发 |
+| `--shotmem` | 量「截图前后到底常驻多少」：基线 → 遮罩起 → 松手峰值 → 浮层出来后 → 投 Esc 关掉 → 再静置 4 秒，每步打一次 `phys_footprint`（跟活动监视器「内存」列同口径）。日志 `/tmp/boxshot-shotmem.log`。🔴 比较两个版本的内存一定要用它：同一个流程、同一串步骤，否则「A 版 55MB、B 版 154MB」很可能只是两次量的状态不同（浮层还开着？跑过 OCR / 翻译？）。1.0.34 与 1.0.35 实测逐步差 ≤0.3MB |
 | `--dragtest` | 开遮罩 → 合成 10 步左键拖动 + 松手 → 判定遮罩收起且浮层按拖出来的框打开。验「松手即截」，日志 `/tmp/boxshot-dragtest.log` |
 | `/tmp/boxshot-dragtest.trigger` | 同上，标记文件触发 |
 | `--windowtest` | 走「窗口截图」动作 → 合成一次单击 → 检查拿到的框是否明显小于全屏（小于 = 真的点到了某个窗口，等于全屏 = 点到的是自家遮罩）。日志 `/tmp/boxshot-windowtest.log` |

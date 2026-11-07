@@ -373,6 +373,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.runElementTestDiagnostics(rawPoint: rawPoint)
             }
         }
+        // 诊断入口：--shotmem 量「截图做完、浮层关掉」之后到底常驻多少
+        // 用户 2026-11-07：「1.0.34 截图后 55.8MB，1.0.35 154.5MB」—— 要分清是
+        // 截图链路变重，还是别的功能（翻译 / 元素截取）留下的常驻。
+        // 同一段代码两棵树都塞一份，按同样步骤量，才有可比性。
+        if CommandLine.arguments.contains("--shotmem") {
+            runShotMemoryDiagnostics()
+            return
+        }
         // 诊断入口：--dragtest 用合成鼠标拖一次框，验「松手即截图」这条路
         // （用户明确要求去掉"单击选区内 / 回车"那一步，这条流程必须端到端跑一遍）。
         let dragTrigger = "/tmp/boxshot-dragtest.trigger"
@@ -1048,6 +1056,73 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     log("❌ 没有浮层编辑器（单击没走通）")
                 }
                 // 不真存盘：验完就走，免得往用户图库里塞图
+                exit(0)
+            default:
+                break
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+
+    // ── 诊断：截图前后常驻内存对照 ──────────────────────────
+    private func runShotMemoryDiagnostics() {
+        let url = URL(fileURLWithPath: "/tmp/boxshot-shotmem.log")
+        try? "".write(to: url, atomically: true, encoding: .utf8)
+        func log(_ t: String) {
+            NSLog("[BoxShot][shotmem] %@", t)
+            guard let h = try? FileHandle(forWritingTo: url) else { return }
+            h.seekToEndOfFile()
+            h.write("\(t)\n".data(using: .utf8)!)
+            try? h.close()
+        }
+        func mb() -> String {
+            String(format: "%.1f MB", Double(AppModel.currentFootprint()) / 1_048_576)
+        }
+
+        let src = CGEventSource(stateID: .hidSystemState)
+        func post(_ type: CGEventType, _ p: CGPoint) {
+            CGEvent(mouseEventSource: src, mouseType: type,
+                    mouseCursorPosition: p, mouseButton: .left)?.post(tap: .cghidEventTap)
+        }
+        func key(_ code: CGKeyCode) {
+            CGEvent(keyboardEventSource: src, virtualKey: code, keyDown: true)?.post(tap: .cghidEventTap)
+            usleep(40_000)
+            CGEvent(keyboardEventSource: src, virtualKey: code, keyDown: false)?.post(tap: .cghidEventTap)
+        }
+
+        log("① 基线 \(mb())")
+        model.perform(.regionShot)
+
+        let start = CGPoint(x: 420, y: 300)
+        let end = CGPoint(x: 980, y: 720)
+        var step = 0
+        let timer = Timer(timeInterval: 0.5, repeats: true) { t in
+            step += 1
+            switch step {
+            case 3:
+                log("② 遮罩已起 \(mb()) isActive=\(self.model.isRegionSelectorActive)")
+                post(.mouseMoved, start)
+                post(.leftMouseDown, start)
+            case 4...7:
+                let f = CGFloat(step - 3) / 4
+                post(.leftMouseDragged, CGPoint(x: start.x + (end.x - start.x) * f,
+                                                y: start.y + (end.y - start.y) * f))
+            case 8:
+                post(.leftMouseUp, end)
+                log("③ 松手后 0.5 秒 \(mb())")
+            case 12:
+                log("④ 浮层出来后 \(mb()) 浮层=\(self.model.overlayEditor != nil)")
+            case 13:
+                log("⑤ 投 Esc 关浮层")
+                key(53)
+            case 17:
+                log("⑥ Esc 后 2 秒 \(mb()) 浮层=\(self.model.overlayEditor != nil)")
+            case 25:
+                log("⑦ 再静置 4 秒 \(mb())")
+            case 27:
+                t.invalidate()
+                log("⑧ 收尾 \(mb())")
                 exit(0)
             default:
                 break
