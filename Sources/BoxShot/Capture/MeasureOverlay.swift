@@ -31,6 +31,9 @@ final class MeasureOverlay: NSObject {
                              defer: false,
                              screen: screen)
         panel.level = .screenSaver
+        // 同上（见 RegionSelector.present）：整屏窗口的 CA backing store 按色彩空间定格式，
+        // 不指定就是广色域 16 位（3420×2214 → 57.8MB），sRGB 8 位只要一半。
+        panel.colorSpace = .sRGB
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = false

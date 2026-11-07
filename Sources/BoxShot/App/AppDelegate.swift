@@ -1120,6 +1120,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 log("⑥ Esc 后 2 秒 \(mb()) 浮层=\(self.model.overlayEditor != nil)")
             case 25:
                 log("⑦ 再静置 4 秒 \(mb())")
+                log("窗口清单：\(NSApp.windows.count) 个")
+                for w in NSApp.windows {
+                    log("  · \(type(of: w)) frame=\(w.frame) visible=\(w.isVisible) level=\(w.level.rawValue) layer=\(w.contentView?.layer != nil)")
+                }
+                log("浮层登记：\(self.model.overlayEditors.count) 个 / 贴图窗口 ——")
             case 27:
                 t.invalidate()
                 log("⑧ 收尾 \(mb())")

@@ -120,6 +120,11 @@ final class RegionSelector: NSObject {
                              defer: false,
                              screen: screen)
         panel.level = .screenSaver
+        // 遮罩窗口铺满整屏，它的 CA backing store 是**按窗口的色彩空间定格式**的：
+        // 不指定时系统按显示器走广色域 16 位（实测 `vmmap` 里是
+        // `3420x2214 (RGhA) 57.8M 'CA Whippet Drawable'`），一成 8 位就只要一半。
+        // 截图本身是 sRGB 8 位的像素，画进去不会丢信息；标注颜色也都是 sRGB 定义的。
+        panel.colorSpace = .sRGB
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = false
@@ -217,6 +222,15 @@ final class RegionSelector: NSObject {
         //    ← objc_autoreleasePoolPop ← -[NSApplication run]
         // 所以推迟到下一轮 runloop 再释放，那时 AppKit 已经从事件里退出来了。
         DispatchQueue.main.async {
+            // 🔴 **光 orderOut 不够，必须 close()**。orderOut 只是"不显示"，
+            // 窗口还登记在 NSApp.windows 上，它那层铺满整屏的 CA drawable 也一直挂着：
+            // `vmmap` 里看得见 —— `SurfaceID: 0xe8  3420x2214 (RGhA) 57.8M
+            // 'CA Whippet Drawable'`。用户看到的现象就是「截完图、浮层都关掉了，
+            // 活动监视器里还常驻 ~98MB」（2026-11-07 反馈，1.0.34/1.0.35 都一样）。
+            // close() 让 AppKit 把窗口摘掉、把那层 surface 还给系统。
+            // 注意窗口建的时候 `isReleasedWhenClosed = false`，所以 close() 不会
+            // 跟我们抢着释放，真正的 dealloc 还是下一行的作用域结束。
+            panel?.close()
             _ = view
             _ = panel
         }
