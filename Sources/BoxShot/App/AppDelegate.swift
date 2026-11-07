@@ -274,6 +274,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     """)
             }
         }
+        // 诊断入口：--texttest 验「标注输入文字时拼音不显示」
+        // 走**真实输入法**（投真键盘事件，不用 insertText），分两轮：
+        // 先打一个词并用空格确认，再打一串长的 —— 用户在"输了一些文字之后"才出问题。
+        // 每步都打 hasMarkedText / 光标屏幕矩形 / 编辑器所在窗口与层级。
+        if CommandLine.arguments.contains("--texttest")
+            || FileManager.default.fileExists(atPath: "/tmp/boxshot-texttest.trigger") {
+            try? FileManager.default.removeItem(atPath: "/tmp/boxshot-texttest.trigger")
+            DispatchQueue.main.asyncAfter(deadline: DispatchTime.now() + 0.6) { [weak self] in
+                self?.runTextInputDiagnostics()
+            }
+        }
         // 诊断入口：--axdump 打印某点上的 AX 元素链条（role / frame / 名字）
         if CommandLine.arguments.contains("--axdump")
             || CommandLine.arguments.contains("--axdump-deep") {
@@ -300,6 +311,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     out += ElementProbe.chain(atGlobal: point, in: pid).joined(separator: "\n")
                 } else {
                     out += "该点没有窗口"
+                }
+                if let w1 = ScreenCapture.topLevelWindow(at: point), let p1 = w1.ownerPID, p1 > 0 {
+                    let raw = ElementProbe.element(atGlobal: point, in: p1)
+                    out += "原始命中：" + (raw.map { "\($0.rect)" } ?? "nil") + "\n"
+                }
+                out += "\n--- 最终命中（含下钻）---\n"
+                if let w2 = ScreenCapture.topLevelWindow(at: point), let p2 = w2.ownerPID, p2 > 0 {
+                    let h = ElementProbe.element(atGlobal: point, in: p2, windowFrame: w2.frame)
+                    out += h.map { ($0.isWindow ? "窗口级" : "元素级") + "「\($0.label)」\($0.rect)" } ?? "nil"
+                    out += "\n"
+                    // 悬停探测挂在 25Hz 上（40ms 一帧），下钻走几百次 IPC 到底多久 ——
+                    // 只有量出来才知道会不会把光标拖慢。20 次取均值。
+                    let t0 = Date()
+                    for _ in 0..<20 {
+                        _ = ElementProbe.element(atGlobal: point, in: p2, windowFrame: w2.frame)
+                    }
+                    let ms = Date().timeIntervalSince(t0) / 20 * 1000
+                    out += String(format: "耗时：平均 %.1f ms / 次（20 次）\n", ms)
                 }
                 out += "\n--- 全系统级 ---\n"
                 out += ElementProbe.chainForSystem(atGlobal: point).joined(separator: "\n")
@@ -837,6 +866,88 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
+    }
+
+    // ── 诊断：标注文字输入的输入法状态 ────────────────────────
+
+    /// 键码（US 布局）：只投**按键**、不带字符，输入法才会真的组字。
+    private static let letterKeyCodes: [Character: CGKeyCode] = [
+        "a": 0, "s": 1, "d": 2, "f": 3, "h": 4, "g": 5, "z": 6, "x": 7, "c": 8, "v": 9,
+        "b": 11, "q": 12, "w": 13, "e": 14, "r": 15, "y": 16, "t": 17, "o": 31, "u": 32,
+        "i": 34, "p": 35, "l": 37, "j": 38, "k": 40, "n": 45, "m": 46,
+    ]
+
+    private func runTextInputDiagnostics() {
+        let logURL = URL(fileURLWithPath: "/tmp/boxshot-texttest.log")
+        try? "".write(to: logURL, atomically: true, encoding: .utf8)
+        func log(_ text: String) {
+            NSLog("[BoxShot][texttest] %@", text)
+            guard let handle = try? FileHandle(forWritingTo: logURL) else { return }
+            handle.seekToEndOfFile()
+            handle.write("\(text)\n".data(using: .utf8)!)
+            try? handle.close()
+        }
+
+        showDiagnosticOverlay()
+
+        let src = CGEventSource(stateID: .hidSystemState)
+        func press(_ code: CGKeyCode) {
+            CGEvent(keyboardEventSource: src, virtualKey: code, keyDown: true)?.post(tap: .cghidEventTap)
+            usleep(35_000)
+            CGEvent(keyboardEventSource: src, virtualKey: code, keyDown: false)?.post(tap: .cghidEventTap)
+            usleep(65_000)
+        }
+        func typeLetters(_ text: String) {
+            for ch in text {
+                guard let code = Self.letterKeyCodes[ch] else { continue }
+                press(code)
+            }
+        }
+        func report(_ tag: String) {
+            let state = self.model.overlayEditor?.textEditorMarkedReportForDiagnostics ?? "没有浮层"
+            log("[\(tag)]\n" + state)
+        }
+
+        var step = 0
+        let timer = Timer(timeInterval: 0.5, repeats: true) { t in
+            step += 1
+            switch step {
+            case 3:
+                guard let editor = self.model.overlayEditor else {
+                    log("没有浮层，结束"); exit(0)
+                }
+                editor.textEditForDiagnostics(at: CGPoint(x: 60, y: 60), typing: "")
+                editor.tintTextEditorForDiagnostics()
+                log("已进入文字编辑（编辑器涂绿底，方便在整屏截图里定位）")
+            case 5:
+                log("— 第一轮：打 taihaole（走输入法）—")
+                typeLetters("taihaole")
+            case 7:
+                report("第一轮组字中")
+            case 8:
+                log("— 空格确认候选 —")
+                press(49)
+            case 9:
+                report("确认之后")
+            case 10:
+                log("— 第二轮：继续打 zhongguodeshipin —")
+                typeLetters("zhongguodeshipin")
+            case 14:
+                // 这一刻外部要 `screencapture -x` 拍一张：编辑器涂了绿底，
+                // 有没有字/拼音一眼就能看出来。
+                // （离屏渲染这条路走不通：`bitmapImageRepForCachingDisplay` 对
+                //   非 layer-backed 的 NSTextView 返回 nil，拍出来是空文件。）
+                report("第二轮组字中（此刻外部截图看候选框）")
+            case 17:
+                report("再等 1.5 秒")
+            case 22:
+                t.invalidate()
+                exit(0)
+            default:
+                break
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     // ── 诊断：智能元素截取 ────────────────────────────────────

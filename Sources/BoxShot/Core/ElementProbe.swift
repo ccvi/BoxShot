@@ -83,7 +83,8 @@ enum ElementProbe {
     /// `AXUIElementCreateSystemWide` + `CopyElementAtPosition` 按 z 序命中，永远先碰到
     /// 我们自己的遮罩 —— 用户看到的是"高亮了整个屏幕"。改成对"光标下最上层那个普通窗口"
     /// 的属主进程查，才拿得到底下的按钮。
-    static func element(atGlobal point: CGPoint, in pid: pid_t) -> Hit? {
+    static func element(atGlobal point: CGPoint, in pid: pid_t,
+                        windowFrame: CGRect? = nil) -> Hit? {
         guard isTrusted, pid > 0 else { return nil }
         let app = AXUIElementCreateApplication(pid)
         // 悬停时每一帧都要问一次；不设超时的话，碰到卡死的目标应用会让遮罩一起卡住
@@ -94,7 +95,115 @@ enum ElementProbe {
         // 还在刷新时，问到的是 AXMenuBar 0,0 1710×34）。信的代价是**截错一块区域**，
         // 所以只认"框真的盖住这个点"的命中，否则交给窗口级兜底。
         guard containsPoint(hit.rect, point) else { return nil }
-        return hit
+
+        // 🔴 网页上 `CopyElementAtPosition` **经常只给到一个大容器**（微博整页
+        // 1230×971、评论区整块），光标明明停在图标上。这不是我们查错了层，
+        // 是 Chromium 的命中测试在这种结构上就只回容器。所以命中"很粗"时
+        // 自己下钻：在子树里找**包含该点且面积最小**的那个节点。
+        guard let windowFrame, shouldDescend(hit.rect, windowFrame: windowFrame) else { return hit }
+        let windowArea = area(windowFrame)
+
+        // 第一跳：命中元素自己的子树。便宜，Chromium 结构规整时这一跳就够。
+        var best = hit
+        if let finer = descend(element, at: point, windowArea: windowArea),
+           let finerHit = describe(finer, at: point),
+           prefers(finerHit.rect, over: hit.rect) {
+            best = finerHit
+        }
+
+        // 第二跳：还是粗 → 从**窗口元素**整棵子树里找。
+        //
+        // 🔴 为什么不能只做第一跳：`CopyElementAtPosition` 给的容器和"光标底下那个
+        // 细节点"**经常不在同一棵子树**（实测 bilibili 播放页：命中「区域」934×523，
+        // 而真正在光标下的标题是同一个窗口里另一个分支的 AXHeading 352×57）。
+        // 在命中的那个容器里怎么钻都钻不出更小的 —— 于是用户看到的就是大外框。
+        // 从窗口向下找、按"包含该点"剪枝，才能跨分支找回细节点。
+        guard shouldDescend(best.rect, windowFrame: windowFrame),
+              let windowElement = windowElement(in: app, containing: point),
+              let finer = descend(windowElement, at: point, windowArea: windowArea,
+                                  budget: 240),
+              let finerHit = describe(finer, at: point),
+              prefers(finerHit.rect, over: best.rect) else { return best }
+        return finerHit
+    }
+
+    /// 纯函数：下钻结果要不要采纳 —— **必须严格更小**才换。
+    ///
+    /// 🔴 少了这一条就出过事故：下钻走错分支时拿回一个比原始命中更大的框
+    /// （实测从 352×57 变成 934×523），用户看到的反而更糟。宁可不动。
+    static func prefers(_ candidate: CGRect?, over current: CGRect) -> Bool {
+        guard let candidate, candidate.width > 0, candidate.height > 0 else { return false }
+        return candidate.width * candidate.height < current.width * current.height
+    }
+
+    /// 点所在的那个 AX 窗口元素（下钻第二跳的起点）。
+    ///
+    /// 找不到就返回 nil，**不要退回"第一个窗口"**：窗口对不上时整棵子树都是错的，
+    /// 往下找出来的细节点跟光标毫无关系。
+    private static func windowElement(in app: AXUIElement, containing point: CGPoint) -> AXUIElement? {
+        guard let value = attributeValue(app, kAXWindowsAttribute),
+              CFGetTypeID(value) == CFArrayGetTypeID(),
+              let windows = value as? [AXUIElement] else { return nil }
+        for window in windows {
+            guard let rect = frame(of: window) else { continue }
+            if containsPoint(rect, point) { return window }
+        }
+        return nil
+    }
+
+    /// 纯函数：这块命中"够不够粗"，值不值得再往子树里找更小的。
+    ///
+    /// 阈值 8% 是量出来的：正常控件（按钮/链接/输入框/一行文字）都远小于这个数，
+    /// 而"整块评论区""播放器容器""整页"都在几十个百分点。用 60%（整窗判定）
+    /// 当门槛的话，40% 那种大块会原样给用户 —— 就是「很容易就框到最大外框」。
+    static func shouldDescend(_ rect: CGRect, windowFrame: CGRect,
+                              maxAreaRatio: CGFloat = 0.08) -> Bool {
+        guard windowFrame.width > 0, windowFrame.height > 0,
+              rect.width > 0, rect.height > 0 else { return false }
+        return area(rect) / area(windowFrame) >= maxAreaRatio
+    }
+
+    private static func area(_ rect: CGRect) -> CGFloat { rect.width * rect.height }
+
+    /// 在子树里找"包含该点、面积最小"的那个节点。
+    ///
+    /// 预算封顶（节点数 / 层数）：它挂在 25Hz 的悬停探测上，一个几千节点的页面
+    /// 要是每次都整棵走完，每次查询几十上百次 IPC，光标一动整块遮罩就抖。
+    /// 另外找到"已经足够小"的节点就提前收工 —— 再往下多走几层也只是同一个小图标的
+    /// 内部文字，对用户没有区别。
+    private static func descend(_ root: AXUIElement, at point: CGPoint,
+                               windowArea: CGFloat,
+                               budget: Int = 80, depth: Int = 0) -> AXUIElement? {
+        guard budget > 0, depth < 16 else { return nil }
+        var remaining = budget
+        var best: AXUIElement?
+        var bestArea = CGFloat.greatestFiniteMagnitude
+        for child in children(of: root) {
+            remaining -= 1
+            guard remaining > 0 else { break }
+            guard let rect = frame(of: child), rect.width >= 12, rect.height >= 12,
+                  containsPoint(rect, point) else { continue }
+            // 先试着再往下钻；钻不动就用这个子节点
+            let deeper = descend(child, at: point, windowArea: windowArea,
+                                 budget: remaining, depth: depth + 1)
+            let candidate = deeper ?? child
+            guard let candidateRect = frame(of: candidate) else { continue }
+            let candidateArea = area(candidateRect)
+            if candidateArea < bestArea {
+                bestArea = candidateArea
+                best = candidate
+                // 已经小到"就是一个控件"了，收工
+                if windowArea > 0, candidateArea / windowArea <= 0.015 { break }
+            }
+        }
+        return best
+    }
+
+    private static func children(of element: AXUIElement) -> [AXUIElement] {
+        guard let value = attributeValue(element, kAXChildrenAttribute),
+              CFGetTypeID(value) == CFArrayGetTypeID(),
+              let array = value as? [AXUIElement] else { return [] }
+        return array
     }
 
     /// 纯函数：这个框是否盖住探测点（容差 2pt，AX 常给 ±1pt 的取整误差）

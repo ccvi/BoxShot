@@ -576,7 +576,8 @@ final class RegionSelector: NSObject {
                 return
             }
             let pid = window.ownerPID ?? 0
-            var hit = ElementProbe.element(atGlobal: global, in: pid)
+            // 传窗口框进去：命中"粗到像整块区域"时，ElementProbe 会自己下钻找更小的节点
+            var hit = ElementProbe.element(atGlobal: global, in: pid, windowFrame: window.frame)
                 ?? ElementProbe.hit(forWindow: window)
             // 浏览器这类应用（不把网页内容暴露给 AX 时）只肯给到"和窗口一样大的 Group"，
             // 打出来是「区域」，用户根本不知道截的是什么。框既然就是整个窗口，

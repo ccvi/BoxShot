@@ -149,6 +149,53 @@ final class OverlayEditorController: NSObject {
     }
     var editorFrameForDiagnostics: NSRect? { contentView?.editorFrameForDiagnostics }
     var isEditingTextForDiagnostics: Bool { contentView?.isEditingText ?? false }
+
+    /// 诊断用：输入法组字状态快照（`--texttest` 用）。
+    /// 「拼音不显示」到底是"根本没在组字"（输入上下文丢了）还是"组了但看不见"
+    /// （被别的窗口挡住 / 画到窗口外），只有把 `hasMarkedText`、光标位置、
+    /// 编辑器所在的窗口和层级一起打出来才分得清。
+    var textEditorMarkedReportForDiagnostics: String {
+        guard let view = contentView, let tv = view.editorForDiagnostics else { return "没有编辑器" }
+        let marked = tv.hasMarkedText()
+        let caret = tv.firstRect(forCharacterRange: tv.selectedRange(), actualRange: nil)
+        let win = tv.window
+        let screenFrame = win?.screen?.frame ?? .zero
+        let used = tv.layoutManager?.usedRect(for: tv.textContainer!) ?? .zero
+        return """
+        文本="\(tv.string)" 长=\((tv.string as NSString).length)
+        组字中=\(marked) 选中=\(tv.selectedRange()) 第一响应=\(win?.firstResponder === tv)
+        编辑器frame=\(tv.frame) 光标屏幕矩形=\(caret)
+        usedRect=\(used) 可见区=\(tv.visibleRect) 隐藏=\(tv.isHidden) alpha=\(tv.alphaValue)
+        文字色=\(tv.textColor.map { "\($0)" } ?? "nil") 字号=\(tv.font?.pointSize ?? 0) 父视图=\(tv.superview.map { String(describing: type(of: $0)) } ?? "nil")
+        窗口=\(win.map { "\($0.frame) level=\($0.level.rawValue) key=\($0.isKeyWindow)" } ?? "nil")
+        bounds=\(tv.bounds) 窗口坐标=\(tv.convert(tv.bounds, to: nil)) 父视图flipped=\(tv.superview?.isFlipped ?? false)
+        层级=\(win.map { Self.dumpHierarchy($0.contentView, depth: 0) } ?? "nil")
+        屏幕=\(screenFrame)
+        """
+    }
+    /// 诊断用：把视图层级（类名 + frame）打出来，用来确认"文字视图到底在哪、谁盖着它"
+    private static func dumpHierarchy(_ view: NSView?, depth: Int) -> String {
+        guard let view, depth <= 3 else { return "" }
+        var out = String(repeating: "  ", count: depth)
+            + "\(type(of: view)) frame=\(view.frame) hidden=\(view.isHidden)\n"
+        for child in view.subviews.prefix(12) {
+            out += dumpHierarchy(child, depth: depth + 1)
+        }
+        return out
+    }
+
+    /// 诊断用：给编辑器涂个亮底（用来在整屏截图里**定位**它，并确认字到底画没画）
+    func tintTextEditorForDiagnostics() {
+        guard let tv = contentView?.editorForDiagnostics else { return }
+        tv.drawsBackground = true
+        tv.backgroundColor = .systemGreen
+    }
+
+    /// 诊断用：只按字符逐个插入（**不走输入法**）—— 用来区分"文字进不去"和"输入法没起来"
+    func insertTextForDiagnostics(_ text: String) {
+        guard let editor = contentView?.editorForDiagnostics else { return }
+        editor.insertText(text, replacementRange: editor.selectedRange())
+    }
     /// 诊断用：工具条 frame / 当前工具（验"合成点击到底能不能进 .statusBar 面板"）
     var toolbarFrameForDiagnostics: CGRect { toolbarPanel?.frame ?? .zero }
     var docToolForDiagnostics: String { doc.tool.rawValue }
@@ -1858,7 +1905,7 @@ final class OverlayEditorView: NSView {
         editingShapeID = shape.id
         doc.selectedID = shape.id
 
-        let editor = NSTextView(frame: .zero)
+        let editor = LiveTextEditorView(frame: .zero)
         editor.delegate = self
         editor.drawsBackground = false
         editor.isRichText = false
@@ -1881,6 +1928,13 @@ final class OverlayEditorView: NSView {
         editor.isGrammarCheckingEnabled = false
         editor.smartInsertDeleteEnabled = false
         editor.string = shape.text
+        // 🔴 组字（marked text）期间 NSTextView **不会**回调 delegate 的 `textDidChange`，
+        // 于是编辑框一直停在"上屏之后"的宽度上：字越打越长，拼音和光标却跑到框外，
+        // 用户看到的就是「输了一些文字之后，再打字拼音就不见了」。
+        // 走 NSTextView 自己的 `didChangeText()`（任何文字改动都会过它）补一条通路。
+        editor.onTextChanged = { [weak self] in
+            self?.liveTextChanged()
+        }
         addSubview(editor)
         editingTextView = editor
         layoutTextEditor()
@@ -1890,17 +1944,30 @@ final class OverlayEditorView: NSView {
         needsDisplay = true
     }
 
+    /// 文字（含未上屏的组字）变了：同步进文档 + 把框长到够用 + 重画
+    private func liveTextChanged() {
+        guard let editor = editingTextView, let id = editingShapeID else { return }
+        doc.setLiveText(editor.string, for: id)
+        layoutTextEditor()
+        needsDisplay = true
+    }
+
     /// 编辑器位置 = 渲染器给这个文字算出来的框（同一套 displayBounds，不许另写一份）
     private func layoutTextEditor() {
         guard let editor = editingTextView, let id = editingShapeID,
               let shape = doc.shapes.first(where: { $0.id == id }),
               let box = shape.displayBounds else { return }
         let vpp = viewPerPixel
+        // 宽度取「渲染器算的框」和「文字视图自己排出来的宽度」两者的较大值。
+        // 🔴 后者是必须的：组字期间 `shape.text` 里的字和屏幕上的字可能不同步
+        // （标记文字的上屏时机由输入法决定），只看渲染框会让编辑区比文字窄，
+        // 多出来的拼音/光标被截在框外 —— 用户看到的就是"拼音不显示了"。
+        let laidOut = editor.layoutManager?.usedRect(for: editor.textContainer!) ?? .zero
         editor.frame = NSRect(x: imageRect.minX + box.minX * vpp,
                               y: imageRect.minY + box.minY * vpp,
                               // 空文字时框只有 40 像素宽，换算成点太小，给个下限好看见光标
-                              width: max(60, box.width * vpp),
-                              height: max(20, box.height * vpp))
+                              width: max(60, box.width * vpp, laidOut.width + 8),
+                              height: max(20, box.height * vpp, laidOut.height + 4))
         // 文字变长后框要比视图宽，否则会横向滚动、看着像截断了
         editor.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
                                                      height: CGFloat.greatestFiniteMagnitude)
@@ -1974,6 +2041,20 @@ final class OverlayEditorView: NSView {
 //    改成空、再换成别的字，撤销一次应当直接回到"动手之前"。
 // 3. Esc 归 `cancelOperation:`（文本视图自己的命令链），不要在这里判断 keyCode：
 //    输入法组字过程中的 Esc 是"取消候选"，抢掉会把人正在打的拼音弄丢。
+/// 组字也能感知到的 NSTextView。
+///
+/// 🔴 `textDidChange`（delegate 回调）在**标记文字**（输入法未上屏的拼音）变化时**不触发**，
+/// 而 `didChangeText()` 是 NSTextView 内部任何文字改动的统一出口，组字也走它。
+/// 少了这条通路，编辑框在组字期间不会变宽，越长越离谱。
+final class LiveTextEditorView: NSTextView {
+    var onTextChanged: (() -> Void)?
+
+    override func didChangeText() {
+        super.didChangeText()
+        onTextChanged?()
+    }
+}
+
 extension OverlayEditorView: NSTextViewDelegate {
 
     func textDidChange(_ notification: Notification) {

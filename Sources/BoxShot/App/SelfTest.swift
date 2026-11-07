@@ -401,6 +401,47 @@ enum SelfTest {
                                          windowFrame: webWin))
             check("矩形为 nil 时不算粗命中",
                   !ElementProbe.isCoarse(nil, windowFrame: webWin))
+
+            // 「粗到下钻都嫌大」是另一条门槛（8%），比"就是整窗"（60%）严得多。
+            // 用 60% 当门槛的话，40% 那种大块会原样给用户 —— 就是
+            // 「鼠标明明在元素上，却框成网页大外框」。
+            check("整页命中 → 要下钻",
+                  ElementProbe.shouldDescend(CGRect(x: 42, y: 74, width: 942, height: 971),
+                                             windowFrame: webWin))
+            check("首页导航链接 → 不用下钻",
+                  !ElementProbe.shouldDescend(CGRect(x: 66, y: 74, width: 113, height: 64),
+                                              windowFrame: webWin))
+            check("占窗口 51% 的大块 → 要下钻（isCoarse 拦不住它）",
+                  ElementProbe.shouldDescend(CGRect(x: 42, y: 74, width: 942, height: 550),
+                                             windowFrame: webWin)
+                    && !ElementProbe.isCoarse(CGRect(x: 42, y: 74, width: 942, height: 550),
+                                              windowFrame: webWin))
+            check("刚好 8%（边界含）→ 要下钻",
+                  ElementProbe.shouldDescend(CGRect(x: 0, y: 0, width: 400, height: 200),
+                                             windowFrame: CGRect(x: 0, y: 0,
+                                                                 width: 1000, height: 1000)))
+            check("低于 8% 的正常控件 → 不折腾",
+                  !ElementProbe.shouldDescend(CGRect(x: 0, y: 0, width: 200, height: 40),
+                                              windowFrame: CGRect(x: 0, y: 0,
+                                                                  width: 1141, height: 971)))
+            check("窗口尺寸为 0 时不下钻",
+                  !ElementProbe.shouldDescend(CGRect(x: 0, y: 0, width: 10, height: 10),
+                                              windowFrame: .zero))
+
+            // 下钻结果必须严格更小才采纳 —— 走错分支时拿回更大的框，用户看到的反而更糟
+            let hitRect = CGRect(x: 153, y: 391, width: 352, height: 57)
+            check("更小的下钻结果 → 采纳",
+                  ElementProbe.prefers(CGRect(x: 153, y: 391, width: 113, height: 57),
+                                       over: hitRect))
+            check("更大的下钻结果 → 丢掉",
+                  !ElementProbe.prefers(CGRect(x: 146, y: 242, width: 934, height: 523),
+                                        over: hitRect))
+            check("一样大 → 不换（白折腾还换了个名字）",
+                  !ElementProbe.prefers(hitRect, over: hitRect))
+            check("没有下钻结果 → 保留原命中",
+                  !ElementProbe.prefers(nil, over: hitRect))
+            check("零尺寸的下钻结果 → 保留原命中（别把框弄没）",
+                  !ElementProbe.prefers(CGRect(x: 0, y: 0, width: 0, height: 0), over: hitRect))
         }
 
         // ── OCR 翻译（用户 2026-11-06：「可以选择翻译成中文或英文（下拉选择）」）──
