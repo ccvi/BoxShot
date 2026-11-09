@@ -1055,6 +1055,14 @@ enum SelfTest {
                   onWhite != nil && onWhite!.red > 0.95)
             check("步骤标注可命中（点选删除用）",
                   stepShape.hitTest(CGPoint(x: 52, y: 52)) && !stepShape.hitTest(CGPoint(x: 90, y: 90)))
+            // 数字大小：用户 2026-11-09「标号里的数字太小了」。
+            // 只看"能不能画"看不出小不小，得卡比例 —— 原先 28/52 只占 38%，像白点。
+            check("步骤数字够大（字号 ≥ 半径 × 1.25，字高约占直径一半）",
+                  EditorRenderer.stepFontSize >= EditorRenderer.stepBubbleRadius * 1.25)
+            let stepNumFont = NSFont.systemFont(ofSize: EditorRenderer.stepFontSize, weight: .bold)
+            let twoDigitWidth = ("88" as NSString).size(withAttributes: [.font: stepNumFont]).width
+            check("两位数仍塞得进圆里（每边留 3px，实际 \(Int(twoDigitWidth.rounded()))px / 可用 \(Int((EditorRenderer.stepBubbleRadius * 2 - 6).rounded()))px）",
+                  twoDigitWidth <= EditorRenderer.stepBubbleRadius * 2 - 6)
         }
 
         // ── 截图美化（背景 / 圆角 / 阴影 / padding，Xnapper 式套壳）──
