@@ -13,6 +13,7 @@
 #   ./build-app.sh --install      构建完装到 /Applications
 #   ./build-app.sh --bump         强制版本号 +1（即使源码没变）
 #   ./build-app.sh --no-bump      保持版本号不变（指纹照常更新）
+#   ./build-app.sh --no-dmg       不打 dmg 安装包（默认会打）
 #   ./build-app.sh --clean        先清掉 .build 再构建
 #
 # 版本号：唯一来源是工程根目录的 VERSION 文件（一行，形如 1.0.0）。
@@ -30,6 +31,7 @@ DO_INSTALL=0
 FORCE_BUMP=0
 SKIP_BUMP=0
 DO_CLEAN=0
+DO_DMG=1
 SWIFT_FLAGS=()
 
 for argument in "$@"; do
@@ -40,9 +42,10 @@ for argument in "$@"; do
         --install)    DO_INSTALL=1 ;;
         --bump)       FORCE_BUMP=1 ;;
         --no-bump)    SKIP_BUMP=1 ;;
+        --no-dmg)     DO_DMG=0 ;;
         --clean)      DO_CLEAN=1 ;;
         -h|--help)
-            sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)
@@ -298,6 +301,54 @@ else
 fi
 
 # ------------------------------------------------------------
+# 5.5 dmg 安装包（用户 2026-11-09 口径：所有应用打包都出 dmg）
+#
+# 🔴 顺序：先签 app，再打 dmg。反过来的话只能挂起 dmg 重签里面的 app，
+#    而一重签 cdhash 就变，用户此前授的权当场作废。
+# ------------------------------------------------------------
+APP_CDHASH="$(codesign -dvvv "$APP_DIR" 2>&1 | awk -F= '/^CDHash=/ {print $2; exit}')"
+DMG_PATH=""
+if [[ "$DO_DMG" == "1" ]]; then
+    echo "▶ 生成 dmg 安装包…"
+    DMG_PATH="$DIST_DIR/${APP_NAME}-${APP_VERSION}.dmg"
+    STAGE_DIR="$(mktemp -d)"
+    # 暂存目录里只放两样：签好名的 app + 指向 /Applications 的软链
+    # （把图标拖进去就等于装好，这是 mac 用户的肌肉记忆）
+    ditto "$APP_DIR" "$STAGE_DIR/$APP_NAME.app"
+    ln -s /Applications "$STAGE_DIR/Applications"
+    rm -f "$DMG_PATH"
+    # UDZO = zlib 压缩：体积小、挂载快；UDRO 只在需要现场写盘时才用
+    if hdiutil create -volname "$DISPLAY_NAME" -srcfolder "$STAGE_DIR" \
+        -ov -format UDZO "$DMG_PATH" > /tmp/boxshot-dmg.log 2>&1; then
+        echo "  ✓ ${DMG_PATH}（$(du -h "$DMG_PATH" | awk '{print $1}')）"
+    else
+        echo "  ✗ 打 dmg 失败，日志：/tmp/boxshot-dmg.log" >&2
+        tail -5 /tmp/boxshot-dmg.log | sed 's/^/    /' >&2
+        rm -rf "$STAGE_DIR"
+        exit 1
+    fi
+    rm -rf "$STAGE_DIR"
+
+    # 挂起来比对里面 app 的 cdhash 与 dist 的一致：避免「dmg 里装出来的
+    # 不是验证过的那一份」—— 这种事装完才发现就晚了。
+    DMG_MNT="$(mktemp -d)"
+    if hdiutil attach -nobrowse -readonly -mountpoint "$DMG_MNT" "$DMG_PATH" > /dev/null 2>&1; then
+        DMG_CDHASH="$(codesign -dvvv "$DMG_MNT/$APP_NAME.app" 2>&1 | awk -F= '/^CDHash=/ {print $2; exit}')"
+        hdiutil detach "$DMG_MNT" > /dev/null 2>&1 || true
+        if [[ -z "$APP_CDHASH" || "$APP_CDHASH" != "$DMG_CDHASH" ]]; then
+            echo "  ✗ dmg 里的 app 与 dist 不是同一份：dist=${APP_CDHASH:-?} / dmg=${DMG_CDHASH:-?}" >&2
+            exit 1
+        fi
+        echo "  ✓ dmg 内 app 的 cdhash 与 dist 一致（${DMG_CDHASH}）"
+    else
+        echo "  ⚠ dmg 挂载校验失败（不影响安装包本身，但这份 dmg 没验过）" >&2
+    fi
+    rmdir "$DMG_MNT" 2>/dev/null || true
+else
+    echo "▶ 已跳过 dmg（--no-dmg）"
+fi
+
+# ------------------------------------------------------------
 # 6. 版本号落盘（放最后：中途失败不该吃掉一个版本号）
 # ------------------------------------------------------------
 printf '%s\n' "$APP_VERSION" > "$VERSION_FILE"
@@ -333,6 +384,9 @@ echo ""
 echo "────────────────────────────────────────────────────"
 echo "打包完成：${APP_DIR}"
 echo "版本号：${APP_VERSION}（构建号 ${APP_BUILD_NUMBER}）"
+if [[ -n "$DMG_PATH" ]]; then
+    echo "安装包：${DMG_PATH}"
+fi
 echo ""
 du -sh "$APP_DIR" | sed 's/^/  体积 /'
 
@@ -340,7 +394,7 @@ if [[ "$DO_INSTALL" == "1" ]]; then
     echo ""
     echo "▶ 安装到 /Applications…"
     INSTALLED_APP="/Applications/$APP_NAME.app"
-    DIST_CDHASH="$(codesign -dvvv "$APP_DIR" 2>&1 | awk -F= '/^CDHash=/ {print $2; exit}')"
+    DIST_CDHASH="${APP_CDHASH:-$(codesign -dvvv "$APP_DIR" 2>&1 | awk -F= '/^CDHash=/ {print $2; exit}')}"
     rm -rf "$INSTALLED_APP"
 
     # 🔴 用 ditto 复制，**复制后绝不重新签名**。

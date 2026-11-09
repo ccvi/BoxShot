@@ -16,13 +16,18 @@ final class EditorDocument: ObservableObject {
     /// 默认落在「矩形」上等于每次都要先点一次工具条。
     @Published var tool: EditorTool = .arrow
     @Published var color: RGBColor = .red
-    @Published var lineWidth: CGFloat = 4
+    /// 粗细 / 字号：默认值**取上次选的档位**，不是写死的 4 / 30。
+    ///
+    /// 用户 2026-11-09 口径：「工具条的这两项，选择了就要记住，别用过了，再使用又恢复到初始」。
+    /// 放在这里（而不是各个窗口各自赋值）是因为打开文档的入口有三个：截图浮层、
+    /// 独立编辑窗口、历史记录里"接着编辑" —— 只在前两个里赋值，第三个就又回到出厂的 4 / 30。
+    @Published var lineWidth: CGFloat = OverlayEditorController.rememberedLineWidth()
     /// 新建文字的字号，**单位是点**（视图点），落成形状时 × `pixelScale` 换成图像像素。
     ///
-    /// 为什么默认值是 30：加字号控件之前，浮层里写死的就是 `30 * pixelScale`。
+    /// 为什么出厂值是 30：加字号控件之前，浮层里写死的就是 `30 * pixelScale`。
     /// 沿用这个数，用户加完控件写出来的第一段字跟以前一模一样 —— 新增控件不该
     /// 顺手把既有观感改了。6 个档位里也正好包含 30，下拉不会显示成"未选中"。
-    @Published var fontSize: CGFloat = 30
+    @Published var fontSize: CGFloat = OverlayEditorController.rememberedFontSize()
     /// 放大倍数（只对放大镜生效）：用户 2026-11-05 口径「放大倍数 2 倍和 3 倍」。
     /// 跟线宽 / 字号一样存 UserDefaults —— 下一张图打开还是这一档。
     @Published var loupeZoom: CGFloat = EditorDocument.rememberedLoupeZoom()
@@ -1151,6 +1156,11 @@ struct EditorView: View {
                 Text("粗细").font(.caption).foregroundStyle(.secondary)
                 Slider(value: $doc.lineWidth, in: 2...24, step: 1)
                     .frame(width: 120)
+                    // 这颗滑杆也是"选过的粗细"：在编辑窗口调完，下次开图还得是这个数
+                    // （用户 2026-11-09「选择了就要记住」—— 两处入口只能有一套记忆）。
+                    .onChange(of: doc.lineWidth) { _, new in
+                        OverlayEditorController.rememberLineWidth(new)
+                    }
                 Text("\(Int(doc.lineWidth))").font(.caption)
                     .monospacedDigit().foregroundStyle(.secondary)
                     .frame(width: 18, alignment: .trailing)
@@ -1195,6 +1205,8 @@ struct EditorView: View {
     /// 正在输入 → 实时改（不压撤销点）；选中文字 → 改它并记住默认值；否则只改默认值。
     private func setFontSize(_ points: CGFloat) {
         doc.fontSize = points
+        // 记住这一档（浮层那边 `changeFontSize` 同一个口径）
+        OverlayEditorController.rememberFontSize(points)
         let pixels = EditorDocument.pixelFontSize(points: points, fitScale: fitScale)
         if let id = editingID, let idx = doc.shapes.firstIndex(where: { $0.id == id }) {
             doc.shapes[idx].fontSize = pixels

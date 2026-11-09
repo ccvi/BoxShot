@@ -2296,6 +2296,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     popup.sendAction(popup.action, to: popup.target)
                     let shapeSize = overlay.docForDiagnostics.selectedShape?.fontSize ?? -1
                     clog("选 20 pt 后：该文字 fontSize=\(shapeSize)px（应 40 = 20pt × 2）· 默认字号=\(overlay.docFontSizeForDiagnostics) pt")
+
+                    // ── 粘性（2026-11-09 用户口径「选择了就要记住」）──
+                    // 走的是和用户点中某一项完全相同的 sendAction 链路，
+                    // 验三件事：落盘了没有 / 新文档读不读得回来 / 两个 key 互不干扰。
+                    let std = UserDefaults.standard
+                    let oldW = std.object(forKey: OverlayEditorController.lastLineWidthKey)
+                    let oldF = std.object(forKey: OverlayEditorController.lastFontSizeKey)
+                    if let wPopup = overlay.lineWidthPopupForDiagnostics {
+                        wPopup.selectItem(at: 3)               // 12 px
+                        wPopup.sendAction(wPopup.action, to: wPopup.target)
+                        clog("选 12 px 后：doc.lineWidth=\(overlay.docForDiagnostics.lineWidth) · 落盘=\(std.object(forKey: OverlayEditorController.lastLineWidthKey) ?? "nil")")
+                    } else {
+                        clog("❌ 没找到粗细下拉")
+                    }
+                    clog("选 20 pt 落盘：lastFontSize=\(std.object(forKey: OverlayEditorController.lastFontSizeKey) ?? "nil")")
+                    let fresh = EditorDocument(image: overlay.docForDiagnostics.baseImage)
+                    clog("新开一份文档：lineWidth=\(fresh.lineWidth)（应 12）· fontSize=\(fresh.fontSize)（应 20）")
+                    // 诊断动的是真实偏好，跑完还原，别把用户的档位改掉
+                    if let oldW { std.set(oldW, forKey: OverlayEditorController.lastLineWidthKey) }
+                    else { std.removeObject(forKey: OverlayEditorController.lastLineWidthKey) }
+                    if let oldF { std.set(oldF, forKey: OverlayEditorController.lastFontSizeKey) }
+                    else { std.removeObject(forKey: OverlayEditorController.lastFontSizeKey) }
+                    clog("已还原：lastLineWidth=\(std.object(forKey: OverlayEditorController.lastLineWidthKey) ?? "nil") lastFontSize=\(std.object(forKey: OverlayEditorController.lastFontSizeKey) ?? "nil")")
                 }
             }
         }

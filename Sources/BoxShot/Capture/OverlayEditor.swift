@@ -215,10 +215,10 @@ final class OverlayEditorController: NSObject {
     init(model: AppModel, image: CGImage, selectionFrameAppKit frame: CGRect,
          fullDisplay: FullDisplay? = nil, shapes: [AnnotationShape] = []) {
         self.model = model
+        // 粗细 / 字号由 `EditorDocument` 的默认值自己从 UserDefaults 取回上次选的档位
+        // （用户口径「默认落在最近选择的档位上」→ 2026-11-09 追加字号也照办）。
+        // 🔴 别在这里再赋一次：两处都写会让人以为其中一处才是权威，改错一处看着还对。
         let document = EditorDocument(image: image, shapes: shapes)
-        // 用户口径「默认落在最近选择的档位上」：新截图一打开就是上次选的粗细，
-        // 不用每次去面板里再点一遍。
-        document.lineWidth = Self.rememberedLineWidth()
         self.doc = document
         self.selectionFrame = frame
         self.fullDisplay = fullDisplay
@@ -606,6 +606,8 @@ final class OverlayEditorController: NSObject {
     func showColorPanelForDiagnostics() { toggleColorPanel() }
     /// 诊断用：字号下拉本体（验菜单项与 target/action 有没有接上）
     var fontSizePopupForDiagnostics: NSPopUpButton? { fontSizePopup }
+    /// 诊断用：粗细下拉本体
+    var lineWidthPopupForDiagnostics: NSPopUpButton? { lineWidthPopup }
     /// 诊断用：当前默认字号（点）
     var docFontSizeForDiagnostics: CGFloat { doc.fontSize }
 
@@ -764,6 +766,29 @@ final class OverlayEditorController: NSObject {
 
     static func rememberLineWidth(_ width: CGFloat, _ defaults: UserDefaults = .standard) {
         defaults.set(Double(width), forKey: lastLineWidthKey)
+    }
+
+    // ── 「最近选择的字号」──────────────────────────────────
+    //
+    // 用户 2026-11-09 口径：「工具条的这两项（px / pt），选择了就要记住，
+    // 别用过了，再使用又恢复到初始」。粗细那边早就记了，字号一直只活在
+    // 内存里的 `doc.fontSize` —— 关掉浮层就丢，下次又是 30pt。
+    // 跟粗细同一套写法：独立 key、读写收在两个函数里、自检喂注入的 defaults 验。
+
+    static let lastFontSizeKey = "boxshot.lastFontSize"
+    /// 出厂字号（点）：加字号控件之前浮层里写死的就是 `30 * pixelScale`。
+    static let defaultFontSize: CGFloat = 30
+
+    /// 上次选的档位；没选过 → 30pt；存的数不在档位表里（老版本存过 33 之类）→ 取最近一档。
+    static func rememberedFontSize(_ defaults: UserDefaults = .standard) -> CGFloat {
+        let stored = defaults.object(forKey: lastFontSizeKey) != nil
+            ? CGFloat(defaults.double(forKey: lastFontSizeKey))
+            : defaultFontSize
+        return fontSizeOptions[fontSizeIndex(for: stored)]
+    }
+
+    static func rememberFontSize(_ points: CGFloat, _ defaults: UserDefaults = .standard) {
+        defaults.set(Double(points), forKey: lastFontSizeKey)
     }
 
     /// 调色板：7 个颜色（1.0.10 用户口径「颜色 6 个颜色」，顺序按他给的色卡；
@@ -1024,6 +1049,8 @@ final class OverlayEditorController: NSObject {
     ///   - 别的工具 / 没选中：只改默认值。
     private func changeFontSize(_ points: CGFloat) {
         doc.fontSize = points
+        // 记住这一档：下一张截图 / 下次启动还是它（用户 2026-11-09 口径）
+        Self.rememberFontSize(points)
         if contentView?.isEditingText == true {
             contentView?.setLiveFontSize(points)
         } else {

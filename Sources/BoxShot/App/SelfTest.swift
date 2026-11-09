@@ -858,6 +858,52 @@ enum SelfTest {
                   OverlayEditorController.rememberedLineWidth(widthDefaults) == 12)
             widthDefaults.removePersistentDomain(forName: widthSuite)
 
+            // 字号也得粘住（用户 2026-11-09「这两项选择了就要记住，别再使用又恢复初始」）。
+            // 以前只有粗细记了，字号关掉浮层就丢回 30pt。
+            check("粗细 / 字号是两个独立 key（共用一个 key 会互相踩）",
+                  OverlayEditorController.lastLineWidthKey != OverlayEditorController.lastFontSizeKey)
+            let sizeSuite = "com.pcxx.boxshot.selftest.fontsize"
+            let sizeDefaults = UserDefaults(suiteName: sizeSuite)!
+            sizeDefaults.removePersistentDomain(forName: sizeSuite)
+            check("没选过字号时落在 30pt（出厂值本身就在档位表里）",
+                  OverlayEditorController.rememberedFontSize(sizeDefaults) == 30)
+            OverlayEditorController.rememberFontSize(52, sizeDefaults)
+            check("记住的字号读得回来",
+                  OverlayEditorController.rememberedFontSize(sizeDefaults) == 52)
+            sizeDefaults.set(33, forKey: OverlayEditorController.lastFontSizeKey)
+            check("存的不是档位值时取其最近一档（33 → 30）",
+                  OverlayEditorController.rememberedFontSize(sizeDefaults) == 30)
+            sizeDefaults.set(48, forKey: OverlayEditorController.lastFontSizeKey)
+            check("48 落在 52 档而不是 40 档",
+                  OverlayEditorController.rememberedFontSize(sizeDefaults) == 52)
+            sizeDefaults.removePersistentDomain(forName: sizeSuite)
+
+            // 「打开文档就取回记忆」：三个入口（截图浮层 / 独立编辑窗口 / 历史里接着编辑）
+            // 共用 `EditorDocument.init`，只要这里对，三处都对。
+            // 🔴 用真实 .standard 验一次（属性默认值不会走注入的那个 defaults），
+            // 验完必须还原 —— 自检不许改用户的设置。
+            let std = UserDefaults.standard
+            let oldW = std.object(forKey: OverlayEditorController.lastLineWidthKey)
+            let oldF = std.object(forKey: OverlayEditorController.lastFontSizeKey)
+            std.set(9.0, forKey: OverlayEditorController.lastLineWidthKey)
+            std.set(40.0, forKey: OverlayEditorController.lastFontSizeKey)
+            defer {
+                if let oldW { std.set(oldW, forKey: OverlayEditorController.lastLineWidthKey) }
+                else { std.removeObject(forKey: OverlayEditorController.lastLineWidthKey) }
+                if let oldF { std.set(oldF, forKey: OverlayEditorController.lastFontSizeKey) }
+                else { std.removeObject(forKey: OverlayEditorController.lastFontSizeKey) }
+            }
+            if let ctx = CGContext(data: nil, width: 2, height: 2, bitsPerComponent: 8,
+                                   bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+               let tiny = ctx.makeImage() {
+                let probe = EditorDocument(image: tiny)
+                check("打开文档就带上上次选的粗细（9px）", probe.lineWidth == 9)
+                check("打开文档就带上上次选的字号（40pt）", probe.fontSize == 40)
+            } else {
+                check("造一张 2×2 的测试图", false)
+            }
+
             let toolbar = CGRect(x: 300, y: 500, width: 700, height: 64)
             let p1 = OverlayEditorController.colorPanelOrigin(toolbar: toolbar,
                                                               panelSize: panelSize, visible: visible)
