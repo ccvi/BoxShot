@@ -671,6 +671,25 @@ Google / DeepL 那类都要 key 和网络，等于把这个功能变成"要配�
 
 诊断 `--show-overlay-color` 会走一遍真实链路（`selectItem` + `sendAction` → `changeFontSize` / `changeLineWidth`），再新开一份文档验「读不读得回来」，跑完把真实偏好还原（自检也这么干：验完必须还原，不许改用户的设置）。
 
+## 🔴 窗口打开了，却像没打开（macOS 14+ 的 activate 失效，1.0.35）
+
+用户 2026-11-10：「截图历史失灵了」。查下来的事实很反直觉：窗口 `onscreen=true`、内容全画对了（缩略图 1 张、底部「共 1 项 · 1.9MB」、按钮都在）——但它**被压在其他应用后面**，点完菜单像什么都没发生。
+
+根因：`NSApp.activate(ignoringOtherApps: true)` 自 macOS 14 起已废弃，新系统上它不再越过当前活动应用；本应用是 `LSUIElement`（菜单栏常驻、不占 Dock），启动后本来就不抢焦点，于是 `makeKeyAndOrderFront` 只在自己这一层里生效。
+
+修法是三招一起上，收在 `Support.bringToFront(_:)`：`NSApp.activate()`（新 API）+ `orderFrontRegardless()`（不依赖应用是否 active，硬把窗口顶上来）+ `makeKey()`（补一次，否则窗口在前面却收不到键盘，空格预览 / Esc 全哑）。历史 / 编辑 / 结果 / 设置四个普通窗口统一走它。
+
+**怎么验**（这类问题只能真窗口验，读代码看不出来）：
+
+```bash
+touch /tmp/boxshot-historytest.trigger && open /Applications/BoxShot.app
+sleep 6 && screencapture -x /tmp/x.png     # 中间不要手动点窗口
+```
+
+修之前 `/tmp/x.png` 里根本看不见那个窗口；修之后它盖在浏览器上面。再用 `CGWindowListCopyWindowInfo` 看 z 序（编辑窗口要排在历史窗口前面）与 `onscreen`。
+
+顺手两件事：`ShotHistoryStore` 的三处静默 `return` 换成 `lastRecordStatus` / `lastLoadStatus`（"没记录"到底卡在没调用、写不了 PNG、还是清单没落盘），历史目录改认 `Support.appSupportRoot`（以前自己又拼了一遍 `BoxShot/History`，两边一旦不一致就是"文件在 A、清单读 B"，症状恰好是历史永远空白）。
+
 ## 🔴 截完图之后剩下的那几十 MB（1.0.35 修）
 
 用户 2026-11-07 报：「1.0.34 截图之后内存 55.8MB，1.0.35 是 154.5MB，这是怎么回事」。
@@ -1506,6 +1525,7 @@ Resources/
 | `/tmp/boxshot-esctest.trigger` | 同上，标记文件触发 |
 | `--escwait` | 开遮罩后**什么都不投**，纯等 15 秒外部真按键（人手按 / 带授权的 `osascript`），逐条记录收到的 `keyDown`。用来区分「代码没接住」和「按键根本没进来」 |
 | `/tmp/boxshot-escwait.trigger` | 同上，标记文件触发 |
+| `--show-history` | 打开截图历史面板，并把"卡在哪"写进 `/tmp/boxshot-history.log`：历史目录真实路径、目录里文件数、清单读了多少条、上限、**上次 `record` 走到哪一步**（没调用 / 上限=0 / PNG 目标建不了 / 写盘失败 / 成功）。库里为空时先塞三张合成图（320×200 / 380×240 / 440×280，跑完记得删）。也可以 `touch /tmp/boxshot-historytest.trigger` 再启动 —— trigger 版**不塞假图**，只打开窗口 + 打日志，排查用户真实数据时用这个 |
 | `--shotmem` | 量「截图前后到底常驻多少」：基线 → 遮罩起 → 松手峰值 → 浮层出来后 → 投 Esc 关掉 → 再静置 4 秒，每步打一次 `phys_footprint`（跟活动监视器「内存」列同口径）。日志 `/tmp/boxshot-shotmem.log`。🔴 比较两个版本的内存一定要用它：同一个流程、同一串步骤，否则「A 版 55MB、B 版 154MB」很可能只是两次量的状态不同（浮层还开着？跑过 OCR / 翻译？）。1.0.34 与 1.0.35 实测逐步差 ≤0.3MB |
 | `--dragtest` | 开遮罩 → 合成 10 步左键拖动 + 松手 → 判定遮罩收起且浮层按拖出来的框打开。验「松手即截」，日志 `/tmp/boxshot-dragtest.log` |
 | `/tmp/boxshot-dragtest.trigger` | 同上，标记文件触发 |

@@ -83,9 +83,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         // 诊断入口：--show-history 直接打开截图历史面板（库为空时先塞三张合成图），
         // 用来核对网格布局 / 缩略图 / 选中态，不用真的去截屏。
-        if CommandLine.arguments.contains("--show-history") {
+        // 🔴 trigger 版（`touch /tmp/boxshot-historytest.trigger` 再启动）**不塞假图**：
+        // 排查"历史失灵"要看的是用户真实那几条，塞进去就把现场搅了。
+        let historyTrigger = "/tmp/boxshot-historytest.trigger"
+        let wantsHistory = CommandLine.arguments.contains("--show-history")
+        if wantsHistory || triggerExists(historyTrigger) {
+            if !wantsHistory {
+                try? FileManager.default.removeItem(atPath: historyTrigger)
+            }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-                self?.showDiagnosticHistory()
+                self?.showDiagnosticHistory(seedDemo: wantsHistory)
             }
         }
         // 诊断入口：--memreport 打印内存占用与当前持有的大对象清单（对账用）。
@@ -1222,9 +1229,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func showDiagnosticHistory() {
+    private func showDiagnosticHistory(seedDemo: Bool = true) {
         let store = ShotHistoryStore.shared
-        if store.items.isEmpty {
+        // 先把"卡在哪"摆到台面上：路径、目录里实际的文件数、上次读写的结果。
+        // 历史失灵最常见的三种：目录没建成 / 清单没落盘 / 设置里张数是 0。
+        let logPath = "/tmp/boxshot-history.log"
+        try? "".write(to: URL(fileURLWithPath: logPath), atomically: true, encoding: .utf8)
+        func hlog(_ text: String) {
+            guard let handle = try? FileHandle(forWritingTo: URL(fileURLWithPath: logPath)) else { return }
+            handle.seekToEndOfFile()
+            handle.write("\(text)\n".data(using: .utf8)!)
+            try? handle.close()
+        }
+        hlog("历史目录：\(store.directoryPathForDiagnostics)")
+        hlog("清单路径：\(store.manifestPathForDiagnostics)")
+        hlog("目录里文件数：\(store.fileCountForDiagnostics) · items=\(store.items.count) · 上限=\(model.prefs.value.maxShotHistory)")
+        hlog("上次记录：\(store.lastRecordStatus)")
+        hlog("上次读取：\(store.lastLoadStatus)")
+        NSLog("[BoxShot][history] %@ · %@",
+              store.directoryPathForDiagnostics, store.lastRecordStatus)
+        if store.items.isEmpty && seedDemo {
             for index in 0..<3 {
                 let w = 320 + index * 60, h = 200 + index * 40
                 let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
@@ -1238,6 +1262,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     store.record(image, limit: 20)
                 }
             }
+            hlog("塞完三张后：items=\(store.items.count) · 目录文件数=\(store.fileCountForDiagnostics) · \(store.lastRecordStatus)")
         }
         model.showShotHistory()
     }

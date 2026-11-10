@@ -70,6 +70,25 @@ enum Support {
     ///
     /// 🔴 两种类型都走 `CGImageDestination` 直编，不用 `NSBitmapImageRep`：
     /// 后者每转一次就把整幅图拷一份，这里要转两次 = 多出两份全图（整屏 40MB）。
+    // ── 窗口前置 ────────────────────────────────────────────
+    //
+    // 🔴 用户 2026-11-10 报「截图历史失灵」：窗口 `onscreen=true`、内容也画好了、
+    // 缩略图 / 底部统计全对 —— 就是**被压在其他应用后面**，点完菜单像什么都没发生。
+    //
+    // 原因是 `NSApp.activate(ignoringOtherApps:)` 自 macOS 14 起就废弃了，
+    // 新系统上它不再越过当前活动应用（本应用是 LSUIElement，启动时不抢焦点）。
+    // 所以三道一起上：
+    //   · `NSApp.activate()`（新 API，正式地把自己激活）；
+    //   · `orderFrontRegardless()`（硬保证：不依赖应用是否 active 也能把窗口顶上来）；
+    //   · `makeKey()`（补一次，否则窗口在前面却收不到键盘，空格预览 / Esc 全哑）。
+    static func bringToFront(_ window: NSWindow?) {
+        guard let window else { return }
+        NSApp.activate()
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
+        window.makeKey()
+    }
+
     static func copyImageToClipboard(_ image: CGImage) {
         guard let png = encode(image, uti: "public.png"),
               let tiff = encode(image, uti: "public.tiff") else { return }

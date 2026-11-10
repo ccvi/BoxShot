@@ -46,8 +46,7 @@ final class ResultWindowController: NSWindowController, NSWindowDelegate {
             window.contentView = NSHostingView(rootView: ResultPayloadView(payloads: payloads))
         }
         window.center()
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        Support.bringToFront(window)
     }
 
     enum ResultKind {

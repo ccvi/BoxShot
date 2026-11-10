@@ -56,8 +56,9 @@ final class HistoryWindowController: NSWindowController, NSWindowDelegate, QLPre
     var onClose: (() -> Void)?
 
     func show() {
-        window?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        // 用户 2026-11-10「截图历史失灵」：窗口建了、内容也画好了，却被压在其他
+        // 应用后面（旧写法 `NSApp.activate(ignoringOtherApps:)` 在 macOS 14+ 已失效）。
+        Support.bringToFront(window)
         installKeyMonitor()
     }
 

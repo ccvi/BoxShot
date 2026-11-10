@@ -89,8 +89,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
         window.contentMinSize = Self.minContentSize
 
         installEscMonitor()
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        // 同历史窗口：macOS 14+ 上旧 activate 不顶事，窗口会落在别的应用后面
+        Support.bringToFront(window)
     }
 
     // ── 输出动作 ─────────────────────────────────────────────
