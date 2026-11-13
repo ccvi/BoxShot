@@ -238,6 +238,15 @@ else
 fi
 rm -rf "$ICON_TMP"
 
+# 应用内帮助：docs/help.md 原样进 Resources（设置 → 关于 → 帮助文档 读它）。
+# 🔴 必须在签名**之前**放进来 —— 签名之后再动 bundle 内容，封存就对不上了。
+if [[ -f "$PROJECT_ROOT/docs/help.md" ]]; then
+    cp "$PROJECT_ROOT/docs/help.md" "$RESOURCES_DIR/help.md"
+    echo "  ✓ help.md（应用内帮助，$(wc -c < "$RESOURCES_DIR/help.md" | tr -d ' ') 字节）"
+else
+    echo "  ⚠ 缺少 docs/help.md：应用内帮助只会显示兜底文案" >&2
+fi
+
 xattr -cr "$APP_DIR" 2>/dev/null || true
 
 # ------------------------------------------------------------

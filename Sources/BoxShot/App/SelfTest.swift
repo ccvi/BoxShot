@@ -590,13 +590,44 @@ enum SelfTest {
             check("OCR 结果窗默认 600 × 450",
                   ResultWindowController.preferredSize == CGSize(width: 600, height: 450))
 
-            // 帮助文档入口（设置 → 关于）。链接写错一个字就是 404，
-            // 而"帮助打不开"用户只会以为应用坏了 —— 钉住完整地址。
-            check("帮助链接指向仓库里的 docs/help.md",
-                  Support.helpURL.absoluteString
-                    == "https://github.com/ccvi/BoxShot/blob/main/docs/help.md")
-            check("帮助链接是 https（点开走默认浏览器，不会被拦）",
-                  Support.helpURL.scheme == "https")
+            // 应用内帮助（设置 → 关于 → 帮助文档）：文档随应用走，不联网。
+            // 解析器只认这一份文档用到的语法，块级切分是纯函数，能直接钉死。
+            let helpSample = """
+            # 一级标题
+            第一段 **粗体** 和 `代码`。
+
+            - 一条要点
+            2. 第二步
+            > 引用一句
+            ---
+            """
+            let helpItems = HelpMarkup.parse(helpSample)
+            check("帮助解析：标题 / 段落 / 列表 / 有序 / 引用 / 分隔线六块都认得",
+                  helpItems.count == 6)
+            check("帮助解析：标题层级与文字正确",
+                  helpItems.first?.block == .heading(level: 1, text: "一级标题"))
+            check("帮助解析：连续行合成一段（不逐行拆碎）",
+                  helpItems[1].block == .paragraph("第一段 **粗体** 和 `代码`。"))
+            check("帮助解析：无序列表与有序列表分开认",
+                  helpItems[2].block == .bullet("一条要点")
+                    && helpItems[3].block == .numbered(2, "第二步"))
+            check("帮助解析：引用与分隔线", 
+                  helpItems[4].block == .quote("引用一句")
+                    && helpItems[5].block == .divider)
+            // 🔴 `#` 后面没空格 / `4.25%` 这种数字不算语法，否则正文会被切碎
+            check("帮助解析：不是语法的行不会被误认",
+                  HelpMarkup.headingOf("#BoxShot") == nil
+                    && HelpMarkup.headingOf("####### 七个井号") == nil
+                    && HelpMarkup.numberedOf("4.25% 的利率") == nil
+                    && HelpMarkup.numberedOf("3.第三步") == nil)
+            // 行内样式：粗体要真的被解析成强调（不然界面上就是两个星号）
+            let bold = HelpMarkup.inline("**粗体** 与 `代码`")
+            let hasStrong = bold.runs.contains { run in
+                run.inlinePresentationIntent?.contains(.stronglyEmphasized) == true
+            }
+            check("帮助解析：行内粗体能解析（不是把星号画出来）", hasStrong)
+            check("帮助解析：解析不了的行内不崩，原样返回",
+                  String(HelpMarkup.inline("未闭合的 **星号").characters) == "未闭合的 **星号")
         }
 
         // ── OCR 行聚类 ──

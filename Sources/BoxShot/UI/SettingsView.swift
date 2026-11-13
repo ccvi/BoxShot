@@ -64,7 +64,7 @@ struct SettingsRootView: View {
                     case 3: OCRPane(model: model, prefs: model.prefs)
                     case 4: RecordPane(model: model, prefs: model.prefs)
                     case 5: ShortcutsPane(model: model, prefs: model.prefs)
-                    default: AboutPane()
+                    default: AboutPane(model: model)
                     }
                 }
                 .padding(20)
@@ -675,6 +675,8 @@ struct ShortcutRecorderView: NSViewRepresentable {
 // ── 关于 ─────────────────────────────────────────────────────
 
 private struct AboutPane: View {
+    @ObservedObject var model: AppModel
+
     var body: some View {
         VStack(alignment: .center, spacing: 14) {
             Spacer()
@@ -690,17 +692,21 @@ private struct AboutPane: View {
             Text("截图 · 标注 · OCR · 解码 · 测距 · 滚动截图 · 贴图 · 录屏")
                 .font(.footnote).foregroundStyle(.secondary)
 
-            // 帮助文档入口（用户 2026-11-13：「把链接放在设置的关于那里」）。
-            // 用 `Link` 而不是 Button + NSWorkspace：它自己带手型光标和悬停反馈，
-            // 也会走系统的 URL 打开策略（用户设了默认浏览器就跟着走）。
-            Link(destination: Support.helpURL) {
+            // 帮助文档入口（用户 2026-11-13：「把链接放在设置的关于那里」，
+            // 随后明确「要本地的」→ 打开应用内窗口，读打包进来的 help.md，不联网）。
+            // 🔴 用 `.buttonStyle(.link)` 而不是裸 `Link`：裸 Link 在这个窗口里被渲染成
+            // 普通正文色（截图核过），夹在一堆灰字中间根本看不出能点。
+            Button {
+                model.showHelp()
+            } label: {
                 Label("帮助文档", systemImage: "questionmark.circle")
             }
+            .buttonStyle(.link)
             .font(.callout)
             .padding(.top, 6)
-            .help("怎么截图、标注、OCR 翻译、录屏 —— 用浏览器打开在线文档")
+            .help("怎么截图、标注、OCR 翻译、录屏（应用内打开，不需要联网）")
 
-            Text("在线文档，点开用浏览器看")
+            Text("随应用安装，不需要联网")
                 .font(.caption2).foregroundStyle(.tertiary)
 
             Spacer()

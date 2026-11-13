@@ -35,6 +35,9 @@ final class AppModel: ObservableObject {
     let pinManager = PinManager()
     private var resultWindow: ResultWindowController?
     private var historyWindow: HistoryWindowController?
+    /// 应用内帮助窗口（设置 → 关于 → 帮助文档）。读 bundle 里的 help.md，
+    /// 不跳浏览器 —— 用户 2026-11-13：「帮助文档不能是 github 的文档链接，要本地的」。
+    private var helpWindow: HelpWindowController?
 
     /// 内存自愈重启（规则全在 `MemoryGuard`，这里只负责接线）
     let memoryGuard = MemoryGuardRunner()
@@ -527,6 +530,18 @@ final class AppModel: ObservableObject {
         controller.onClose = { [weak self, weak controller] in
             if let controller, self?.historyWindow === controller {
                 self?.historyWindow = nil
+            }
+        }
+        controller.show()
+    }
+
+    /// 打开应用内帮助（设置 → 关于）；已经开着就抬到前面，不重建（滚动位置保住）
+    func showHelp() {
+        let controller = helpWindow ?? HelpWindowController()
+        helpWindow = controller
+        controller.onClose = { [weak self, weak controller] in
+            if let controller, self?.helpWindow === controller {
+                self?.helpWindow = nil
             }
         }
         controller.show()
