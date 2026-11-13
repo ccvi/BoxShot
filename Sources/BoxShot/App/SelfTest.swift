@@ -589,6 +589,14 @@ enum SelfTest {
             // 结果窗尺寸：用户 2026-11-13 定 600 × 450（原 520 × 420）
             check("OCR 结果窗默认 600 × 450",
                   ResultWindowController.preferredSize == CGSize(width: 600, height: 450))
+
+            // 帮助文档入口（设置 → 关于）。链接写错一个字就是 404，
+            // 而"帮助打不开"用户只会以为应用坏了 —— 钉住完整地址。
+            check("帮助链接指向仓库里的 docs/help.md",
+                  Support.helpURL.absoluteString
+                    == "https://github.com/ccvi/BoxShot/blob/main/docs/help.md")
+            check("帮助链接是 https（点开走默认浏览器，不会被拦）",
+                  Support.helpURL.scheme == "https")
         }
 
         // ── OCR 行聚类 ──

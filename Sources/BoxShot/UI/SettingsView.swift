@@ -689,6 +689,20 @@ private struct AboutPane: View {
             Text("作者：ccvi1223 · ccvi1223@qq.com").font(.callout).foregroundStyle(.secondary)
             Text("截图 · 标注 · OCR · 解码 · 测距 · 滚动截图 · 贴图 · 录屏")
                 .font(.footnote).foregroundStyle(.secondary)
+
+            // 帮助文档入口（用户 2026-11-13：「把链接放在设置的关于那里」）。
+            // 用 `Link` 而不是 Button + NSWorkspace：它自己带手型光标和悬停反馈，
+            // 也会走系统的 URL 打开策略（用户设了默认浏览器就跟着走）。
+            Link(destination: Support.helpURL) {
+                Label("帮助文档", systemImage: "questionmark.circle")
+            }
+            .font(.callout)
+            .padding(.top, 6)
+            .help("怎么截图、标注、OCR 翻译、录屏 —— 用浏览器打开在线文档")
+
+            Text("在线文档，点开用浏览器看")
+                .font(.caption2).foregroundStyle(.tertiary)
+
             Spacer()
         }
         .frame(maxWidth: .infinity)

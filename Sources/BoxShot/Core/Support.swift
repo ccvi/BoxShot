@@ -89,6 +89,15 @@ enum Support {
         window.makeKey()
     }
 
+    // ── 帮助文档 ────────────────────────────────────────────
+    //
+    // 用户 2026-11-13：「给这个应用弄出一份简单的帮助文档，把链接放在设置的关于那里」。
+    //
+    // 文档就是仓库里的 `docs/help.md`：**一份文件、一个来源**。不做应用内的副本 ——
+    // 两份内容迟早对不上，而"帮助里说的和界面上不一样"比没有帮助更糟。
+    // 用 GitHub 的 blob 地址：它自己会把 Markdown 渲染成带目录的网页，手机上也能看。
+    static let helpURL = URL(string: "https://github.com/ccvi/BoxShot/blob/main/docs/help.md")!
+
     static func copyImageToClipboard(_ image: CGImage) {
         guard let png = encode(image, uti: "public.png"),
               let tiff = encode(image, uti: "public.tiff") else { return }
