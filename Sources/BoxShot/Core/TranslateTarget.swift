@@ -157,6 +157,87 @@ enum TranslateTarget: String, CaseIterable, Identifiable {
     static func remember(_ target: TranslateTarget, _ defaults: UserDefaults = .standard) {
         defaults.set(target.rawValue, forKey: lastTargetKey)
     }
+
+    // ── 「保留原文」勾选状态 ────────────────────────────────────
+    //
+    // 用户 2026-11-13：「增加：保留原文勾选框，复制功能：复制原文 + 译文，
+    // 功能参照 BoxPaste 的预览模块」。语义照抄 BoxPaste：
+    //   勾上 = 逐句对照（原文在上、译文在下），复制也是原文 + 译文；
+    //   不勾 = 整段替换（老行为，一字不改）。
+    // 状态跟目标语言一样记住 —— 这是使用习惯，每次重开结果窗都要重勾很烦。
+
+    static let keepOriginalKey = "boxshot.keepOriginal"
+
+    static func rememberedKeepOriginal(_ defaults: UserDefaults = .standard) -> Bool {
+        defaults.bool(forKey: keepOriginalKey)      // 没记住过 → false（默认整段替换）
+    }
+
+    static func rememberKeepOriginal(_ keep: Bool, _ defaults: UserDefaults = .standard) {
+        defaults.set(keep, forKey: keepOriginalKey)
+    }
+
+    // ── 逐句对照（保留原文）──────────────────────────────────────
+
+    /// 对照模式要送翻的行：逐行判、去重（同一行出现多次只翻一次）、保持出现顺序。
+    ///
+    /// 为什么对照模式必须**逐行**送：配对的前提是"一行原文对一行译文"。
+    /// `plan` 那套按相邻同类行合并成块翻得更顺，但一块回来是多行，再按 \n 拆回去
+    /// 并不可靠 —— 框架合并/拆句时行数就对不上，配错行比不配对更糟。
+    static func linesNeedingTranslation(_ text: String, into target: TranslateTarget) -> [String] {
+        var seen = Set<String>()
+        var out: [String] = []
+        for line in text.components(separatedBy: "\n") where needsTranslation(line, into: target) {
+            if seen.insert(line).inserted { out.append(line) }
+        }
+        return out
+    }
+
+    /// 把「原文行 + 该行的译文」配成对，供对照视图逐句渲染。
+    ///
+    /// 行数与原文完全一致（空行也占一对，保住段落结构）。`translation == nil` 有两种含义，
+    /// 渲染时都只显示原文一次：① 这一行本来就是目标语言；② 这一行没译出来（失败/漏回）。
+    /// 后者不补一句"（未翻译）"：整批失败时已经有红字提示，逐行再刷一遍反而吵。
+    static func bilingualPairs(_ text: String,
+                               into target: TranslateTarget,
+                               translations: [String: String]) -> [BilingualPair] {
+        text.components(separatedBy: "\n").enumerated().map { index, line in
+            let need = needsTranslation(line, into: target)
+            return BilingualPair(id: index,
+                                 original: line,
+                                 translation: need ? translations[line] : nil)
+        }
+    }
+
+    /// 对照模式下只要译文时的拼法：能译的用译文，不能译的保留原文，行结构不变。
+    static func joinedTranslation(_ pairs: [BilingualPair]) -> String {
+        pairs.map { $0.translation ?? $0.original }.joined(separator: "\n")
+    }
+
+    /// 对照模式下点「复制」要复制的东西：**原文 + 译文**都带上，逐句交替，
+    /// 顺序与屏幕上看到的一致（原文在上、译文在下）。
+    ///
+    /// 与 `joinedTranslation` 的区别就是"要不要原文"：那个只给译文，
+    /// 这个给完整对照，贴到别处还是一段能读懂的双语文本。
+    static func joinedBilingual(_ pairs: [BilingualPair]) -> String {
+        var lines: [String] = []
+        for pair in pairs {
+            lines.append(pair.original)
+            // 不用翻 / 没译出来的行只出现一次，别把原文当译文再写一遍
+            if let translation = pair.translation, !translation.isEmpty {
+                lines.append(translation)
+            }
+        }
+        return lines.joined(separator: "\n")
+    }
+}
+
+/// 对照视图的一对：一行原文 + 它自己的译文。
+/// `id` 用行号而不是原文：空行、重复行都会撞值，ForEach 会画错或崩。
+struct BilingualPair: Identifiable, Equatable {
+    let id: Int
+    let original: String
+    /// nil = 这一行不用翻（已是目标语言）或没译出来 —— 两种情况都只显示原文一次
+    let translation: String?
 }
 
 /// 一段文本的翻译方案：哪些块要送进框架、那些块合起来的源语种是什么。

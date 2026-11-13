@@ -20,6 +20,14 @@ struct TranslateBar: View {
     /// 译文；nil = 正在显示原文
     @Binding var translated: String?
     @Binding var target: TranslateTarget
+    /// 勾了「保留原文」→ 逐句对照（原文在上、译文在下）
+    @Binding var keepOriginal: Bool
+    /// 对照用的"一行原文 + 一行译文"（非对照模式为 nil）
+    @Binding var pairs: [BilingualPair]?
+
+    /// 逐行送翻时每批多少条。整篇一次塞进去在长文本上要等很久，
+    /// 分批能让每一轮往返都短，出问题也只影响一批。
+    private static let batchSize = 40
 
     @State private var configuration: TranslationSession.Configuration?
     @State private var isWorking = false
@@ -59,6 +67,23 @@ struct TranslateBar: View {
             .fixedSize()
             .help("翻译成哪种语言")
 
+            // 保留原文：勾上就变成逐句对照（原文在上、译文在下），不勾是整段替换。
+            // 状态写回 UserDefaults —— 这是使用习惯，每次重开结果窗都要重勾很烦。
+            Toggle("保留原文", isOn: Binding(
+                get: { keepOriginal },
+                set: { value in
+                    keepOriginal = value
+                    TranslateTarget.rememberKeepOriginal(value)
+                    errorText = nil
+                    // 已经译过了：勾/取消勾都得重跑一次 —— 对照要"一行对一行"的数据，
+                    // 整段译文里没有这个结构，硬拆会把行数对错。
+                    if isShowingTranslation { startTranslation() }
+                }))
+            .toggleStyle(.checkbox)
+            .controlSize(.small)
+            .fixedSize()
+            .help("原文在上、译文在下，逐句对照；复制时也一并带上原文")
+
             if isWorking {
                 ProgressView().controlSize(.small).scaleEffect(0.7)
             }
@@ -81,6 +106,7 @@ struct TranslateBar: View {
     private func toggle() {
         if isShowingTranslation {
             translated = nil          // 切回原文（原文一直留着，不做破坏性覆盖）
+            pairs = nil               // 上一次的对照数据留着会让复制串内容
         } else {
             startTranslation()
         }
@@ -131,6 +157,35 @@ struct TranslateBar: View {
             NSLog("[BoxShot][translate] prepare 未通过（继续翻）%@/%d", ns.domain, ns.code)
         }
         do {
+            if keepOriginal {
+                // 对照模式：**逐行**送翻（去重后分批），回来才能一行对一行。
+                // 这里不能复用下面那套"相邻同类行合并成块"的方案：一块回来是多行，
+                // 再按 \n 拆回去并不可靠 —— 框架合并/拆句时行数就对不上，配错行比不配对更糟。
+                let pending = TranslateTarget.linesNeedingTranslation(sourceText, into: target)
+                var byOriginal: [String: String] = [:]
+                var start = 0
+                while start < pending.count {
+                    let slice = Array(pending[start..<min(start + Self.batchSize, pending.count)])
+                    let requests = slice.map { TranslationSession.Request(sourceText: $0) }
+                    let responses = try await session.translations(from: requests)
+                    for response in responses { byOriginal[response.sourceText] = response.targetText }
+                    start += Self.batchSize
+                }
+                let built = TranslateTarget.bilingualPairs(sourceText, into: target,
+                                                           translations: byOriginal)
+                let joined = TranslateTarget.joinedTranslation(built)
+                await MainActor.run {
+                    isWorking = false
+                    if joined.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        errorText = "没有译出内容"
+                    } else {
+                        pairs = built
+                        translated = joined
+                    }
+                }
+                return
+            }
+
             // 只把"要翻的块"送进去，一次批量。每块语种单一，不会再把混排丢给框架去猜。
             let requests = plan.pendingTexts.map { TranslationSession.Request(sourceText: $0) }
             let responses = try await session.translations(from: requests)
@@ -147,6 +202,7 @@ struct TranslateBar: View {
                 if result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     errorText = "没有译出内容"
                 } else {
+                    pairs = nil            // 整段模式没有逐句结构，别让上一次的对照数据留着
                     translated = result
                 }
             }

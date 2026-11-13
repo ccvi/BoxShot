@@ -553,6 +553,42 @@ enum SelfTest {
                   !TranslateTarget.plan(for: "你好世界\n再见", into: .chinese).hasWork)
             check("混排两个方向都给得出活（这就是用户那个场景）",
                   toEnglish.hasWork && toChinese.hasWork)
+
+            // 逐句对照（用户 2026-11-13：「增加保留原文勾选框，复制原文 + 译文」，
+            // 参照 BoxPaste 预览）。对照模式**逐行**送翻，回来才能一行对一行。
+            check("对照模式要翻的行：只挑该翻的，且去重",
+                  TranslateTarget.linesNeedingTranslation(mixed, into: .english)
+                    == ["改了什么", "整屏遮罩窗口指定色彩空间"])
+            let pairSource = "改了什么\nIOSurface 57.8M\n\n整屏遮罩窗口指定色彩空间"
+            let pairs = TranslateTarget.bilingualPairs(
+                pairSource, into: .english,
+                translations: ["改了什么": "What changed",
+                               "整屏遮罩窗口指定色彩空间": "The full-screen mask window sets its color space"])
+            check("对照数据行数与原文一致（空行也占一对，段落结构不塌）", pairs.count == 4)
+            check("对照里本来就是英文的行没有译文（只显示一次）", pairs[1].translation == nil)
+            check("对照里空行占位（界面上不画）",
+                  pairs[2].original.isEmpty && pairs[2].translation == nil)
+            check("对照里有译文的行配上了",
+                  pairs[3].translation == "The full-screen mask window sets its color space")
+            check("复制「原文 + 译文」：逐句交替、顺序与屏幕一致",
+                  TranslateTarget.joinedBilingual(pairs)
+                    == "改了什么\nWhat changed\nIOSurface 57.8M\n\n整屏遮罩窗口指定色彩空间\nThe full-screen mask window sets its color space")
+            check("复制「只要译文」：不用翻的行保留原文，行结构不变",
+                  TranslateTarget.joinedTranslation(pairs)
+                    == "What changed\nIOSurface 57.8M\n\nThe full-screen mask window sets its color space")
+            // 勾选状态要记住（跟目标语言同一个口径：使用习惯，不该每次重勾）
+            let keepSuite = "com.pcxx.boxshot.selftest.keeporiginal"
+            let keepDefaults = UserDefaults(suiteName: keepSuite)!
+            keepDefaults.removePersistentDomain(forName: keepSuite)
+            check("没勾过时默认整段替换（不改变老行为）",
+                  TranslateTarget.rememberedKeepOriginal(keepDefaults) == false)
+            TranslateTarget.rememberKeepOriginal(true, keepDefaults)
+            check("勾选状态读得回来", TranslateTarget.rememberedKeepOriginal(keepDefaults))
+            keepDefaults.removePersistentDomain(forName: keepSuite)
+
+            // 结果窗尺寸：用户 2026-11-13 定 600 × 450（原 520 × 420）
+            check("OCR 结果窗默认 600 × 450",
+                  ResultWindowController.preferredSize == CGSize(width: 600, height: 450))
         }
 
         // ── OCR 行聚类 ──
