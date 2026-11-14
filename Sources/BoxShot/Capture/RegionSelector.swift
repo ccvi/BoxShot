@@ -55,6 +55,13 @@ final class RegionSelector: NSObject {
     private var loupeConfig: Loupe.Config?
     /// 整屏原图（**没有遮罩**的那一份），放大镜从它里面取像素
     private var sourceImage: CGImage?
+    /// 抓底图那一刻屏上的浮窗（菜单 / 弹出面板 / HUD）。空 = 这次没有浮窗要救。
+    private(set) var backdropFloatingWindows: [ScreenWindowInfo] = []
+    /// 底图本体（没上遮罩的整屏图）。浮窗兜底确认后还要把它当"拉大截图框"的底板，
+    /// 否则拉大后浮窗又会消失 —— 两张图必须是同一帧。
+    var backdropImage: CGImage? { sourceImage }
+    /// `begin` 里探测到、等 `present` 落地的浮窗快照
+    private var pendingBackdropFloating: [ScreenWindowInfo] = []
     private var pixelScale: CGFloat = 2
     /// 智能元素截取模式（抓底图的 Task 是异步的，参数得先存下来再传给视图）
     private var pendingElementPick = false
@@ -84,14 +91,21 @@ final class RegionSelector: NSObject {
         isActive = true
 
         Task { @MainActor in
+            // 先探一眼屏上有没有浮窗（菜单 / 弹出面板 / HUD）。有就必须抓底图 ——
+            // 它们会在遮罩出现或用户点确认的那一刻自己关掉，成图只剩它底下那层。
+            let floating = ScreenCapture.floatingWindowsOnScreen(
+                excludingPID: ProcessInfo.processInfo.processIdentifier)
+            self.pendingBackdropFloating = floating
             var image: CGImage?
-            if loupe?.enabled == true || needBackdrop {
+            if loupe?.enabled == true || needBackdrop || !floating.isEmpty {
                 let started = Date()
                 image = try? await ScreenCapture.captureDisplay(self.displayID)
-                // 这张图两个用途：放大镜取像素 / 窗口截图的兜底裁剪
-                NSLog("[BoxShot] 选区底图 %.0fms %@",
+                // 这张图三个用途：放大镜取像素 / 窗口截图兜底 / 浮窗兜底（1.0.37）
+                NSLog("[BoxShot] 选区底图 %.0fms %@ · 浮窗 %d 个%@",
                       Date().timeIntervalSince(started) * 1000,
-                      image == nil ? "失败" : "\(image!.width)×\(image!.height)")
+                      image == nil ? "失败" : "\(image!.width)×\(image!.height)",
+                      floating.count,
+                      floating.isEmpty ? "" : "（" + floating.prefix(2).map(\.ownerName).joined(separator: "/") + "）")
             }
             // 抓图期间用户按了 Esc / 换了动作 → 直接放弃这次展示
             guard self.isActive, self.window == nil else { return }
@@ -99,6 +113,7 @@ final class RegionSelector: NSObject {
                          highlightWindows: highlightWindows,
                          crosshair: crosshair,
                          image: image,
+                         floating: floating,
                          elementPick: self.pendingElementPick,
                          elementNote: self.pendingElementNote)
         }
@@ -108,9 +123,13 @@ final class RegionSelector: NSObject {
                          highlightWindows: Bool,
                          crosshair: Bool,
                          image: CGImage?,
+                         floating: [ScreenWindowInfo] = [],
                          elementPick: Bool = false,
                          elementNote: String? = nil) {
         sourceImage = image
+        // 底图时刻屏上有哪些浮窗（跟底图一起冻结下来）：确认时据此判断
+        // "这次截图会不会把浮窗弄丢"，见 AppModel 里的浮窗兜底。
+        backdropFloatingWindows = floating
         pixelScale = image.map { CGFloat($0.width) / max(1, screen.frame.width) }
             ?? ScreenCapture.scaleFactor(for: displayID)
 
@@ -486,9 +505,11 @@ final class RegionSelector: NSObject {
             let selectorRef = selector
             let displayID = self.displayID
             MainActor.assumeIsolated {
-                // 拖框确认走的是"重新抓这一块"，底图用不上了：当场放掉 20.5MB，
-                // 别让它跟紧接着的成图抓取叠在一起。
-                selectorRef?.finish(keepBackdrop: false)
+                // 🔴 1.0.37 起**有浮窗时必须保住底图**：菜单 / 弹出面板会在
+                // "用户点确认"这一下自己收掉，重新抓那一帧就只剩它底下那层。
+                // 没有浮窗时照旧当场放掉 20.5MB，别跟成图抓取叠在一起。
+                let keepBackdrop = !(selectorRef?.backdropFloatingWindows.isEmpty ?? true)
+                selectorRef?.finish(keepBackdrop: keepBackdrop)
                 selectorRef?.delegate?.regionSelector(selectorRef!, didConfirmRegion: rect, displayID: displayID)
             }
         }

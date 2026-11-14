@@ -394,11 +394,23 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func captureAndRoute(displayID: CGDirectDisplayID, region: CGRect?) async {
+    /// - Parameter backdrop: 浮窗兜底（1.0.37）。非 nil 就直接用它，不再重新抓帧 ——
+    ///   菜单 / 弹出面板会在"用户点确认"这一下自己关掉，重新抓到的画面里没有它们。
+    ///   只在"底图里的浮窗跟选区相交"时才会传进来，见 `didConfirmRegion`。
+    /// - Parameter backdropFull: 同一帧的整屏底图（给"随时把截图框拉大"用）。
+    private func captureAndRoute(displayID: CGDirectDisplayID, region: CGRect?,
+                                 backdrop: CGImage? = nil,
+                                 backdropFull: CGImage? = nil) async {
         do {
             var image: CGImage
             if let region {
-                image = try await ScreenCapture.captureRegion(displayID: displayID, rect: region)
+                if let backdrop {
+                    image = backdrop
+                    NSLog("[BoxShot] 区域截图走底图兜底（选区里有浮窗）%d×%d",
+                          backdrop.width, backdrop.height)
+                } else {
+                    image = try await ScreenCapture.captureRegion(displayID: displayID, rect: region)
+                }
                 lastRegionShot = (region, displayID)
             } else {
                 image = try await ScreenCapture.captureDisplay(displayID)
@@ -422,7 +434,11 @@ final class AppModel: ObservableObject {
             // 自己的浮层，内容也可能已经变了）。没拿到也不影响主流程，只是不能扩。
             var fullDisplay: OverlayEditorController.FullDisplay?
             if let region, let frame {
-                if let full = try? await ScreenCapture.captureDisplay(displayID) {
+                // 浮窗兜底时**沿用同一帧底图**：重新抓一帧的话浮窗早就没了，
+                // 用户把截图框拉大就会发现浮窗又消失了。
+                var full = backdropFull
+                if full == nil { full = try? await ScreenCapture.captureDisplay(displayID) }
+                if let full {
                     fullDisplay = OverlayEditorController.FullDisplay(
                         image: full,
                         frameAppKit: ScreenCapture.appKitFrame(
@@ -903,8 +919,12 @@ extension AppModel: RegionSelectionDelegate {
     func regionSelector(_ selector: RegionSelector, didConfirmRegion rect: CGRect, displayID: CGDirectDisplayID) {
         switch regionMode {
         case .capture:
+            // 浮窗兜底：底图里有浮窗、且跟这次选区相交 → 用底图裁。
+            let backdrop = backdropCropForFloating(for: selector, region: rect, displayID: displayID)
+            let backdropFull = backdrop == nil ? nil : selector.backdropImage
             Task { @MainActor in
-                await self.captureAndRoute(displayID: displayID, region: rect)
+                await self.captureAndRoute(displayID: displayID, region: rect,
+                                           backdrop: backdrop, backdropFull: backdropFull)
             }
         case .record:
             regionMode = .capture
@@ -990,6 +1010,27 @@ extension AppModel: RegionSelectionDelegate {
         // 🔴 推迟一轮 runloop：这次取消是从遮罩自己的 keyDown 里调进来的，
         // 当场把 selector 析构掉，等于在自己的方法栈上自杀。
         releaseSelector(selector)
+    }
+
+    /// 浮窗兜底（1.0.37）：底图里如果有跟选区相交的浮窗，就从**底图**裁这一块。
+    ///
+    /// 起因：用户报「BoxMouse 那种弹出面板 / BoxWallpaper 的菜单截不到」。
+    /// 遮罩是能盖住它们的（我们 `.screenSaver` 1000 层，它们 25 / 101 层），
+    /// 但确认那一下：
+    ///   · NSMenu 是 modal 跟踪循环，任何输入都让它先收起；
+    ///   · 自定义非激活面板多半注册了"点外部就收"的全局监听；
+    /// 于是 `captureRegion` 重新抓到的那一帧里它们已经没了。
+    /// 底图是**上遮罩之前**抓的，那一刻它们还在 —— 裁出来正是用户框选时看到的画面。
+    ///
+    /// 只在这个条件下才切换：底图里的浮窗与选区**相交**。不相交就照旧走实时抓帧，
+    /// 免得为了一个屏幕角落的小 HUD 把整张图都换成 100ms 前的画面。
+    private func backdropCropForFloating(for selector: RegionSelector, region: CGRect,
+                                         displayID: CGDirectDisplayID) -> CGImage? {
+        let floating = selector.backdropFloatingWindows
+        guard !floating.isEmpty else { return nil }
+        let globalRect = ScreenCapture.globalTopLeftRect(fromDisplayLocal: region, displayID: displayID)
+        guard floating.contains(where: { $0.frame.intersects(globalRect) }) else { return nil }
+        return selector.cropBackdrop(globalRect: globalRect)
     }
 
     /// 延后清掉选区遮罩的强引用（原因见上）

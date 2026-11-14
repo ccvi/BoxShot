@@ -630,6 +630,30 @@ enum SelfTest {
                   String(HelpMarkup.inline("未闭合的 **星号").characters) == "未闭合的 **星号")
         }
 
+        // ── 浮窗探测（区域截图的浮窗兜底，1.0.37） ──
+        // 判据错了会走两个极端：全判真 → 每张截图都变成 100ms 前的底图；
+        // 全判假 → 菜单 / 弹出面板继续截不到。所以每条边界都钉住。
+        do {
+            let me: Int32 = 4242
+            func cand(_ layer: Int, _ owner: String = "BoxMouse",
+                      _ w: CGFloat = 300, _ h: CGFloat = 400, _ pid: Int32? = 999) -> Bool {
+                ScreenCapture.isFloatingCandidate(layer: layer, ownerName: owner,
+                                                  width: w, height: h,
+                                                  ownerPID: pid, ownPID: me)
+            }
+            check("浮窗：普通窗口层（0）不算", !cand(0))
+            check("浮窗：弹出面板层（statusBar 25）算", cand(25))
+            check("浮窗：菜单层（popUpMenu 101）算", cand(101))
+            check("浮窗：屏保层（1000）不算", !cand(1000))
+            check("浮窗：负层（桌面图标）不算", !cand(-2147483601))
+            check("浮窗：太小（光标 / 指示器）不算", !cand(25, "BoxMouse", 12, 12))
+            check("浮窗：自己的浮层排除", !cand(25, "BoxShot", 300, 400, me))
+            check("浮窗：窗口 Server / Dock / 控制中心永久在屏，不算",
+                  !cand(24, "Window Server") && !cand(20, "Dock")
+                    && !cand(25, "控制中心") && !cand(25, "通知中心"))
+            check("浮窗：没有 pid 信息按外来看", cand(25, "BoxMouse", 300, 400, nil))
+        }
+
         // ── OCR 行聚类 ──
         do {
             let observations = [

@@ -93,6 +93,64 @@ enum ScreenCapture {
         return result
     }
 
+    // ── 浮窗探测（区域截图的"浮窗兜底"用，1.0.37） ──
+
+    /// 系统常驻 UI 的属主名：它们永远是"非 0 层"，永远在屏上，
+    /// 拿它们当"有浮窗"的证据等于每次截图都判真。
+    private static let systemFloatingOwners: Set<String> = [
+        "Window Server", "WindowServer", "Dock", "程序坞", "SystemUIServer",
+        "控制中心", "Control Center", "通知中心", "Notification Center",
+        "Spotlight", "访达工具栏", "TextInputMenuAgent", "UniversalControl"
+    ]
+
+    /// 这条窗口记录算不算"会被截图弄丢的浮窗"。
+    ///
+    /// 判据（每一条都有来由）：
+    /// - `layer == 0` → 普通窗口，走正常链路，不算浮窗；
+    /// - `layer >= 500` → 屏保 / 系统遮罩（我们的遮罩是 1000），不算；
+    /// - 尺寸 < 40×24 → 光标 / 小指示器，不值得为它多抓一张底图；
+    /// - 自己的进程 → 我们自己的浮层，排除；
+    /// - 系统常驻 UI 属主 → 见上面的名单。
+    ///
+    /// 纯函数，自检直接喂数字。
+    static func isFloatingCandidate(layer: Int, ownerName: String,
+                                    width: CGFloat, height: CGFloat,
+                                    ownerPID: Int32?, ownPID: Int32) -> Bool {
+        guard layer > 0, layer < 500 else { return false }
+        guard width >= 40, height >= 24 else { return false }
+        if let ownerPID, ownerPID == ownPID { return false }
+        return !systemFloatingOwners.contains(ownerName)
+    }
+
+    /// 屏上的浮窗（菜单 / 弹出面板 / HUD / 输入法候选窗）。
+    ///
+    /// 🔴 为什么要单独枚举：这些窗口不在 layer 0，`onScreenWindows()` 和
+    /// `SCShareableContent.windows` 都查不到它们；而它们偏偏会在"我们上遮罩 /
+    /// 用户点确认"这个瞬间自己关掉（NSMenu 的 modal 跟踪循环、点外部就收的面板）。
+    /// 于是成图里只剩它底下那一层 —— 用户的说法是「这种浮窗截不到」。
+    static func floatingWindowsOnScreen(excludingPID ownPID: Int32 = 0) -> [ScreenWindowInfo] {
+        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]] else { return [] }
+        var result: [ScreenWindowInfo] = []
+        for info in list {
+            guard let layer = info[kCGWindowLayer as String] as? Int,
+                  let windowID = info[kCGWindowNumber as String] as? UInt32,
+                  let bounds = info[kCGWindowBounds as String] as? [String: CGFloat] else { continue }
+            let frame = CGRect(x: bounds["X"] ?? 0, y: bounds["Y"] ?? 0,
+                               width: bounds["Width"] ?? 0, height: bounds["Height"] ?? 0)
+            let owner = info[kCGWindowOwnerName as String] as? String ?? ""
+            let pid = info[kCGWindowOwnerPID as String] as? Int32
+            guard isFloatingCandidate(layer: layer, ownerName: owner,
+                                      width: frame.width, height: frame.height,
+                                      ownerPID: pid, ownPID: ownPID) else { continue }
+            result.append(ScreenWindowInfo(windowID: windowID, frame: frame,
+                                           ownerName: owner,
+                                           title: info[kCGWindowName as String] as? String,
+                                           ownerPID: pid))
+        }
+        return result
+    }
+
     /// 命中测试：返回包含该全局坐标点、且"最靠上"的窗口（排除自己）
     static func topLevelWindow(at globalPoint: CGPoint, excluding: Set<CGWindowID> = []) -> ScreenWindowInfo? {
         onScreenWindows().first { $0.frame.contains(globalPoint) && !excluding.contains($0.windowID) }
