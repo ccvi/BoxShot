@@ -828,11 +828,26 @@ final class RegionSelector: NSObject {
                 return
             }
 
-            // 挖亮选区：先抠洞再画边框
-            ctx.saveGState()
-            ctx.setBlendMode(.clear)
-            ctx.fill(rect)
-            ctx.restoreGState()
+            // 挖亮选区：**在选区里把冻结帧原样重画一遍**，而不是擦成透明。
+            //
+            // 🔴 1.0.37 修：原来这里用 `setBlendMode(.clear)` 挖洞 —— 洞里的像素
+            // alpha=0，漏出来的是**活的桌面**。于是遮罩外围是冻结帧、选区里是实时
+            // 画面，用户拖动时看到"框里还在动"（2026-11-14 反馈：「冻结了，但拖动
+            // 截图框时看到的还是活动的画面」）。视频 / 动画尤其明显。
+            // 现在改成 clip 到选区重画那张底图：选区外压暗、选区内原亮，但**两者
+            // 都是同一帧**，没有任何活的东西透进来。
+            if sourceImage != nil {
+                ctx.saveGState()
+                ctx.clip(to: rect)
+                drawFrozenBackdrop(ctx)
+                ctx.restoreGState()
+            } else {
+                // 底图没拿到（抓失败 / 没授权）才退回挖洞，保证界面仍然可用
+                ctx.saveGState()
+                ctx.setBlendMode(.clear)
+                ctx.fill(rect)
+                ctx.restoreGState()
+            }
 
             ctx.setStrokeColor(NSColor.controlAccentColor.cgColor)
             ctx.setLineWidth(2)
