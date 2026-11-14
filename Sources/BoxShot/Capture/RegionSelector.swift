@@ -71,13 +71,20 @@ final class RegionSelector: NSObject {
     /// 🔴 顺序：**先抓底图，再上遮罩**。
     /// 反过来（先 show 再抓）抓到的是"已经被自己压暗 28%"的画面，放大镜里的
     /// 色值会整体偏暗、拿去做设计全是错的。代价是遮罩晚 ~100ms 出现。
-    /// - Parameter needBackdrop: 即使不开放大镜也要抓底图（窗口点选模式要它兜底，
-    ///   见 `cropBackdrop`）
+    ///
+    /// 🔴 1.0.37 起这张底图**每次都抓、而且直接当遮罩的背景**（冻结帧）：
+    /// 我们的遮罩一出现就得 `NSApp.activate()`，对方应用的菜单 / 弹出面板会立刻
+    /// 关掉（NSMenu 是 modal 跟踪循环，一失活就结束）。如果遮罩画的是"活的桌面"，
+    /// 用户框选时就看不到那个浮窗 —— 只有成图里有（底图兜底），体感是"框了个空气"。
+    /// 改画底图之后：选区阶段看到的就是最后拿到的那一帧，所见即所得。
+    /// macOS 自带的截图能保持浮窗不消失，靠的是系统级 UI 不激活应用 + 事件压过菜单，
+    /// 普通 App 拿不到这两条，只能冻结画面。
+    ///
     /// - Parameter elementPick: 智能元素截取模式（光标一动就命中 AX 元素并高亮，
     ///   单击即确认）。它和窗口点选互斥使用，但**拖动拉框仍然有效** ——
     ///   用户在这个模式下想自己框一块时不该被挡住。
     func begin(highlightWindows: Bool, crosshair: Bool, loupe: Loupe.Config?,
-               needBackdrop: Bool = false, elementPick: Bool = false,
+               elementPick: Bool = false,
                elementNote: String? = nil) {
         guard !isActive else { return }
         guard window == nil else { return }
@@ -91,22 +98,19 @@ final class RegionSelector: NSObject {
         isActive = true
 
         Task { @MainActor in
-            // 先探一眼屏上有没有浮窗（菜单 / 弹出面板 / HUD）。有就必须抓底图 ——
-            // 它们会在遮罩出现或用户点确认的那一刻自己关掉，成图只剩它底下那层。
+            // 顺手记一眼屏上有没有浮窗（菜单 / 弹出面板 / HUD）：确认时据此决定
+            // 成图要不要从底图裁（浮窗在"确认那一下"已经关了）。
             let floating = ScreenCapture.floatingWindowsOnScreen(
                 excludingPID: ProcessInfo.processInfo.processIdentifier)
             self.pendingBackdropFloating = floating
-            var image: CGImage?
-            if loupe?.enabled == true || needBackdrop || !floating.isEmpty {
-                let started = Date()
-                image = try? await ScreenCapture.captureDisplay(self.displayID)
-                // 这张图三个用途：放大镜取像素 / 窗口截图兜底 / 浮窗兜底（1.0.37）
-                NSLog("[BoxShot] 选区底图 %.0fms %@ · 浮窗 %d 个%@",
-                      Date().timeIntervalSince(started) * 1000,
-                      image == nil ? "失败" : "\(image!.width)×\(image!.height)",
-                      floating.count,
-                      floating.isEmpty ? "" : "（" + floating.prefix(2).map(\.ownerName).joined(separator: "/") + "）")
-            }
+            let started = Date()
+            let image = try? await ScreenCapture.captureDisplay(self.displayID)
+            // 这张图四个用途：遮罩背景（冻结帧）/ 放大镜取像素 / 窗口截图兜底 / 浮窗兜底
+            NSLog("[BoxShot] 选区底图 %.0fms %@ · 浮窗 %d 个%@",
+                  Date().timeIntervalSince(started) * 1000,
+                  image == nil ? "失败" : "\(image!.width)×\(image!.height)",
+                  floating.count,
+                  floating.isEmpty ? "" : "（" + floating.prefix(2).map(\.ownerName).joined(separator: "/") + "）")
             // 抓图期间用户按了 Esc / 换了动作 → 直接放弃这次展示
             guard self.isActive, self.window == nil else { return }
             self.present(screen: screen,
@@ -505,11 +509,11 @@ final class RegionSelector: NSObject {
             let selectorRef = selector
             let displayID = self.displayID
             MainActor.assumeIsolated {
-                // 🔴 1.0.37 起**有浮窗时必须保住底图**：菜单 / 弹出面板会在
-                // "用户点确认"这一下自己收掉，重新抓那一帧就只剩它底下那层。
-                // 没有浮窗时照旧当场放掉 20.5MB，别跟成图抓取叠在一起。
-                let keepBackdrop = !(selectorRef?.backdropFloatingWindows.isEmpty ?? true)
-                selectorRef?.finish(keepBackdrop: keepBackdrop)
+                // 🔴 底图现在有两个用途：① 遮罩上画的就是它（冻结帧）；② 成图也从它裁。
+                // 既然用户是"对着这张静止图框的"，成图就必须是同一帧 —— 否则框到的是
+                // 静止画面里那一帧、拿到的却是几百毫秒后的实时帧（视频 / 动画 / 浮窗
+                // 全对不上）。所以确认路径**一律保底图**，释放交给 selector 析构。
+                selectorRef?.finish(keepBackdrop: true)
                 selectorRef?.delegate?.regionSelector(selectorRef!, didConfirmRegion: rect, displayID: displayID)
             }
         }
@@ -772,7 +776,28 @@ final class RegionSelector: NSObject {
             drawCopiedHint(ctx)
         }
 
+        /// 把底图铺满整个遮罩（冻结帧）。
+        ///
+        /// 🔴 视图 `isFlipped == true`（左上原点，和 CGWindowList 一致），而 `CGContext.draw(_:in:)`
+        /// 按"左下原点"解释图像 —— 不翻回来图就是上下颠倒的。顺序不能反：
+        /// 先 translate 再 scale，且必须在这个 save/restore 里画，别污染后续描边。
+        private func drawFrozenBackdrop(_ ctx: CGContext) {
+            guard let image = sourceImage else { return }
+            ctx.saveGState()
+            if isFlipped {
+                ctx.translateBy(x: 0, y: bounds.height)
+                ctx.scaleBy(x: 1, y: -1)
+            }
+            // 2x 底图缩到 1x 视图：.high 让缩放后的文字仍可读（.none 会锯齿）
+            ctx.interpolationQuality = .high
+            ctx.draw(image, in: bounds)
+            ctx.restoreGState()
+        }
+
         private func drawContents(_ ctx: CGContext) {
+            // 冻结帧：先把"上遮罩之前"那一帧整屏图画出来，再压暗。
+            // 没有底图（抓失败 / 没授权）就退回"看穿遮罩看活的桌面"。
+            drawFrozenBackdrop(ctx)
             // 暗幕
             ctx.setFillColor(NSColor.black.withAlphaComponent(0.28).cgColor)
             ctx.fill(bounds)

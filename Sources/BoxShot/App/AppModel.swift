@@ -301,11 +301,7 @@ final class AppModel: ObservableObject {
         selector.begin(highlightWindows: windowPickMode || prefs.value.windowHighlight,
                        crosshair: windowPickMode ? false : prefs.value.showCrosshair,
                        // 窗口模式是"点窗口"，放大镜会正好盖住要点的标题栏，不给
-                       loupe: windowPickMode ? nil : Loupe.Config(prefs.value),
-                       // 但窗口模式**要底图**：瞬态弹窗（Edge 的「扫描 QR 码」这类）
-                       // 会在遮罩弹出的一瞬间自己关掉，那时 SCK 已经查不到它了，
-                       // 只能靠这张"点选那一刻"的整屏图按窗口框裁一块顶上。
-                       needBackdrop: windowPickMode)
+                       loupe: windowPickMode ? nil : Loupe.Config(prefs.value))
     }
 
     /// 诊断用：选区遮罩是不是还开着（--esctest 拿它判断 Esc 到底生效没有）
@@ -833,7 +829,7 @@ final class AppModel: ObservableObject {
         let selector = RegionSelector()
         selector.delegate = self
         regionSelector = selector
-        selector.begin(highlightWindows: true, crosshair: false, loupe: nil, needBackdrop: true)
+        selector.begin(highlightWindows: true, crosshair: false, loupe: nil)
     }
 
     private func showRecordToolbar(displayID: CGDirectDisplayID, region: CGRect?,
@@ -919,8 +915,8 @@ extension AppModel: RegionSelectionDelegate {
     func regionSelector(_ selector: RegionSelector, didConfirmRegion rect: CGRect, displayID: CGDirectDisplayID) {
         switch regionMode {
         case .capture:
-            // 浮窗兜底：底图里有浮窗、且跟这次选区相交 → 用底图裁。
-            let backdrop = backdropCropForFloating(for: selector, region: rect, displayID: displayID)
+            // 冻结帧：遮罩上画的就是底图，成图也从底图裁（同一帧才算所见即所得）
+            let backdrop = backdropCrop(for: selector, region: rect, displayID: displayID)
             let backdropFull = backdrop == nil ? nil : selector.backdropImage
             Task { @MainActor in
                 await self.captureAndRoute(displayID: displayID, region: rect,
@@ -1012,24 +1008,17 @@ extension AppModel: RegionSelectionDelegate {
         releaseSelector(selector)
     }
 
-    /// 浮窗兜底（1.0.37）：底图里如果有跟选区相交的浮窗，就从**底图**裁这一块。
+    /// 从**底图**裁出选区那一块（1.0.37 起区域截图的默认路径）。
     ///
-    /// 起因：用户报「BoxMouse 那种弹出面板 / BoxWallpaper 的菜单截不到」。
-    /// 遮罩是能盖住它们的（我们 `.screenSaver` 1000 层，它们 25 / 101 层），
-    /// 但确认那一下：
-    ///   · NSMenu 是 modal 跟踪循环，任何输入都让它先收起；
-    ///   · 自定义非激活面板多半注册了"点外部就收"的全局监听；
-    /// 于是 `captureRegion` 重新抓到的那一帧里它们已经没了。
-    /// 底图是**上遮罩之前**抓的，那一刻它们还在 —— 裁出来正是用户框选时看到的画面。
-    ///
-    /// 只在这个条件下才切换：底图里的浮窗与选区**相交**。不相交就照旧走实时抓帧，
-    /// 免得为了一个屏幕角落的小 HUD 把整张图都换成 100ms 前的画面。
-    private func backdropCropForFloating(for selector: RegionSelector, region: CGRect,
-                                         displayID: CGDirectDisplayID) -> CGImage? {
-        let floating = selector.backdropFloatingWindows
-        guard !floating.isEmpty else { return nil }
+    /// 为什么不再"确认后重新抓一帧"：
+    ///   · 遮罩画的就是这张底图（冻结帧）—— 用户是照着它框的，成图必须同一帧，
+    ///     否则视频 / 动画 / 浮窗全对不上，是"框了 A 拿到 B"；
+    ///   · 菜单 / 弹出面板在 `NSApp.activate()` 那一瞬间就关了，重新抓帧根本抓不到
+    ///     （用户 2026-11-14 报的就是这个：框的时候浮窗没了，只有成图里有）。
+    /// 底图没拿到（抓失败 / 没授权）才退回实时抓帧，保证仍然能出图。
+    private func backdropCrop(for selector: RegionSelector, region: CGRect,
+                              displayID: CGDirectDisplayID) -> CGImage? {
         let globalRect = ScreenCapture.globalTopLeftRect(fromDisplayLocal: region, displayID: displayID)
-        guard floating.contains(where: { $0.frame.intersects(globalRect) }) else { return nil }
         return selector.cropBackdrop(globalRect: globalRect)
     }
 
